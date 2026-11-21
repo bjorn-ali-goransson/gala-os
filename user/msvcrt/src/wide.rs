@@ -381,23 +381,27 @@ unsafe extern "system" {
     fn FreeEnvironmentStringsW(block: *mut u16) -> i32;
 }
 
-fn build_wide() {
+fn build_wide(wildcard: bool) {
     // SAFETY: the process's command line and an environment block copy
     // (freed below); our own arrays, sized before they are filled.
     unsafe {
         let p = GetCommandLineW();
         let line = core::slice::from_raw_parts(p, wlen(p));
         let mut count = 0usize;
-        crate::split_args(line, |_| count += 1);
+        crate::each_arg(line, wildcard, |_| count += 1);
         let argv = malloc((count + 1) * size_of::<usize>()).cast::<*mut u16>();
         if argv.is_null() {
             return;
         }
         let mut i = 0;
-        crate::split_args(line, |a| {
-            *argv.add(i) = wcopy(a);
-            i += 1;
+        crate::each_arg(line, wildcard, |a| {
+            // The directory can change between the two passes.
+            if i < count {
+                *argv.add(i) = wcopy(a);
+                i += 1;
+            }
         });
+        let count = i;
         *argv.add(count) = null_mut();
         WARGC = count as i32;
         WARGV = argv;
@@ -440,13 +444,13 @@ pub extern "C" fn __wgetmainargs(
     argc: *mut i32,
     argv: *mut *mut *mut u16,
     envp: *mut *mut *mut u16,
-    _wildcard: i32,
+    wildcard: i32,
     _startinfo: *mut c_void,
 ) -> i32 {
     WSTARTUP.with(|| {
         // SAFETY: the runtime's own statics.
         if unsafe { WARGV.is_null() } {
-            build_wide();
+            build_wide(wildcard != 0);
         }
     });
     // SAFETY: the caller's output pointers; the statics are set.

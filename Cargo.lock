@@ -105,6 +105,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent_run_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+ "uia_client",
+]
+
+[[package]]
 name = "agent_test"
 version = "0.1.0"
 dependencies = [

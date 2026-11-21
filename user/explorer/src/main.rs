@@ -295,6 +295,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
 const WM_PAINT: u32 = 0x000f;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_ACTIVATE: u32 = 0x0006;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -618,6 +619,7 @@ impl State {
         s.push_str(&self.current);
         let _ = write!(s, " ({} items)", self.entries.len());
         log(&s);
+        change_ui::report_folder(self);
         true
     }
 
@@ -1496,6 +1498,15 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             0
         }
         WM_ERASEBKGND => 1,
+        WM_ACTIVATE => {
+            // Activated (WA_ACTIVE, WA_CLICKACTIVE): the agent panel learns
+            // the folder this window shows again (it keeps one per window).
+            if wparam & 0xffff != 0 {
+                change_ui::report_folder(state());
+            }
+            // SAFETY: the default handling for our window.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_PAINT => {
             let s = state();
             let mut r = Rect::default();

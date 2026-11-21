@@ -9566,6 +9566,37 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("explorer_agent", "oleaut32.dll", "Windows/System32"),
     ("explorer_agent", "uiautomationcore.dll", "Windows/System32"),
     ("explorer_agent", "comctl32.dll", "Windows/System32"),
+    // The panel's run tool (agent_run_test): File Explorer, which reports
+    // its folder, the panel and the winhttp it asks with, cmd.exe (and
+    // conhost.exe) the steps run in, and busybox.exe in System32, on the
+    // PATH (no tar.exe: its tar compresses).
+    ("agent_run", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("agent_run", "user/bin/explorer.exe", "Windows"),
+    ("agent_run", "user/bin/agent.exe", "Windows/System32"),
+    ("agent_run", "user/bin/cmd.exe", "Windows/System32"),
+    ("agent_run", "user/bin/conhost.exe", "Windows/System32"),
+    ("agent_run", "user/bin/busybox.exe", "Windows/System32"),
+    ("agent_run", "ntdll.dll", "Windows/System32"),
+    ("agent_run", "kernel32.dll", "Windows/System32"),
+    ("agent_run", "msvcrt.dll", "Windows/System32"),
+    ("agent_run", "advapi32.dll", "Windows/System32"),
+    ("agent_run", "bcryptprimitives.dll", "Windows/System32"),
+    ("agent_run", "user32.dll", "Windows/System32"),
+    ("agent_run", "gdi32.dll", "Windows/System32"),
+    ("agent_run", "shell32.dll", "Windows/System32"),
+    ("agent_run", "shlwapi.dll", "Windows/System32"),
+    ("agent_run", "ole32.dll", "Windows/System32"),
+    ("agent_run", "oleaut32.dll", "Windows/System32"),
+    ("agent_run", "uiautomationcore.dll", "Windows/System32"),
+    ("agent_run", "comctl32.dll", "Windows/System32"),
+    ("agent_run", "winhttp.dll", "Windows/System32"),
+    ("agent_run", "ws2_32.dll", "Windows/System32"),
+    ("agent_run", "mswsock.dll", "Windows/System32"),
+    ("agent_run", "secur32.dll", "Windows/System32"),
+    ("agent_run", "schannel.dll", "Windows/System32"),
+    ("agent_run", "crypt32.dll", "Windows/System32"),
+    ("agent_run", "bcrypt.dll", "Windows/System32"),
+    ("agent_run", "ncrypt.dll", "Windows/System32"),
     // "Ask the agent about this process" (ROADMAP TM step 6): Task
     // Manager and the docked panel it hands the process to, nothing else.
     ("taskmgr_agent", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
@@ -9600,6 +9631,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msvcrt_test", "bcryptprimitives.dll", "Windows/System32"),
     ("msvcrt_test", "shell32.dll", "Windows/System32"),
     ("msvcrt_test", "user/bin/msvcrt_test.exe", "gala"),
+    // msvcrt's wildcard arguments (user/glob_test/main.c, mingw with
+    // _dowildcard, as busybox-w32 is built).
+    ("glob_test", "ntdll.dll", "Windows/System32"),
+    ("glob_test", "kernel32.dll", "Windows/System32"),
+    ("glob_test", "msvcrt.dll", "Windows/System32"),
+    ("glob_test", "user/bin/glob_test.exe", "gala"),
     ("busybox", "ntdll.dll", "Windows/System32"),
     ("busybox", "kernel32.dll", "Windows/System32"),
     ("busybox", "ws2_32.dll", "Windows/System32"),
@@ -11262,6 +11299,7 @@ const USER_PROGRAMS: &[&str] = &[
     "agent",
     "agent_test",
     "agent_chat_test",
+    "agent_run_test",
     "taskmgr_agent_test",
     "shasha",
     "shasha_test",
@@ -13628,6 +13666,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "agent",
     "explorer_agent",
     "agent_chat",
+    "agent_run",
     // Task Manager handing a process to the panel (TASKMGR_AGENT_SCREEN).
     "taskmgr_agent",
     // shasha's taskbar, clicked (SHASHA_SCREEN).
@@ -16662,6 +16701,70 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // The agent panel's `run` tool (ROADMAP LY "Change this program",
+        // step 4; ARCHITECTURE "The agent panel", "Tools"):
+        // agent_run_test makes %TEMP%\agent_run with three files and
+        // opens File Explorer on it, which reports the folder to the
+        // panel (`gala-folder 1`); AGENT_RUN_SCREEN types `compress all
+        // the files` and clicks Send; the relay replays the model's call
+        // of `run` (xtask/agent-recordings, record again with
+        // XTASK_AGENT_RECORD=1), shown as a step; the screen clicks Run;
+        // cmd.exe /c runs it (busybox's tar) in the folder; the result
+        // goes back and the model's final answer is listed; the test
+        // checks the archive with busybox tar. The relay's lines come
+        // last.
+        name: "agent_run",
+        cmdline: "qemu_exit wallpaper=night events=window run=agent_run_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "agent: started docked",
+            "agent: tools: cmd.exe C:\\Windows\\system32\\cmd.exe, busybox C:\\Windows\\System32\\busybox.exe",
+            "agent: docked at 960,0 320x752",
+            "agent_run_test: files made in ",
+            "explorer: navigate ",
+            "\\agent_run (3 items)",
+            "explorer: folder \"",
+            "\" reported to the agent panel (window",
+            "agent: folder of File Explorer (window",
+            "agent: context File Explorer: agent_run",
+            "agent_run_test: folder known",
+            "agent_run_test: Prompt at",
+            "agent_run_test: SendButton at",
+            "agent_run_test: typed",
+            "agent: click SendButton: Send",
+            "agent: request \"compress all the files\"",
+            "agent: request 0 works in ",
+            "agent: asking the model: request 0, ",
+            " bytes, round 1 of 8",
+            "agent: answer 0: ",
+            " call(s): ",
+            "agent: request 0 step 0 (",
+            ") waits for Run or Cancel: ",
+            "agent_run_test: command: ",
+            "agent_run_test: Run at",
+            "agent_run_test: step shown",
+            "agent: click Request0Step0Run: Run(0, 0)",
+            "agent: Run clicked: request 0 step 0",
+            "agent: running request 0 step 0: pid ",
+            "agent: ran request 0 step 0: pid ",
+            " exit code 0, ",
+            "agent: request 0 step 0 ran: exit code 0",
+            "agent: asking the model: request 0, ",
+            " bytes, round 2 of 8",
+            "agent: answer 0: ",
+            "agent_run_test: answered: ",
+            "agent_run_test: archive ",
+            "agent_run_test: listed: ",
+            "agent_run_test: archive checked",
+            "agent_run_test: HideButton at",
+            "agent_run_test: answer listed",
+            "agent: click HideButton: Hide",
+            "agent_run_test: ok",
+            "exited with status 0x00000000",
+            "xtask: agent-relay: ",
+        ],
+    },
+    Scenario {
         // "Make the change" in File Explorer goes to the docked agent
         // panel (ROADMAP LY "Change this program", step 3; ARCHITECTURE
         // "The agent panel"): EXPLORER_AGENT_SCREEN opens Explorer
@@ -17519,6 +17622,24 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=msvcrt_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["msvcrt_test: _putws", "msvcrt_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // msvcrt expands wildcard arguments for a program that asks
+        // (__getmainargs' dowildcard; user/glob_test/main.c, mingw with
+        // _dowildcard set, as busybox-w32 is): the agent panel's `run`
+        // steps hand busybox `tar ... *` through cmd.exe, which expands
+        // nothing.
+        name: "glob_test",
+        cmdline: "qemu_exit run=glob_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "glob_test: files made in ",
+            "glob_test: child argv[6] = sub\\d.gx",
+            "glob_test: child ok",
+            "glob_test: child exit code 0",
+            "glob_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // R9 (a): kernel handover to the same build, twice, with no
@@ -24691,6 +24812,69 @@ const AGENT_CHAT_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// The panel's run tool (scenario `agent_run`): the prompt clicked and
+/// `compress all the files` typed; Send clicked; the step's Run clicked
+/// once the step (a card on the panel's grey, in the request's white
+/// card) shows; the panel's Hide clicked once the archive is checked.
+const AGENT_RUN_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "agent_run_test: Prompt at",
+    steps: &[
+        ScreenStep {
+            after: "agent_run_test: Prompt at",
+            input: &[
+                "click_on agent_run_test: Prompt",
+                "sendkey c",
+                "sendkey o",
+                "sendkey m",
+                "sendkey p",
+                "sendkey r",
+                "sendkey e",
+                "sendkey s",
+                "sendkey s",
+                "sendkey spc",
+                "sendkey a",
+                "sendkey l",
+                "sendkey l",
+                "sendkey spc",
+                "sendkey t",
+                "sendkey h",
+                "sendkey e",
+                "sendkey spc",
+                "sendkey f",
+                "sendkey i",
+                "sendkey l",
+                "sendkey e",
+                "sendkey s",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "agent_run_test: typed",
+            input: &["click_on agent_run_test: SendButton"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 3: the step shown, with the accent's Run button (a step's
+            // pixels are checked after its input: the click is the next
+            // step, once the button is seen).
+            after: "agent_run_test: step shown",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(972, 90, 296, 400, 0xffffff),
+                PixelCheck::AnyIn(972, 90, 296, 500, 0x005fb8),
+            ],
+        },
+        ScreenStep { after: "", input: &["click_on agent_run_test: Run"], pixels: &[] },
+        ScreenStep {
+            // 4: answered: the reply card under the step.
+            after: "agent_run_test: answer listed",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(972, 90, 296, 600, 0xe6eef8)],
+        },
+        ScreenStep { after: "", input: &["click_on agent_run_test: HideButton"], pixels: &[] },
+    ],
+};
+
 /// The hand-off (scenario `explorer_agent`): the panel docked, Win+E
 /// opens Explorer beside it; Alt+Space, Up, Up, Enter opens "Change this
 /// program..."; a request typed and sent with Enter (no element picked:
@@ -24704,7 +24888,10 @@ const EXPLORER_AGENT_SCREEN: ScreenCheck = ScreenCheck {
         ScreenStep {
             // 2: Explorer opened beside the docked panel (inside the work
             // area: its place is in the log), the panel's surface intact.
-            after: "explorer: navigate ::{20D04FE0-3AEA-1069-A2D8-08002B30309D} (",
+            // Alt+Space goes to the active window: wait for Explorer to be
+            // it (the panel's context), not for its navigation, which
+            // comes before its window is shown and activated.
+            after: "agent: context File Explorer: This PC",
             input: &["sendkey alt-spc"],
             pixels: &[PixelCheck::Most(960, 64, 320, 600, 0xf3f3f3, 80)],
         },
@@ -25773,6 +25960,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("explorer_agent", EXPLORER_AGENT_SCREEN),
     ("taskmgr_agent", TASKMGR_AGENT_SCREEN),
     ("agent_chat", AGENT_CHAT_SCREEN),
+    ("agent_run", AGENT_RUN_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("shasha_tray", SHASHA_TRAY_SCREEN),
     ("topmost_test", TOPMOST_SCREEN),
@@ -27153,7 +27341,7 @@ fn add_card(cmd: &mut Command) {
 /// Scenarios whose agent panel reaches the model through `cargo xtask
 /// agent-relay` at 10.0.2.101:80 (`add_agent_relay_net`), replaying
 /// xtask/agent-recordings unless XTASK_AGENT_RECORD=1.
-const AGENT_RELAY_SCENARIOS: &[&str] = &["agent_chat"];
+const AGENT_RELAY_SCENARIOS: &[&str] = &["agent_chat", "agent_run"];
 
 /// A virtio-net card on QEMU's user network whose address 10.0.2.101
 /// port 80 is forwarded, a connection at a time, to `xtask agent-relay`

@@ -302,6 +302,16 @@ pub extern "system" fn CreateDirectoryA(path: *const u8, security: *mut c_void) 
     }
 }
 
+/// SetCurrentDirectoryA: SetCurrentDirectoryW with the path widened.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetCurrentDirectoryA(path: *const u8) -> Bool {
+    let mut buf = [0u16; MAX];
+    match wide(path, &mut buf) {
+        Ok(p) => crate::SetCurrentDirectoryW(p),
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn RemoveDirectoryA(path: *const u8) -> Bool {
     let mut buf = [0u16; MAX];

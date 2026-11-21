@@ -7412,10 +7412,20 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   `agent_chat`; ARCHITECTURE "The agent panel", Chat and Relay); a
   click in the panel activates it (popups take the activation for
   their own press, WM_MOUSEACTIVATE), and gala_ui's inputs have the
-  UIA Value pattern. Next, in order: the `run` tool ("compress all
-  the files" in Explorer) and asking on a hand-off; then the source
-  tools, the state record and the swap, Undo, and the item on Task
-  Manager with its use case as the measure.
+  UIA Value pattern. The `run` tool is in: File Explorer reports the
+  folder it shows to the panel (`gala-folder 1`), the model is offered
+  `run` (cmd.exe /c in that folder), each call is a step with the
+  command, folder and explanation that runs only on its Run click
+  (Cancel declines), and the result goes back to the model, at most 8
+  rounds; "compress all the files" makes a tar.gz with busybox's tar,
+  checked by the test (scenario `agent_run`; ARCHITECTURE "The agent
+  panel", Tools). It needed msvcrt to expand wildcard arguments
+  (`glob_test`). Open: a running step cannot be stopped from the panel
+  (its wait has no end but the command's), and running in a Linux
+  distribution's folder is refused. Next, in order: asking on a
+  hand-off; then the source tools, the state record and the swap,
+  Undo, and the item on Task Manager with its use case as the
+  measure.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
   kernel ELF's symbols, the target port), on a boot or on a snapshot's

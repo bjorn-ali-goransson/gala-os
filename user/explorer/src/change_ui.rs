@@ -25,7 +25,22 @@ unsafe extern "system" {
     fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd;
     fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
     fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
+    fn SendMessageTimeoutW(
+        hwnd: Hwnd,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+        flags: u32,
+        ms: u32,
+        result: *mut usize,
+    ) -> isize;
 }
+
+/// SendMessageTimeoutW's SMTO_ABORTIFHUNG, and how long a folder's report
+/// may wait for a panel that is not hung (ms): the report is a courtesy,
+/// never a reason for the window to stall.
+const SMTO_ABORTIFHUNG: u32 = 2;
+const REPORT_MS: u32 = 2000;
 
 /// COPYDATASTRUCT.
 #[repr(C)]
@@ -80,6 +95,64 @@ fn hand_off(s: &State, c: &Change) -> bool {
     );
     log(&l);
     taken != 0
+}
+
+/// The folder this window shows goes to the docked agent panel
+/// (`agent::handoff::Folder`, the working folder of a request sent while
+/// this window is its context): sent on each navigation and when the
+/// window is activated. Logged: reported, not taken, or no panel.
+pub fn report_folder(s: &State) {
+    use agent::handoff::{self, Folder};
+    if s.hwnd.is_null() {
+        return;
+    }
+    let path = s.current_path.clone().unwrap_or_default();
+    let panel = find_panel();
+    if panel.is_null() {
+        let mut l = String::new();
+        let _ = write!(l, "folder {path:?}: no agent panel to report it to");
+        log(&l);
+        return;
+    }
+    let mut t = [0u16; 256];
+    // SAFETY: our window; a buffer of its size.
+    let n = unsafe { GetWindowTextW(s.hwnd, t.as_mut_ptr(), t.len() as i32) };
+    let f = Folder {
+        program: String::from("File Explorer"),
+        title: String::from_utf16_lossy(&t[..n.clamp(0, 256) as usize]),
+        window: s.hwnd as u64,
+        path,
+    };
+    let bytes = handoff::encode_folder(&f);
+    let cds = CopyData { kind: handoff::KIND, size: bytes.len() as u32, data: bytes.as_ptr() };
+    let mut taken = 0usize;
+    // SAFETY: the panel's window; the structure and its bytes live across
+    // the call (user32 copies them to the panel's process); a result to
+    // fill.
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            panel,
+            0x004a,
+            s.hwnd as usize,
+            &cds as *const _ as isize,
+            SMTO_ABORTIFHUNG,
+            REPORT_MS,
+            &mut taken,
+        )
+    };
+    let mut l = String::new();
+    let _ = write!(
+        l,
+        "folder {:?} {} the agent panel (window {:#x})",
+        f.path,
+        match (sent != 0, taken != 0) {
+            (true, true) => "reported to",
+            (true, false) => "not taken by",
+            (false, _) => "not delivered (hung or timed out) to",
+        },
+        panel as usize
+    );
+    log(&l);
 }
 
 /// The window menu gets "Change this program..." and a separator before

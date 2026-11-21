@@ -29,6 +29,16 @@
 //!   over winhttp, loaded on the first ask (a panel that is never asked
 //!   needs no network); the reply comes back to the window as
 //!   WM_APP_ANSWER (wParam the request, lParam the boxed `Reply`).
+//! - **Folders**: File Explorer's hand-off of the folder its window shows
+//!   (`handoff::Folder`), kept by window: the working folder of a request
+//!   sent while that window is the context.
+//! - **Running**: a step the user clicked Run on runs on a worker thread
+//!   (`run`): `"<System32>\cmd.exe" /c <command>` in the working folder,
+//!   its standard output and error one pipe read to the end (the first
+//!   `chat::MAX_OUTPUT` bytes kept, the rest counted), then its exit
+//!   code; the result comes back as WM_APP_RAN. What is due after a
+//!   message (`Panel::take_due`: a call of the model, a command) is
+//!   started from `update`.
 //!
 //! The view and what a message does to it are the library (`agent`);
 //! this file does what is outside it. The window is placed from the
@@ -37,13 +47,19 @@
 //!
 //! Observability: each line on standard output (`agent: ...`, the serial
 //! log for a program the desktop starts): the start and the remembered
-//! state, every placement with its rectangle, every context, every
+//! state, the tools found (cmd.exe's path, busybox on the PATH or not),
+//! every placement with its rectangle, every context, every
 //! hand-off (its program, window, text and element, or the process and
 //! the length of its text) or why one was not taken, a process let go
 //! when another program's window is active, every request asked
-//! (`asking the model: request N, B bytes`)
-//! and its answer or why there is none (the winhttp call that failed and
-//! its error, the HTTP status, the relay's message), every message the
+//! (`asking the model: request N, B bytes, round R of 8`) and its answer
+//! (the text, or each call of the tool with its id and arguments) or why
+//! there is none (the winhttp call that failed and its error, the HTTP
+//! status, the relay's message), every folder reported, every request's
+//! working folder or why it has none, every step shown or refused (and
+//! why), every Run and Cancel clicked, every command started (its pid)
+//! and ended (its exit code, the bytes read and kept) or why it could
+//! not run, a request stopped by the limit of rounds, every message the
 //! panel handled (gala_ui's `click HideButton: Hide`), and what failed
 //! (an app bar refused, the state not saved) with its error.
 
@@ -60,7 +76,10 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use agent::{Context, Msg, Panel, Reply, TAB, WIDTH, chat, handoff, program_name};
+use agent::{
+    Answer, Context, Due, Msg, Panel, Ran, Reply, Step, TAB, Tools, WIDTH, Work, chat, handoff,
+    program_name,
+};
 use alloc::boxed::Box;
 use gala_ui::{Component, Node, win};
 
@@ -136,6 +155,9 @@ const WM_APP_BAR: u32 = 0x8003;
 /// A request's reply (the worker's): wParam the request, lParam a
 /// `Box<Reply>` the window takes back.
 const WM_APP_ANSWER: u32 = 0x8004;
+/// A command ended (the runner's): lParam a `Box<RunJob>` with its
+/// result, which the window takes back.
+const WM_APP_RAN: u32 = 0x8005;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -156,7 +178,82 @@ unsafe extern "system" {
     fn GetLastError() -> u32;
     fn LoadLibraryW(name: *const u16) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
+    fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn GetFileAttributesW(path: *const u16) -> u32;
+    fn SearchPathW(
+        path: *const u16,
+        file: *const u16,
+        ext: *const u16,
+        size: u32,
+        buf: *mut u16,
+        part: *mut *mut u16,
+    ) -> u32;
+    fn CreatePipe(read: *mut Handle, write: *mut Handle, sa: *const Security, size: u32) -> Bool;
+    fn SetHandleInformation(h: Handle, mask: u32, flags: u32) -> Bool;
+    fn CreateProcessW(
+        app: *const u16,
+        cmd: *mut u16,
+        pa: *const c_void,
+        ta: *const c_void,
+        inherit: Bool,
+        flags: u32,
+        env: *const c_void,
+        dir: *const u16,
+        si: *const StartupInfo,
+        pi: *mut ProcessInfo,
+    ) -> Bool;
+    fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> Bool;
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn GetExitCodeProcess(h: Handle, code: *mut u32) -> Bool;
 }
+
+/// SECURITY_ATTRIBUTES.
+#[repr(C)]
+struct Security {
+    size: u32,
+    descriptor: *const c_void,
+    inherit: Bool,
+}
+
+/// STARTUPINFOW.
+#[repr(C)]
+struct StartupInfo {
+    cb: u32,
+    reserved: *const u16,
+    desktop: *const u16,
+    title: *const u16,
+    x: u32,
+    y: u32,
+    x_size: u32,
+    y_size: u32,
+    x_chars: u32,
+    y_chars: u32,
+    fill: u32,
+    flags: u32,
+    show: u16,
+    reserved2_len: u16,
+    reserved2: *const u8,
+    input: Handle,
+    output: Handle,
+    error: Handle,
+}
+
+/// PROCESS_INFORMATION.
+#[repr(C)]
+struct ProcessInfo {
+    process: Handle,
+    thread: Handle,
+    pid: u32,
+    tid: u32,
+}
+
+const HANDLE_FLAG_INHERIT: u32 = 1;
+const STARTF_USESTDHANDLES: u32 = 0x100;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
+const INFINITE: u32 = u32::MAX;
+const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -383,7 +480,7 @@ fn context_of(hwnd: Handle) -> Context {
     if program.is_empty() {
         program = format!("process {pid}");
     }
-    Context { program, title }
+    Context { program, title, window: hwnd as u64 }
 }
 
 extern "system" fn foreground(
@@ -565,7 +662,7 @@ fn call(body: &[u8]) -> Reply {
         }
         reply.truncate(at + read as usize);
     }
-    match (status, chat::answer(&reply)) {
+    match (status, chat::reply(&reply)) {
         (200, a) => a,
         (s, Err(why)) => Err(format!("HTTP {s}: {why}")),
         (s, Ok(_)) => Err(format!("HTTP {s}")),
@@ -578,13 +675,32 @@ struct Job {
     body: String,
 }
 
+/// What a reply said, for the log.
+fn said(r: &Reply) -> String {
+    match r {
+        Ok(chat::Said::Text(t)) => format!("{t:?}"),
+        Ok(chat::Said::Calls { text, calls }) => {
+            let mut s = match text {
+                Some(t) => format!("{t:?} and "),
+                None => String::new(),
+            };
+            s.push_str(&format!("{} call(s):", calls.len()));
+            for c in calls {
+                s.push_str(&format!(" {} {}({})", c.id, c.name, c.arguments));
+            }
+            s
+        }
+        Err(e) => e.clone(),
+    }
+}
+
 extern "system" fn worker(param: *mut c_void) -> u32 {
     // SAFETY: `ask` made it with Box::into_raw and gave it to this thread
     // alone.
     let job = unsafe { Box::from_raw(param.cast::<Job>()) };
     let reply = call(job.body.as_bytes());
     match &reply {
-        Ok(t) => log(&format!("answer {}: {t:?}", job.index)),
+        Ok(_) => log(&format!("answer {}: {}", job.index, said(&reply))),
         Err(e) => log(&format!("no answer {}: {e}", job.index)),
     }
     let reply = Box::into_raw(Box::new(reply));
@@ -597,9 +713,14 @@ extern "system" fn worker(param: *mut c_void) -> u32 {
     0
 }
 
-/// Asks the model for request `index` on a worker thread.
-fn ask(index: usize, body: String) {
-    log(&format!("asking the model: request {index}, {} bytes", body.len()));
+/// Asks the model for request `index` (its `round`th call) on a worker
+/// thread.
+fn ask(index: usize, round: usize, body: String) {
+    log(&format!(
+        "asking the model: request {index}, {} bytes, round {round} of {}",
+        body.len(),
+        agent::ROUNDS
+    ));
     let job = Box::into_raw(Box::new(Job { index, body }));
     // SAFETY: the worker owns the job from here.
     let t = unsafe {
@@ -611,7 +732,7 @@ fn ask(index: usize, body: String) {
         let why = failed("CreateThread");
         log(&format!("no answer {index}: {why}"));
         // The request says why.
-        let reply = Box::into_raw(Box::new(Err::<String, String>(why)));
+        let reply = Box::into_raw(Box::new(Err::<chat::Said, String>(why)));
         // SAFETY: our window; it takes the box back.
         if unsafe { PostMessageW(window(), WM_APP_ANSWER, index, reply as isize) } == 0 {
             // SAFETY: not posted: still ours.
@@ -623,8 +744,260 @@ fn ask(index: usize, body: String) {
     }
 }
 
+// ---- Running a command ----------------------------------------------------
+
+/// A command to run for step `step` of request `index`, and once it
+/// ended (`run_job`), what it gave.
+struct RunJob {
+    index: usize,
+    step: usize,
+    cmd: String,
+    command: String,
+    folder: String,
+    ran: Ran,
+}
+
+/// A handle closed when dropped (kernel32's).
+struct Owned(Handle);
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: a handle this program opened and owns.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+/// Runs `job`'s command and waits for it: `cmd.exe /c <command>` in its
+/// folder, its standard output and error one pipe; the exit code, the
+/// output kept and the bytes read; or why it could not run.
+fn run_job(job: &RunJob) -> Ran {
+    let gone = |why: String| Ran { code: None, output: why, bytes: 0 };
+    let (mut read, mut write) = (core::ptr::null_mut(), core::ptr::null_mut());
+    let sa = Security {
+        size: core::mem::size_of::<Security>() as u32,
+        descriptor: core::ptr::null(),
+        inherit: 1,
+    };
+    // SAFETY: two handles to fill and a filled SECURITY_ATTRIBUTES.
+    if unsafe { CreatePipe(&mut read, &mut write, &sa, 0) } == 0 {
+        return gone(failed("CreatePipe"));
+    }
+    let (read, write) = (Owned(read), Owned(write));
+    // Only the write end goes to the child.
+    // SAFETY: our handle.
+    if unsafe { SetHandleInformation(read.0, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return gone(failed("SetHandleInformation"));
+    }
+    let mut line = wide(&format!("\"{}\" /c {}", job.cmd, job.command));
+    let (app, dir) = (wide(&job.cmd), wide(&job.folder));
+    let si = StartupInfo {
+        cb: core::mem::size_of::<StartupInfo>() as u32,
+        reserved: core::ptr::null(),
+        desktop: core::ptr::null(),
+        title: core::ptr::null(),
+        x: 0,
+        y: 0,
+        x_size: 0,
+        y_size: 0,
+        x_chars: 0,
+        y_chars: 0,
+        fill: 0,
+        flags: STARTF_USESTDHANDLES,
+        show: 0,
+        reserved2_len: 0,
+        reserved2: core::ptr::null(),
+        input: core::ptr::null_mut(),
+        output: write.0,
+        error: write.0,
+    };
+    let mut pi = ProcessInfo {
+        process: core::ptr::null_mut(),
+        thread: core::ptr::null_mut(),
+        pid: 0,
+        tid: 0,
+    };
+    // SAFETY: NUL-terminated strings (the command line writable), filled
+    // structures, live through the call.
+    let made = unsafe {
+        CreateProcessW(
+            app.as_ptr(),
+            line.as_mut_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            1,
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            core::ptr::null(),
+            dir.as_ptr(),
+            &si,
+            &mut pi,
+        )
+    };
+    if made == 0 {
+        return gone(failed("CreateProcessW"));
+    }
+    let (process, _thread) = (Owned(pi.process), Owned(pi.thread));
+    log(&format!(
+        "running request {} step {}: pid {}, {:?} in {}",
+        job.index, job.step, pi.pid, job.command, job.folder
+    ));
+    // Our write end closed, the pipe ends when the child's (and its
+    // children's) do.
+    drop(write);
+    let mut kept = Vec::new();
+    let mut bytes = 0usize;
+    let mut buf = [0u8; 4096];
+    loop {
+        let mut n = 0u32;
+        // SAFETY: a buffer of its size; our read end.
+        let ok = unsafe {
+            ReadFile(read.0, buf.as_mut_ptr(), buf.len() as u32, &mut n, core::ptr::null_mut())
+        };
+        if ok == 0 || n == 0 {
+            // The end (ERROR_BROKEN_PIPE once every writer is gone).
+            break;
+        }
+        let n = n as usize;
+        bytes += n;
+        let room = chat::MAX_OUTPUT.saturating_sub(kept.len());
+        kept.extend_from_slice(&buf[..n.min(room)]);
+    }
+    let mut code = 0u32;
+    // SAFETY: the child's handle; a u32 to fill.
+    let ended = unsafe {
+        WaitForSingleObject(process.0, INFINITE) == 0
+            && GetExitCodeProcess(process.0, &mut code) != 0
+    };
+    if !ended {
+        return gone(failed(&format!("waiting for pid {}", pi.pid)));
+    }
+    log(&format!(
+        "ran request {} step {}: pid {} exit code {code}, {bytes} bytes of output ({} kept)",
+        job.index,
+        job.step,
+        pi.pid,
+        kept.len()
+    ));
+    Ran { code: Some(code), output: String::from_utf8_lossy(&kept).into_owned(), bytes }
+}
+
+extern "system" fn runner(param: *mut c_void) -> u32 {
+    // SAFETY: `run` made it with Box::into_raw and gave it to this thread
+    // alone.
+    let mut job = unsafe { Box::from_raw(param.cast::<RunJob>()) };
+    job.ran = run_job(&job);
+    if job.ran.code.is_none() {
+        log(&format!("request {} step {} not run: {}", job.index, job.step, job.ran.output));
+    }
+    finish(job);
+    0
+}
+
+/// Gives a run's result back to the window.
+fn finish(job: Box<RunJob>) {
+    let job = Box::into_raw(job);
+    // SAFETY: the panel's window; the window takes the box back.
+    if unsafe { PostMessageW(window(), WM_APP_RAN, 0, job as isize) } == 0 {
+        // SAFETY: not posted: still ours.
+        drop(unsafe { Box::from_raw(job) });
+        log(&failed("PostMessageW(WM_APP_RAN)"));
+    }
+}
+
+/// Runs a step's command on a worker thread.
+fn run(index: usize, step: usize, cmd: String, command: String, folder: String) {
+    let ran = Ran { code: None, output: String::new(), bytes: 0 };
+    let job = Box::into_raw(Box::new(RunJob { index, step, cmd, command, folder, ran }));
+    // SAFETY: the runner owns the job from here.
+    let t = unsafe {
+        CreateThread(core::ptr::null_mut(), 0, runner, job.cast(), 0, core::ptr::null_mut())
+    };
+    if t.is_null() {
+        // SAFETY: no thread took it.
+        let mut job = unsafe { Box::from_raw(job) };
+        job.ran.output = failed("CreateThread");
+        log(&format!("request {index} step {step} not run: {}", job.ran.output));
+        finish(job);
+    } else {
+        // SAFETY: the thread's handle, not needed.
+        unsafe { CloseHandle(t) };
+    }
+}
+
+/// What this machine has to run with: cmd.exe in System32, busybox.exe
+/// on the PATH.
+fn tools() -> Tools {
+    let mut dir = [0u16; 260];
+    // SAFETY: a buffer of its size.
+    let n = unsafe { GetSystemDirectoryW(dir.as_mut_ptr(), dir.len() as u32) } as usize;
+    let cmd = (n > 0 && n < dir.len()).then(|| {
+        format!("{}\\cmd.exe", String::from_utf16_lossy(&dir[..n]).trim_end_matches('\\'))
+    });
+    let cmd = cmd.filter(|c| {
+        let w = wide(c);
+        // SAFETY: a NUL-terminated path.
+        let a = unsafe { GetFileAttributesW(w.as_ptr()) };
+        a != INVALID_FILE_ATTRIBUTES && a & FILE_ATTRIBUTE_DIRECTORY == 0
+    });
+    let mut found = [0u16; 260];
+    let name = wide("busybox.exe");
+    // SAFETY: a NUL-terminated name and a buffer of its size.
+    let n = unsafe {
+        SearchPathW(
+            core::ptr::null(),
+            name.as_ptr(),
+            core::ptr::null(),
+            found.len() as u32,
+            found.as_mut_ptr(),
+            core::ptr::null_mut(),
+        )
+    } as usize;
+    let busybox = (n > 0 && n < found.len()).then(|| String::from_utf16_lossy(&found[..n]));
+    log(&format!(
+        "tools: cmd.exe {}, busybox {}",
+        cmd.as_deref().unwrap_or("not installed"),
+        busybox.as_deref().unwrap_or("not on the PATH")
+    ));
+    Tools { cmd, busybox: busybox.is_some() }
+}
+
+/// Where request `r` runs, for the log.
+fn work(r: &agent::Request) -> String {
+    match &r.work {
+        Work::Windows { folder, .. } => format!("works in {folder}"),
+        Work::Linux { distro, path, .. } => format!("works in {path} of {distro} (not run yet)"),
+        Work::Unknown(why) => format!("has no working folder: {why}"),
+    }
+}
+
 struct App {
     panel: Panel,
+}
+
+impl App {
+    /// Logs what `update` made of request `i`: the steps it now has
+    /// beyond `before`, and its end by the limit of rounds.
+    fn log_steps(&self, i: usize, before: usize, failed_before: bool) {
+        let Some(r) = self.panel.requests.get(i) else { return };
+        for (n, c) in r.rounds.iter().flat_map(|round| &round.calls).enumerate().skip(before) {
+            match &c.step {
+                Step::Waiting => log(&format!(
+                    "request {i} step {n} ({}) waits for Run or Cancel: {:?} ({:?})",
+                    c.id, c.command, c.explanation
+                )),
+                Step::Refused(why) => {
+                    log(&format!("request {i} step {n} ({}) refused: {why}", c.id))
+                }
+                _ => {}
+            }
+        }
+        if let Some(Answer::Failed(why)) = &r.answer
+            && !failed_before
+            && r.asked >= agent::ROUNDS
+        {
+            log(&format!("request {i} ended: {why}"));
+        }
+    }
 }
 
 impl Component for App {
@@ -671,10 +1044,52 @@ impl Component for App {
         if let Msg::Send = &msg {
             log(&format!("request {:?}", self.panel.draft));
         }
+        if let Msg::Folder(f) = &msg {
+            if f.path.is_empty() {
+                log(&format!(
+                    "folder of {} (window {:#x}): none (it shows no file-system folder)",
+                    f.program, f.window
+                ));
+            } else {
+                log(&format!("folder of {} (window {:#x}): {}", f.program, f.window, f.path));
+            }
+        }
+        if let Msg::Run(i, n) | Msg::Cancel(i, n) = &msg {
+            let what = if matches!(msg, Msg::Run(..)) { "Run" } else { "Cancel" };
+            log(&format!("{what} clicked: request {i} step {n}"));
+        }
+        if let Msg::Ran(i, n, r) = &msg {
+            match r.code {
+                Some(code) => log(&format!("request {i} step {n} ran: exit code {code}")),
+                None => log(&format!("request {i} step {n} could not run: {}", r.output)),
+            }
+        }
+        // What an answer or a step's end may add to its request.
+        let watched = match &msg {
+            Msg::Answer(i, _) | Msg::Ran(i, ..) | Msg::Cancel(i, _) => Some(*i),
+            _ => None,
+        };
+        let before = watched.and_then(|i| self.panel.requests.get(i)).map(|r| {
+            let calls = r.rounds.iter().map(|round| round.calls.len()).sum::<usize>();
+            (calls, matches!(r.answer, Some(Answer::Failed(_))))
+        });
         let sent = matches!(msg, Msg::Send);
+        let requests = self.panel.requests.len();
         self.panel.update(msg);
-        if sent && let Some((i, body)) = self.panel.asking() {
-            ask(i, body);
+        if sent && self.panel.requests.len() > requests {
+            let i = self.panel.requests.len() - 1;
+            log(&format!("request {i} {}", work(&self.panel.requests[i])));
+        }
+        if let (Some(i), Some((calls, failed))) = (watched, before) {
+            self.log_steps(i, calls, failed);
+        }
+        while let Some(due) = self.panel.take_due() {
+            match due {
+                Due::Ask { index, round, body } => ask(index, round, body),
+                Due::Run { index, step, cmd, command, folder } => {
+                    run(index, step, cmd, command, folder)
+                }
+            }
         }
         if placing {
             HIDDEN.store(self.panel.hidden, Ordering::Release);
@@ -703,6 +1118,7 @@ impl Component for App {
                 match handoff::receive(bytes) {
                     Ok(handoff::Received::Request(h)) => Some(Msg::Handoff(h)),
                     Ok(handoff::Received::About(a)) => Some(Msg::About(a)),
+                    Ok(handoff::Received::Folder(f)) => Some(Msg::Folder(f)),
                     Err(e) => {
                         log(&format!("handoff refused ({} bytes): {e:?}", bytes.len()));
                         None
@@ -713,6 +1129,12 @@ impl Component for App {
                 // SAFETY: the worker's box, posted once to this window.
                 let reply = unsafe { Box::from_raw(lparam as *mut Reply) };
                 Some(Msg::Answer(wparam, *reply))
+            }
+            WM_APP_RAN => {
+                // SAFETY: the runner's box, posted once to this window.
+                let job = unsafe { Box::from_raw(lparam as *mut RunJob) };
+                let RunJob { index, step, ran, .. } = *job;
+                Some(Msg::Ran(index, step, ran))
             }
             WM_APP_CONTEXT => {
                 let c = context_of(wparam as Handle);
@@ -743,7 +1165,7 @@ pub extern "C" fn mainCRTStartup() -> ! {
         hidden: false,
         class: None,
     };
-    let app = App { panel: Panel { hidden, ..Panel::default() } };
+    let app = App { panel: Panel { hidden, tools: tools(), ..Panel::default() } };
     let Some(hwnd) = win::open(app, &options, log) else {
         log("the window could not be made");
         // SAFETY: plain call.

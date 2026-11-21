@@ -264,8 +264,9 @@ fn narrow(wide: &[u16]) -> *mut u8 {
 /// ("Parsing C command-line arguments"): white space separates, double
 /// quotes group, 2n backslashes before a quote become n (and the quote
 /// toggles), 2n+1 become n and a literal quote; other backslashes are
-/// literal. Calls `f` with each argument.
-pub(crate) fn split_args(line: &[u16], mut f: impl FnMut(&[u16])) {
+/// literal. Calls `f` with each argument and whether any of it was
+/// quoted.
+pub(crate) fn split_args(line: &[u16], mut f: impl FnMut(&[u16], bool)) {
     const BS: u16 = b'\\' as u16;
     const QUOTE: u16 = b'"' as u16;
     let mut arg = [0u16; 1024];
@@ -277,7 +278,7 @@ pub(crate) fn split_args(line: &[u16], mut f: impl FnMut(&[u16])) {
         if i == line.len() {
             break;
         }
-        let (mut n, mut quoted) = (0usize, false);
+        let (mut n, mut quoted, mut was_quoted) = (0usize, false, false);
         while i < line.len() {
             let c = line[i];
             if !quoted && (c == b' ' as u16 || c == b'\t' as u16) {
@@ -317,6 +318,7 @@ pub(crate) fn split_args(line: &[u16], mut f: impl FnMut(&[u16])) {
                     continue;
                 }
                 quoted = !quoted;
+                was_quoted = true;
                 i += 1;
                 continue;
             }
@@ -326,11 +328,27 @@ pub(crate) fn split_args(line: &[u16], mut f: impl FnMut(&[u16])) {
             }
             i += 1;
         }
-        f(&arg[..n]);
+        f(&arg[..n], was_quoted);
     }
 }
 
-fn build_args() {
+/// The program's arguments as main gets them: `split_args`, and with
+/// `wildcard` (__getmainargs' dowildcard) each unquoted argument holding
+/// `*` or `?` replaced by the names that match it (files and folders,
+/// without `.` and `..`, in the order the directory lists them, the
+/// folder part of the pattern kept); one that matches nothing stays as
+/// it is ("Expanding wildcard arguments").
+pub(crate) fn each_arg(line: &[u16], wildcard: bool, mut f: impl FnMut(&[u16])) {
+    split_args(line, |a, quoted| {
+        if wildcard && !quoted && a.iter().any(|&c| c == u16::from(b'*') || c == u16::from(b'?')) {
+            wide_more::expand_wildcard(a, &mut f);
+        } else {
+            f(a);
+        }
+    });
+}
+
+fn build_args(wildcard: bool) {
     // SAFETY: the PEB's command line, NUL-terminated, for the process's
     // lifetime.
     let line = unsafe {
@@ -342,17 +360,22 @@ fn build_args() {
         core::slice::from_raw_parts(p, n)
     };
     let mut count = 0usize;
-    split_args(line, |_| count += 1);
+    each_arg(line, wildcard, |_| count += 1);
     let argv = malloc((count + 1) * size_of::<usize>()).cast::<*mut u8>();
     if argv.is_null() {
         return;
     }
     let mut i = 0;
-    split_args(line, |a| {
-        // SAFETY: `count + 1` slots.
-        unsafe { *argv.add(i) = narrow(a) };
-        i += 1;
+    each_arg(line, wildcard, |a| {
+        // The directory can change between the two passes: never more
+        // than the `count + 1` slots.
+        if i < count {
+            // SAFETY: `count + 1` slots.
+            unsafe { *argv.add(i) = narrow(a) };
+            i += 1;
+        }
     });
+    let count = i;
     // SAFETY: as above; the runtime's own statics, set once under STARTUP.
     unsafe {
         *argv.add(count) = null_mut();
@@ -410,13 +433,13 @@ pub extern "C" fn __getmainargs(
     argc: *mut i32,
     argv: *mut *mut *mut u8,
     envp: *mut *mut *mut u8,
-    _wildcard: i32,
+    wildcard: i32,
     _startinfo: *mut c_void,
 ) -> i32 {
     STARTUP.with(|| {
         // SAFETY: the runtime's own statics.
         if unsafe { ARGV.is_null() } {
-            build_args();
+            build_args(wildcard != 0);
             build_environment();
         }
     });

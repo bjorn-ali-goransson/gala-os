@@ -4488,6 +4488,18 @@ ntdll imports.
 `user/msvcrt` (`msvcrt_test`; the 32-bit one `wow64_crt_test`): the C
 runtime of mingw-w64 programs.
 
+- **Arguments**: `__getmainargs` and `__wgetmainargs` split the
+  command line by the documented rules (`split_args`) once per
+  process. With `dowildcard` set (mingw-w64 passes `_dowildcard`;
+  busybox-w32 sets it) an unquoted argument holding `*` or `?` becomes
+  the names that match it (FindFirstFileW: files and folders, without
+  `.` and `..`, in the directory's order), the pattern's folder part
+  kept in front; a quoted argument, or one that matches nothing,
+  stays as it is (`each_arg`, `wide_more::expand_wildcard`; scenario
+  `glob_test`). cmd.exe expands nothing, so `busybox tar ... *` from
+  the agent panel's `run` relies on this. The expansion's buffer is
+  on the heap: msvcrt has no stack probe (`__chkstk`), so a frame
+  stays under a page.
 - **Two architectures**: built for x64 (System32) and for x86
   (SysWOW64, "Plan: WOW64"); what differs is in `x64.rs` and `x86.rs`.
   The `v` functions take a `va_list` (`va.rs`) walked by the
@@ -8734,9 +8746,45 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   purpose when the prompts change, and its diff is read like code.
   Each exchange is a line `xtask: agent-relay: <hash> replayed |
   recorded | not recorded (...)`, added to the end of the serial log.
-- **Not there yet** (ROADMAP): the `run` tool and asking on a
-  hand-off; tools that read more about a process handed to it (its
-  threads, stacks and handles: ROADMAP TM step 1's inspection).
+- **Working folder**: File Explorer reports the folder it shows on
+  each navigation and when its window is activated: WM_COPYDATA of the
+  same kind, form `handoff::encode_folder` (`gala-folder 1`, the
+  program, its window's title, its window (hex), the path, each ended
+  by a NUL), sent with SendMessageTimeoutW (SMTO_ABORTIFHUNG, 2 s: the
+  report never stalls Explorer). The panel keeps the last folder of
+  each window (`MAX_FOLDERS`, the oldest goes); a request works in the
+  folder of the window that is its context when it is sent (`Work`:
+  a Windows folder, a Linux distribution's `\\wsl.localhost\<distro>\...`
+  folder, or why there is none: no report, no file-system folder).
+- **Tools**: at start the panel finds cmd.exe in System32 and whether
+  busybox.exe is on the PATH (`agent: tools: ...`). The body offers
+  one tool, `run` (`command`, `explanation`; `chat::run_description`
+  says where it runs and how: `cmd.exe /c <command>` in the working
+  folder, one program per line since gala's cmd.exe has no `&`, `|`
+  or batch files, busybox's tar and gzip since there is no tar.exe;
+  or why every run is refused: no folder, no cmd.exe, a Linux folder).
+  Each call of a reply (`chat::reply`: text, or calls) is a step in
+  the request's card, `Request{i}Step{n}`: the command, the folder and
+  the model's explanation, with `Run` and `Cancel`; nothing runs until
+  Run is clicked. A run is `cmd.exe /c` with CREATE_NO_WINDOW, its
+  standard output and error on one pipe, waited for on a worker
+  thread; the exit code and at most `chat::MAX_OUTPUT` (16 KiB) of the
+  output go back (the card shows at most `SHOWN`, 600 characters).
+  Cancel gives the model "Cancelled: not run.", a refused run why.
+  Once every call of a round has a result the model is asked again
+  with the calls and their results; a request asks at most `ROUNDS`
+  (8) times and then fails ("stopped after 8 rounds without a final
+  answer"). Busybox's tar gets `*` expanded by msvcrt (cmd.exe expands
+  nothing: "msvcrt", Arguments). Limits: a running
+  step cannot be stopped from the panel (the wait ends with the
+  command), and a Linux folder's runs are refused. Scenario
+  `agent_run` (`user/agent_run_test`, AGENT_RUN_SCREEN): Explorer on a
+  folder of three files, "compress all the files" sent, the step's Run
+  clicked, the archive listed with busybox's tar by the test.
+- **Not there yet** (ROADMAP): asking on a hand-off; running in a
+  Linux distribution's folder; tools that read more about a process
+  handed to it (its threads, stacks and handles: ROADMAP TM step 1's
+  inspection).
 - **Observability**: `agent: started docked` / `started hidden
   (remembered)`, `agent: docked at x,y wxh`, `agent: hidden: the dock
   tab at x,y wxh`, `agent: docked without a strip: ABM_NEW refused`,
@@ -8748,9 +8796,19 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   <name> (pid N, <personality>), B bytes of text`, `agent: no longer
   about <name> (pid N): <program> is active`, `agent: WM_COPYDATA of
   kind 0x.. not taken`,
-  `agent: asking the model: request N, B bytes`, `agent: answer N:
-  "..."`, `agent: no answer N: <why>` (the winhttp call and its error,
-  the HTTP status, the relay's message),
+  `agent: asking the model: request N, B bytes, round R of 8`,
+  `agent: answer N: "..."` or `agent: answer N: K call(s): <id>
+  run(<arguments>)`, `agent: no answer N: <why>` (the winhttp call and
+  its error, the HTTP status, the relay's message), `agent: tools:
+  cmd.exe <path | none>, busybox <path | none>`, `agent: folder of
+  <program> (window 0x..): <path | none (...)>`, `agent: request N
+  works in <folder>`, `agent: request N step S (<id>) waits for Run
+  or Cancel: "<command>" ("<explanation>")` or `... refused: <why>`,
+  `agent: running request N step S: pid P, "<command>" in <folder>`,
+  `agent: ran request N step S: pid P exit code C, B bytes of output
+  (K kept)`, and Explorer's `explorer: folder "<path>" reported to |
+  not taken by | not delivered (hung or timed out) to the agent panel
+  (window 0x..)` or `...: no agent panel to report it to`,
   `agent: the state is not saved: ...`, `agent: no context:
   SetWinEventHook failed`, `agent: panic: ...` and `agent: ended`.
 
@@ -15798,6 +15856,13 @@ explorer`; `main.rs` the window's program), shasha (Win+E), `nt::desktop` (the s
   the window. `change_ui.rs` lays it out with gdi32 (`gala_ui::win::Gdi`),
   paints it and routes clicks through `gala_ui::click` to the flow,
   logging `explorer: change: click <id>`.
+- **The folder for the agent panel**: on each navigation and when its
+  window is activated, Explorer reports the folder it shows to the
+  docked panel (`change_ui::report_folder`, "The agent panel", Working
+  folder), so a request typed in the panel while Explorer is its
+  context runs its steps there. Logged `explorer: folder "<path>"
+  reported to the agent panel (window 0x..)` (or not taken, not
+  delivered, no panel).
 - **Win+E** (the shell's key: shasha, "The user-mode shell"): shasha
   starts `%SystemRoot%\explorer.exe` (logged `shasha: Win+E: start File
   Explorer (<path>): pid <p>`); no other program sees the E. With no

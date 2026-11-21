@@ -569,6 +569,58 @@ fn fill(out: *mut WFindData64, d: &FindData) {
     }
 }
 
+/// The names matching the wildcard argument `pattern` (crate::each_arg),
+/// each with the pattern's folder part in front, or `pattern` itself
+/// when nothing matches.
+pub(crate) fn expand_wildcard(pattern: &[u16], f: &mut impl FnMut(&[u16])) {
+    const MAX: usize = 1024;
+    let is_sep = |c: u16| c == u16::from(b'\\') || c == u16::from(b'/') || c == u16::from(b':');
+    if pattern.len() >= MAX {
+        f(pattern);
+        return;
+    }
+    // One buffer on the heap (msvcrt has no stack probe: frames stay
+    // under a page): the pattern, NUL-terminated, until FindFirstFileW
+    // has read it; then the folder part and each name.
+    const LEN: usize = MAX + 260;
+    let p = crate::heap::malloc(LEN * 2).cast::<u16>();
+    if p.is_null() {
+        f(pattern);
+        return;
+    }
+    // SAFETY: LEN u16s, ours until the free below.
+    let buf = unsafe { core::slice::from_raw_parts_mut(p, LEN) };
+    buf.fill(0);
+    buf[..pattern.len()].copy_from_slice(pattern);
+    let folder = pattern.iter().rposition(|&c| is_sep(c)).map_or(0, |i| i + 1);
+    // SAFETY: zeroed is a valid FindData; a NUL-terminated pattern.
+    let mut d: FindData = unsafe { core::mem::zeroed() };
+    let h = unsafe { FindFirstFileW(buf.as_ptr(), &mut d) };
+    let mut matched = false;
+    if h != INVALID_HANDLE {
+        loop {
+            let len = d.name.iter().position(|&c| c == 0).unwrap_or(d.name.len());
+            let name = &d.name[..len];
+            let dots = name == [u16::from(b'.')] || name == [u16::from(b'.'), u16::from(b'.')];
+            if !dots {
+                buf[folder..folder + len].copy_from_slice(name);
+                f(&buf[..folder + len]);
+                matched = true;
+            }
+            // SAFETY: the search handle; our FindData.
+            if unsafe { FindNextFileW(h, &mut d) } == 0 {
+                break;
+            }
+        }
+        // SAFETY: the search handle, closed once.
+        unsafe { FindClose(h) };
+    }
+    crate::heap::free(p.cast());
+    if !matched {
+        f(pattern);
+    }
+}
+
 /// _wfindfirst64: a search handle (-1 and ENOENT when nothing matches).
 #[unsafe(no_mangle)]
 pub extern "C" fn _wfindfirst64(pattern: *const u16, out: *mut WFindData64) -> isize {

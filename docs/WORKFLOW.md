@@ -566,17 +566,24 @@ VMs have no network card unless the scenario is in `NET_SCENARIOS`,
   files (ssh's key copy and `-v` trace, sftp's transfer, the askpass
   script) are per port in `target/net-client/<port>/`, removed after the
   boot. On failure the end of curl's or ssh's `-v` trace is in the log.
-- The agent panel's model calls (`agent_chat`) go to `xtask
+- The agent panel's model calls (`agent_chat`, `agent_run`,
+  `taskmgr_agent`) go to `xtask
   agent-relay` at 10.0.2.101:80 (guestfwd), which replays from
   `xtask/agent-recordings/` and never reaches the network. After a
   change to the panel's prompts the run fails with the relay's `not
   recorded` line (the request's hash, and the recorded one nearest to
   it with the byte where they part); record again with
-  `XTASK_AGENT_RECORD=1 cargo xtask boot-test 'agent_chat$'` in an
+  `XTASK_AGENT_RECORD=1 cargo xtask boot-test '<scenario>$'` in an
   environment whose proxy adds the API key (the relay sends the
   placeholder `proxy-injected`), read the new recording's diff and
   commit it, removing the stale one. The relay's lines are added at
-  the end of the serial log, after the guest's.
+  the end of the serial log, after the guest's. A key the API refuses
+  (expired) shows as `agent: no answer N: HTTP 502: ...` with the
+  API's message: a new key goes into the environment's network
+  secrets, never into a file. A recorded answer is what the model did
+  that time: when a recording shows a gala gap (`agent_run`'s first
+  recording had busybox's tar given a literal `*`), fix the gap and
+  record again rather than steering the prompt around it.
 - A guest that only connects out (`office_install` fetching from
   Microsoft's CDN) is a net scenario with `NetClient::Outbound`: the card
   and QEMU's NAT to the host's network, no client run.
