@@ -7604,14 +7604,58 @@ Each entry: what, why it matters, the structural fix, the owning item.
   said `thread 9 (sh) has been in the kernel for 20 s without blocking
   or reaching user mode (CPU 1, rip 0xffffffff8030b608)`. The flight
   recorder's last records are that process's `read` calls, one every
-  3 ms or so, to the end of the run. A kernel thread that does not
-  block for 20 s is the defect, whatever the shell meant to read; the
-  host was loaded at the time (load 8.11 on 4 CPUs, 40.4 s of the run
-  waiting for a host CPU), which is why it was seen there and not
-  locally, but a loaded host only makes the spin visible. Where to
-  start: that `rip` against the kernel's map, and what the `read`
-  answers in the loop -- a pipe whose writer is gone, answering 0
-  forever, would do it.
+  3 ms or so, to the end of the run. **That watchdog line was the
+  instrument's own fault**: the Linux dispatcher credited no progress
+  when a call ended, so a thread whose work is nearly all kernel time
+  -- and a `read` every 3 ms is a call ending every 3 ms -- was
+  reported as stuck, because the only other thing that counted was a
+  timer tick landing in user mode. A finished Linux call is progress
+  now (OBSERVABILITY "Hang watchdog"), and a watchdog report fails its
+  run, so a report here would be real. What is still unexplained is the
+  timeout itself, 300 s with both CPUs idle: the host was loaded (load
+  8.11 on 4 CPUs, 40.4 s of the run waiting for a host CPU), and what
+  the `read` answers in that loop -- a pipe whose writer is gone,
+  answering 0 forever -- is where to start.
+- **`arm_lx_gimp` failed its screen check once on CI** (shard 5; not a
+  timeout, and the same false watchdog report as `arm_lx_xdesktop`
+  above): the line named `thread 4294967304 (sh)`, which is
+  `0x1_0000_0008`, scheduler slot 8 generation 1, which the thread dump
+  gives as `pid 20 tid 24 (gimp-3.2)` -- the scheduler's name is the
+  shell's because an `execve` does not rename the thread. The flight
+  ring held that `execve` at 3.357 s and nothing until the watchdog's
+  mark at 23.368 s, an `execve` jumping to the new image and recording
+  no `syscall-done`, so gimp's loading of its libraries looked like a
+  thread making no progress. At 62 s the thread dump had gimp in user
+  mode (rip `0x7ffffdb211f0`), alive and running when the check gave
+  up: what is left is slowness on a loaded host, not a hang. Reading it
+  cost two wrong turns, both of them the instruments': the log's
+  addresses were symbolized against the x86-64 kernel (fixed,
+  OBSERVABILITY "Symbolized backtraces") and a Linux thread's dump
+  names no system call (below).
+- **A starved vCPU cannot be told from one with interrupts off**
+  (open): the hang watchdog's CPU report (`watchdog: CPU N has taken no
+  timer interrupt for 5 s`) is the one of its two that cannot fail a
+  run. Both now count the guest's own timer ticks rather than the TSC,
+  which settles a pause of the whole machine (`virtio_gpu_reset`
+  reported a CPU stuck over a pause of QEMU's own) and every thread
+  report; what is left is one vCPU the host does not run while its
+  sibling does, which takes no timer interrupt for exactly the reason a
+  CPU spinning with interrupts off does not. The guest would have to be
+  told how much host time it was given -- KVM's steal-time page, which
+  gala does not read -- and then the report could fail a run like the
+  thread's (OBSERVABILITY "Hang watchdog", `xtask::WATCHDOG_REPORT`).
+- **A Linux thread's state dump names no system call** (open): the NT
+  thread lines say `in a system call false`, with no call name, no
+  arguments, no wait object and no handle detail, for every Linux
+  thread, because `lx/dispatch.rs` never calls
+  `nt::thread::set_in_syscall` and the detail those lines print is the
+  NT path's (`syscalls::service_name`, the handle tables, the keyed
+  events). A thread in the middle of a `read` therefore reads as a
+  thread doing nothing, which is how `arm_lx_gimp` above was misread
+  twice. The fix is to record the Linux call number and name it from
+  `lx`'s own table while skipping the NT-only detail; the scheduler's
+  `prepare_wait` caller is the only clue until then (OBSERVABILITY
+  "State dump").
 - **A lock can be marked held by a thread that is not running**
   (`sync::lockdep`): a held-lock slot belongs to the CPU and carries the
   thread that took it, and `none_held_at_switch` panics if a thread

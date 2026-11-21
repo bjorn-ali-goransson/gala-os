@@ -170,6 +170,12 @@ fn dispatch(frame: &mut SyscallFrame) {
         number | crate::flight::LINUX | (tid << 32),
         rax,
     );
+    // A call that ends is progress for the kernel-run watchdog, as on the
+    // NT side (`nt::thread::set_in_syscall`): a program whose work is
+    // nearly all in the kernel, gimp reading its libraries at startup, is
+    // otherwise reported as a thread stuck in the kernel, because the only
+    // other thing that counts is a timer tick that lands in user mode.
+    crate::flight::progress(crate::sched::current().as_usize());
     let Call { process, lx, resume, .. } = call;
     frame.set_result(rax);
     let resume = resume.take();

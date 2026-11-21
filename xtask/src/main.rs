@@ -11412,6 +11412,24 @@ const QEMU_EXIT_SUCCESS: i32 = 33;
 const QEMU_EXIT_FAILURE: i32 = 35;
 /// Logged by the kernel when a finished process's memory is still referenced.
 const LEAK_MARKER: &str = "address space still referenced";
+
+/// The watchdog's report of a thread that stayed in the kernel without
+/// blocking or reaching user mode (kernel/src/flight.rs), which fails the
+/// run that carries it: the count is that thread's own timer ticks, so
+/// neither a machine the host stopped or starved nor a thread waiting for
+/// a CPU can produce one.
+///
+/// Its companion report, a CPU that has taken no timer interrupt, is not
+/// here. The watcher counts its own ticks too, so a pause of the whole
+/// machine is no longer reported, but a single vCPU the host starves
+/// while its sibling runs looks exactly like one spinning with interrupts
+/// off, and the guest cannot yet tell those apart (ROADMAP "Defects
+/// known, not yet fixed"): it stays a warning that the triage shows.
+///
+/// The count is in ticks, so it is in guest time, which is the kernel's
+/// own rate for its timer until the RTC says otherwise
+/// ([`clockcheck::RECALIBRATED`]).
+const WATCHDOG_REPORT: &str = "has been in the kernel for";
 const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Scenarios that run whole language runtimes (a JVM, CoreCLR, CPython
@@ -30559,6 +30577,29 @@ fn judge_log(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: 
     {
         return Err(line.to_string());
     }
+    // A watchdog report is a failure of its own, whatever else the log
+    // holds: a thread of this run spent 20 s of its own run time in the
+    // kernel without blocking or reaching user mode. Only a scenario that
+    // asks for the line in `expect` (the watchdog's own tests) may carry
+    // it.
+    //
+    // Except before a recalibration. The 20 s is the guest's own ticks at
+    // the rate the kernel calibrated, and a recalibration is the kernel
+    // saying that rate was wrong: guest time until then ran 19.99x fast
+    // under `calwrong` (arm_clock, clockcal_recal), and a host busy
+    // during calibration does the same for real (`clock: WRONG` over a
+    // TSC "calibrated at 145.1 MHz"). A report dated before the kernel
+    // knew measures nothing; one after it is in real seconds again.
+    let since_the_clock_was_fixed =
+        serial.lines().position(|l| l.contains(clockcheck::RECALIBRATED)).map_or(0, |i| i + 1);
+    if let Some(line) = serial
+        .lines()
+        .skip(since_the_clock_was_fixed)
+        .find(|l| l.contains(WATCHDOG_REPORT))
+        .filter(|line| !scenario.expect.iter().any(|e| line.contains(e)))
+    {
+        return Err(format!("the watchdog reported: {}", line.trim()));
+    }
     judge_log_inner(scenario, status, timed_out, serial).map_err(|e| {
         if serial.contains(clockcheck::WRONG) {
             format!("{e} (and the guest's clock was wrong: `{}` line)", clockcheck::WRONG)
@@ -30704,12 +30745,24 @@ fn bench(release: bool, windows: Option<&Path>) -> Result {
 /// Whether this run builds release kernels (for finding the ELF).
 static RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The kernel whose symbols a log's addresses belong to. A log names the
+/// architecture it ran on (`firmware: UEFI aarch64`), and an aarch64
+/// run's addresses resolved against the x86-64 kernel name unrelated
+/// functions -- plausible ones, which is worse than none: an
+/// `arm_lx_gimp` state dump read as `net::udp::open` and
+/// `arch::x86_64::timer`, and was taken for a corrupt stack walk.
+fn kernel_elf(release: bool, serial: &str) -> PathBuf {
+    let profile = if release { "release" } else { "debug" };
+    let arm = serial.lines().any(|l| l.contains("firmware:") && l.contains("aarch64"));
+    let target = if arm { KERNEL_TARGET_AARCH64 } else { KERNEL_TARGET };
+    target_dir().join(target).join(profile).join("kernel")
+}
+
 /// The `backtrace:` lines of a kernel log, resolved to function names and
 /// source lines with `llvm-addr2line` or `addr2line` (empty if there are
 /// none or no tool is installed).
 fn symbolize(release: bool, serial: &str) -> String {
-    let profile = if release { "release" } else { "debug" };
-    let elf = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    let elf = kernel_elf(release, serial);
     let mut out = String::new();
     for (what, line) in serial.lines().filter_map(|l| l.split_once("backtrace:")) {
         // Whose backtrace (a state dump has one per CPU).
@@ -32794,6 +32847,56 @@ mod health {
         assert!(found[2].starts_with("shared is flaky"));
         // Only this run's scenarios.
         assert!(history_findings(&h.join("\n"), &["steady"]).is_empty());
+    }
+
+    /// A watchdog report in the log fails the run, however complete its
+    /// expected lines are: it is the kernel saying a thread of this run
+    /// made no progress for 20 s. The watchdog's own scenarios ask for
+    /// the line in `expect` and still pass.
+    #[test]
+    fn a_watchdog_report_fails_a_run_that_did_not_ask_for_one() {
+        let spin = "watchdog: thread 0 (boot) has been in the kernel for 20 s without \
+                    blocking or reaching user mode (CPU 0, rip 0xffffffff80202fef)";
+        let s = Scenario { name: "x", cmdline: "", exit_status: QEMU_EXIT_SUCCESS, expect: &[] };
+        let log = format!("hello: ok\n{spin}\n{BOOT_OK_MARKER}\n");
+        assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, &log).is_err());
+        assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, "hello: ok\n").is_ok());
+        let asked = Scenario {
+            expect: &["has been in the kernel for 20 s without blocking or reaching user mode"],
+            ..s
+        };
+        assert!(judge_log(&asked, Some(QEMU_EXIT_SUCCESS), false, &log).is_ok());
+        // The other report cannot fail a run yet: a vCPU the host starves
+        // while its sibling runs cannot be told from one with interrupts
+        // off.
+        let cpu = "watchdog: CPU 1 has taken no timer interrupt for 5 s";
+        let log = format!("hello: ok\n{cpu}\n{BOOT_OK_MARKER}\n");
+        assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, &log).is_ok());
+        // A report from before the kernel found its calibration wrong is
+        // in guest seconds that were not seconds (`calwrong` calibrates
+        // 20x low on purpose, and a busy host does it for real): the
+        // kernel says so itself, a line later.
+        let recal = "[warn ] clock: recalibrated: TSC 2903.6 MHz (was 145.1 MHz), from HPET";
+        let log = format!("hello: ok\n{spin}\n{recal}\n{BOOT_OK_MARKER}\n");
+        assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, &log).is_ok());
+        // One after it counts: guest time is the real rate from there.
+        let log = format!("hello: ok\n{recal}\n{spin}\n{BOOT_OK_MARKER}\n");
+        assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, &log).is_err());
+    }
+
+    /// Each architecture's addresses are resolved against its own kernel:
+    /// the log says which it ran on.
+    #[test]
+    fn a_logs_addresses_are_symbolized_against_the_kernel_it_ran_on() {
+        let arm = kernel_elf(false, "[info ] firmware: UEFI aarch64\n");
+        assert!(arm.to_string_lossy().contains(KERNEL_TARGET_AARCH64), "{arm:?}");
+        let x64 = kernel_elf(false, "[info ] firmware: UEFI x86_64\n");
+        assert!(x64.to_string_lossy().contains(KERNEL_TARGET), "{x64:?}");
+        // Firmware that is not UEFI still names the architecture.
+        let warned = kernel_elf(false, "[warn ] firmware: Bios (only UEFI aarch64 is supported)");
+        assert!(warned.to_string_lossy().contains(KERNEL_TARGET_AARCH64), "{warned:?}");
+        // A release run uses the release kernel.
+        assert!(kernel_elf(true, "").to_string_lossy().contains("release"));
     }
 
     #[test]
