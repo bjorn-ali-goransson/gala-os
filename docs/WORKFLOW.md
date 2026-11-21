@@ -4433,7 +4433,21 @@ Prometheus or Grafana.
 - **A watchdog line** (`watchdog: CPU N has taken no timer interrupt`)
   is followed by that CPU's own backtrace (`watchdog: CPU N backtrace:`,
   symbolized at the end of the failed log). Watchdogs right after boot
-  on a loaded host: check the clock first.
+  on a loaded host: check the clock first. The other report, a thread
+  that stayed in the kernel for 20 s, fails the run by itself now,
+  whatever else the log holds, because it counts that thread's own timer
+  ticks: no amount of host load can produce one, so a line that is the
+  instrument's own fault is a defect in the instrument and not something
+  to note and pass over (both false reports found so far were bounded
+  kernel work that reported no progress; OBSERVABILITY "Hang
+  watchdog"). A CPU report does not fail a run, for the reason that
+  section gives, and neither does a thread report that comes before a
+  `clock: recalibrated:` line: its 20 s is guest time, which the kernel
+  has just said ran at the wrong rate until then. A thread named in one is named by its scheduler slot, not
+  its process: `thread 4294967304` is `0x1_0000_0008`, slot 8
+  generation 1, and the thread dump gives the pid and the name -- which
+  an `execve` leaves stale, so the name in the watchdog line can be the
+  program's predecessor.
 - **Is the guest's clock right?** Look for `xtask: clock:` lines (xtask
   timed the guest's `uptime_ms=` marks against the host, in a thread of
   their own, each within its poll window: `guest 5118 ms over host

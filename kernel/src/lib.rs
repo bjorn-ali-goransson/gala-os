@@ -1567,6 +1567,16 @@ fn joined(a: &str, separator: u8, b: &str) -> Option<alloc::string::String> {
 /// Prints the file at `volume_path` (`\\`-separated, from the volume
 /// root), or every file below that directory, as `dump:` lines naming it
 /// `shown` (the path as `dump=` gave it, `/`-separated).
+/// One line of a file `dump=` prints. Printing megabytes keeps this
+/// thread in the kernel far longer than the watchdog's 20 s while making
+/// progress all along, so every line says so: without it each long run
+/// ended with `thread 0 (boot) has been in the kernel for 20 s`, which is
+/// how a watchdog stops being read.
+fn dump_line(line: core::fmt::Arguments) {
+    info!("dump: {line}");
+    flight::progress(sched::current().as_usize());
+}
+
 fn dump_node(shown: &str, volume_path: &str, depth: u32) {
     let node = match nt::file::lookup(volume_path) {
         Ok(node) => node,
@@ -1641,12 +1651,12 @@ fn dump_node(shown: &str, volume_path: &str, depth: u32) {
                 }
             }
             let text = line.strip_suffix(&[u16::from(b'\r')]).unwrap_or(&line);
-            info!("dump: {}", Wide(text));
+            dump_line(format_args!("{}", Wide(text)));
         }
     } else {
         for line in data.split(|&b| b == b'\n') {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
-            info!("dump: {}", Lossy(line));
+            dump_line(format_args!("{}", Lossy(line)));
         }
     }
     info!("dump: end {shown}");

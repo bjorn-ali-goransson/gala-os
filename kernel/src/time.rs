@@ -485,7 +485,7 @@ fn on_tick(frame: &mut TrapFrame) {
         if frame.from_user_mode() {
             crate::flight::progress(id.as_usize());
         } else if !idle {
-            crate::flight::on_kernel_tick(id.as_usize(), frame.ip());
+            crate::flight::on_kernel_tick(id.as_usize(), frame.ip(), TICK_HZ);
         }
         // The profiler (idle CPUs ask too: they sample their neighbor).
         if crate::events::enabled(crate::events::Category::Sample) {

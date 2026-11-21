@@ -262,25 +262,25 @@ pub fn dump(_cpus: u64, _max: usize, _print: impl FnMut(core::fmt::Arguments)) {
 // ---- The hang watchdog ----
 
 /// Per CPU: its timer interrupts so far; for the CPU watching it, the
-/// heartbeat it saw last, since when (ns) it has not moved, and whether
-/// that stall was reported.
+/// heartbeat it saw last, at which of the watcher's own ticks it stopped
+/// moving, and whether that stall was reported.
 #[cfg(not(any(test, feature = "hosted")))]
 static HEARTBEAT: [AtomicU64; crate::arch::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
 #[cfg(not(any(test, feature = "hosted")))]
 static SEEN: [[AtomicU64; 3]; crate::arch::smp::MAX_CPUS] =
     [const { [const { AtomicU64::new(0) }; 3] }; crate::arch::smp::MAX_CPUS];
-/// Per CPU: when (ns) it last looked at the CPU it watches.
+/// Per CPU: at which of its own ticks it last looked at the CPU it
+/// watches.
 #[cfg(not(any(test, feature = "hosted")))]
 static LOOKED: [AtomicU64; crate::arch::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
 
 /// Seconds without a timer interrupt before a CPU is reported.
 pub const STUCK_SECONDS: u64 = 5;
-const NS: u64 = 1_000_000_000;
 
-/// What the watcher knows of one CPU: the heartbeat seen, since when it
-/// has not moved (ns), whether that stall was reported.
+/// What the watcher knows of one CPU: the heartbeat seen, at which of the
+/// watcher's own ticks it stopped moving, whether that stall was reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Seen {
     pub beat: u64,
@@ -288,32 +288,39 @@ pub struct Seen {
     pub reported: bool,
 }
 
-/// Looks at a CPU whose heartbeat is `beat` at time `now` (ns, the TSC
-/// clock: timer ticks themselves may come late when the host is busy):
-/// the new view and whether to report it (once per stall, when it has
-/// not moved for STUCK_SECONDS).
-pub fn watch(beat: u64, now: u64, seen: Seen) -> (Seen, bool) {
+/// Looks at a CPU whose heartbeat is `beat` when the watcher's own
+/// heartbeat is `mine`: the new view and whether to report it (once per
+/// stall, when it has not moved for STUCK_SECONDS).
+///
+/// The watcher's own ticks are the clock, not the TSC, because the TSC
+/// runs while the host is not running this machine at all: a pause of the
+/// whole VM (a QEMU monitor command, a host that swaps) leaves every
+/// heartbeat where it was and the TSC seconds ahead, which reads as a
+/// neighbor stuck with interrupts off -- `virtio_gpu_reset` reported one
+/// over a pause of QEMU's own. Ticks the watcher did not take cannot
+/// accuse the CPU it watches.
+pub fn watch(beat: u64, mine: u64, hz: u64, seen: Seen) -> (Seen, bool) {
     if beat != seen.beat {
-        return (Seen { beat, since: now, reported: false }, false);
+        return (Seen { beat, since: mine, reported: false }, false);
     }
-    let stuck = !seen.reported && now.saturating_sub(seen.since) >= STUCK_SECONDS * NS;
+    let stuck = !seen.reported && mine.saturating_sub(seen.since) >= STUCK_SECONDS * hz.max(1);
     (Seen { reported: seen.reported || stuck, ..seen }, stuck)
 }
 
-/// From every CPU's timer interrupt: counts this CPU's heartbeat; about
-/// once a second (by the TSC clock) looks at the next online CPU's and
-/// reports it if it stopped (a CPU spinning with interrupts off: a lock
-/// never released, a loop in an interrupt handler).
+/// From every CPU's timer interrupt: counts this CPU's heartbeat; every
+/// `hz` ticks of its own (a second of the time this CPU was given) looks
+/// at the next online CPU's and reports it if it stopped (a CPU spinning
+/// with interrupts off: a lock never released, a loop in an interrupt
+/// handler).
 #[cfg(not(any(test, feature = "hosted")))]
-pub fn on_tick(_hz: u64) {
+pub fn on_tick(hz: u64) {
     let me = crate::arch::percpu::cpu_index() as usize;
     let Some(beat) = HEARTBEAT.get(me) else { return };
-    beat.fetch_add(1, Ordering::Relaxed);
-    let now = crate::time::raw_monotonic_ns();
-    if now.saturating_sub(LOOKED[me].load(Ordering::Relaxed)) < NS {
+    let mine = beat.fetch_add(1, Ordering::Relaxed) + 1;
+    if mine.saturating_sub(LOOKED[me].load(Ordering::Relaxed)) < hz.max(1) {
         return;
     }
-    LOOKED[me].store(now, Ordering::Relaxed);
+    LOOKED[me].store(mine, Ordering::Relaxed);
     let online = crate::arch::smp::online_mask();
     if online.count_ones() < 2 {
         return;
@@ -328,7 +335,7 @@ pub fn on_tick(_hz: u64) {
         reported: slot[2].load(Ordering::Relaxed) != 0,
     };
     let current = HEARTBEAT[next].load(Ordering::Relaxed);
-    let (seen, report) = watch(current, now, seen);
+    let (seen, report) = watch(current, mine, hz, seen);
     slot[0].store(seen.beat, Ordering::Relaxed);
     slot[1].store(seen.since, Ordering::Relaxed);
     slot[2].store(u64::from(seen.reported), Ordering::Relaxed);
@@ -352,25 +359,31 @@ pub fn on_tick(_hz: u64) {}
 /// preempted does not count as progress).
 pub const KERNEL_RUN_SECONDS: u64 = 20;
 
-/// Whether a thread whose last progress (blocking, user mode) was at
-/// `last` (ns; 0: never seen) and that a tick at `now` finds in the
-/// kernel is reported: the new last-progress time and the verdict
-/// (reported again KERNEL_RUN_SECONDS later if it still has not moved).
-pub fn kernel_run(now: u64, last: u64) -> (u64, bool) {
-    // Never seen, or it blocked since: counted from now.
-    if last == 0 || last == BLOCKED {
-        return (now, false);
-    }
-    if now.saturating_sub(last) >= KERNEL_RUN_SECONDS * NS { (now, true) } else { (last, false) }
+/// Whether a thread that this tick finds in the kernel is reported, from
+/// the ticks that have found it there without progress (`count`; 0: none
+/// yet, BLOCKED: it blocked since) and the tick rate: the new count and
+/// the verdict (reported again KERNEL_RUN_SECONDS later if it still has
+/// not moved).
+///
+/// Ticks that found *this thread* in the kernel, not elapsed time, so
+/// KERNEL_RUN_SECONDS is time the thread itself ran there. The clock
+/// counted two things that are not a thread in a loop: a machine the host
+/// stopped or starved (the TSC runs while no tick arrives), and a thread
+/// that was ready but not running, which is time waiting for a CPU and
+/// not time in the kernel at all.
+pub fn kernel_run(count: u64, hz: u64) -> (u64, bool) {
+    // It blocked since (however long it waited): counted from this tick.
+    let n = if count == BLOCKED { 1 } else { count.saturating_add(1) };
+    if n >= KERNEL_RUN_SECONDS * hz.max(1) { (0, true) } else { (n, false) }
 }
 
-/// Per thread (by id, modulo the table): when it last made progress.
+/// Per thread (by id, modulo the table): the ticks that have found it in
+/// the kernel without progress, or BLOCKED.
 #[cfg(not(any(test, feature = "hosted")))]
 static PROGRESS: [AtomicU64; 4096] = [const { AtomicU64::new(0) }; 4096];
 
-/// A thread's last progress while it is blocked: the first tick that finds
-/// it running again starts its count (a long wait is not time in the
-/// kernel).
+/// A blocked thread's count: the first tick that finds it running again
+/// starts counting afresh (a long wait is not time in the kernel).
 pub const BLOCKED: u64 = u64::MAX;
 
 /// Thread `id` blocks (waits, sleeps): counted afresh when it runs again.
@@ -382,11 +395,12 @@ pub fn blocked(id: usize) {
 #[cfg(any(test, feature = "hosted"))]
 pub fn blocked(_id: usize) {}
 
-/// Thread `id` made progress (returned from a system call, runs user code,
-/// yields).
+/// Thread `id` made progress (a system call ended, it runs user code, it
+/// yields, a line of a long dump was printed): its count starts afresh.
+/// One store, and no clock read, on the system-call path.
 #[cfg(not(any(test, feature = "hosted")))]
 pub fn progress(id: usize) {
-    PROGRESS[id % PROGRESS.len()].store(crate::time::raw_monotonic_ns().max(1), Ordering::Relaxed);
+    PROGRESS[id % PROGRESS.len()].store(0, Ordering::Relaxed);
 }
 
 #[cfg(any(test, feature = "hosted"))]
@@ -394,14 +408,13 @@ pub fn progress(_id: usize) {}
 
 /// From the timer interrupt: thread `id` was found running kernel code
 /// (not idle) at `rip`; one that has neither blocked nor reached user mode
-/// for KERNEL_RUN_SECONDS is reported with its name and this CPU's last
-/// events.
+/// for KERNEL_RUN_SECONDS of its own run time is reported with its name
+/// and this CPU's last events.
 #[cfg(not(any(test, feature = "hosted")))]
-pub fn on_kernel_tick(id: usize, rip: u64) {
+pub fn on_kernel_tick(id: usize, rip: u64, hz: u64) {
     let slot = &PROGRESS[id % PROGRESS.len()];
-    let now = crate::time::raw_monotonic_ns().max(1);
-    let (last, report) = kernel_run(now, slot.load(Ordering::Relaxed));
-    slot.store(last, Ordering::Relaxed);
+    let (count, report) = kernel_run(slot.load(Ordering::Relaxed), hz);
+    slot.store(count, Ordering::Relaxed);
     if report {
         let me = crate::arch::percpu::cpu_index();
         record(Kind::Watchdog, u64::from(me), id as u64);
@@ -415,7 +428,7 @@ pub fn on_kernel_tick(id: usize, rip: u64) {
 }
 
 #[cfg(any(test, feature = "hosted"))]
-pub fn on_kernel_tick(_id: usize, _rip: u64) {}
+pub fn on_kernel_tick(_id: usize, _rip: u64, _hz: u64) {}
 
 #[cfg(test)]
 mod tests {
@@ -541,17 +554,42 @@ mod tests {
         assert_eq!(all[PER_CPU - 1].2, PER_CPU as u64 + 9);
     }
 
+    /// Ticks a second, as the timer interrupt calls these.
+    const HZ: u64 = 1000;
+
     #[test]
     fn a_thread_in_the_kernel_without_progress_is_reported_every_twenty_seconds() {
-        // First seen: no verdict.
-        assert_eq!(kernel_run(5 * NS, 0), (5 * NS, false));
-        // Still within the limit: last progress kept.
-        assert_eq!(kernel_run(24 * NS, 5 * NS), (5 * NS, false));
-        // Blocked since: counted afresh, however long ago.
-        assert_eq!(kernel_run(90 * NS, BLOCKED), (90 * NS, false));
-        // At the limit: reported, counted again from now.
-        assert_eq!(kernel_run(25 * NS, 5 * NS), (25 * NS, true));
-        assert_eq!(kernel_run(30 * NS, 25 * NS), (25 * NS, false));
+        // The first tick that finds it there: no verdict.
+        assert_eq!(kernel_run(0, HZ), (1, false));
+        // Blocked since: counted afresh, however long it waited.
+        assert_eq!(kernel_run(BLOCKED, HZ), (1, false));
+        // Within the limit.
+        assert_eq!(kernel_run(19 * HZ, HZ), (19 * HZ + 1, false));
+        // At the limit: reported, and counted again for the next one.
+        assert_eq!(kernel_run(20 * HZ - 1, HZ), (0, true));
+        // Forty seconds of ticks: two reports, and none before 20 s.
+        let mut count = 0;
+        let mut reports = 0;
+        for _ in 0..40 * HZ {
+            let (c, r) = kernel_run(count, HZ);
+            count = c;
+            reports += usize::from(r);
+        }
+        assert_eq!(reports, 2);
+    }
+
+    /// A machine the host stops or starves takes no ticks while it is
+    /// stopped, so the pause is not time in the kernel: this is what the
+    /// TSC counted and what counting ticks does not.
+    #[test]
+    fn a_pause_of_the_whole_machine_is_not_time_in_the_kernel() {
+        // 19 s of ticks, then the host stops the VM for a minute (no
+        // ticks at all), then one more tick: still under the limit.
+        let mut count = 0;
+        for _ in 0..19 * HZ {
+            count = kernel_run(count, HZ).0;
+        }
+        assert_eq!(kernel_run(count, HZ), (19 * HZ + 1, false));
     }
 
     #[test]
@@ -560,23 +598,38 @@ mod tests {
         let mut reports = 0;
         // Moving: never reported.
         for k in 1..10u64 {
-            let (s, r) = watch(k * 1000, k * NS, seen);
+            let (s, r) = watch(k * 1000, k * HZ, HZ, seen);
             seen = s;
             reports += usize::from(r);
         }
         assert_eq!(reports, 0);
-        // Stopped at 9 s: reported once 5 s later, not again.
+        // Stopped at the watcher's 9th second: reported once 5 s of the
+        // watcher's own ticks later, not again.
         for k in 10..30u64 {
-            let (s, r) = watch(9000, k * NS, seen);
+            let (s, r) = watch(9000, k * HZ, HZ, seen);
             seen = s;
             reports += usize::from(r);
             assert_eq!(r, k == 14);
         }
         assert_eq!(reports, 1);
         // Moving again, then stopping again: reported again.
-        let (s, _) = watch(9001, 30 * NS, seen);
+        let (s, _) = watch(9001, 30 * HZ, HZ, seen);
         seen = s;
-        let (_, r) = watch(9001, 35 * NS, seen);
+        let (_, r) = watch(9001, 35 * HZ, HZ, seen);
         assert!(r);
+    }
+
+    /// The whole machine paused: every heartbeat stands still, the TSC
+    /// runs on, and the watcher takes no ticks either -- so its next look
+    /// is one tick after its last, not five seconds after, and it accuses
+    /// nobody (`virtio_gpu_reset` reported a CPU stuck over a pause of
+    /// QEMU's own).
+    #[test]
+    fn a_pause_of_the_whole_machine_is_not_a_stalled_cpu() {
+        let seen = Seen { beat: 99, since: 0, reported: false };
+        let (seen, report) = watch(100, 10 * HZ, HZ, seen);
+        assert!(!report);
+        let (_, report) = watch(100, 10 * HZ + 1, HZ, seen);
+        assert!(!report);
     }
 }

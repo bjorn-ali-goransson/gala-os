@@ -310,7 +310,7 @@ or a batch of them, instead of one an event's every byte).
 | `image` | the exe and every image view (pid, NT path, base, size) |
 | `thread` | create (start address: the Win32 start routine, TEB, `teb32`: a WOW64 thread's 32-bit TEB, else 0), name (`thread name`: SetThreadDescription's, as NtSetInformationThread ThreadNameInformation sets it), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"machine"`: `"x86"` for a 32-bit process running through WOW64, `"x64"` otherwise, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; `"elevated"`: its primary token is elevated (TokenElevation; the log line ends in `, elevated token`); scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line); `process terminate` (TerminateProcess of another process: `by`, pid, status; with the log line `process: pid B (x.exe) terminates pid P (y.exe) with status S`, so who ended a process is in the log); the task manager's (`nt::tasks`, ARCHITECTURE "The task manager"): `tasks query` (each GalaTasks list: `by`, `nt`, `linux` and `hung` counts; the first query of each caller also a `tasks: pid P (x.exe) lists the processes: ...` line, and each process's first "Not responding" a `tasks: pid P (x.exe) is not responding: ...` line), `tasks end` (End task of a Linux process or distribution: `by`, `what`, pid, `detail` (the signal, or the distribution and how many processes ended), status; always a `tasks: pid P (x.exe) ends ...` line), and `lx signal` for the signal itself; scenario `taskmgr` |
-| `fault` | every user-mode CPU exception, before it is resolved or delivered (`fault`: pid, vector, rip, cr2, error), and the ones handed to the program's own dispatcher once the frame is on its stack (`exception`: pid, tid, `status`, `name` as the crash report names it, `ip`, `address` for an access violation). The second is the only record of an exception a program catches itself, which is what a program that gives up over one of its own leaves behind (scenario `seh_test`) |
+| `fault` | every user-mode CPU exception, before it is resolved or delivered (`fault`: pid, vector, rip, cr2, error), and the ones handed to the program's own dispatcher once the frame is on its stack (`exception`: pid, tid, `status`, `name` as the crash report names it, `ip`, `address` for an access violation). The second is the only record of an exception a program catches itself, which is what a program that gives up over one of its own leaves behind (scenario `seh_test`). Every demand-paged page fault is one of these, so from boot the category spends a run's budget before the program in question starts: arm it at the second the question is about (`events=fault events_match=WINWORD events_from=46`, which showed that Word takes no exception at all before its box, the budget untouched) |
 | `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled: in the kernel by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too, and in user mode by its own tick (exact there, as user mode runs with interrupts on; an NMI landing in user mode records nothing, so user samples never depend on the neighbor's vCPU getting host time, and both kinds come at the same rate); the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts the samples asked of another CPU, written in user mode and in the kernel, lost to a full ring, interrupts off for over 8 sample periods, and those that landed while the tick was writing samples, which are not kept, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads (each with where it starts, `starts at module+offset`, from its `thread create` event's Win32 start address), modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued); Linux memfds: `lx memfd` (pid, fd, name, flags, node) and `lx memfd seal` (pid, fd, seals asked for, errno or 0). Linux AF_UNIX sockets: `lx unix` (pid, fd, op: socketpair, bind, listen, connect, accept with `new_fd` and `peer_pid`, close of a named socket; the name, a path or `@` and an abstract name; errno or 0: a refused bind, listen or connect is here) and `lx unix rights` (pid, fd, what: sent, received, dropped; count). The window station's clipboard: `clipboard` (pid, tid, session, station; op `open`, `open denied` with the holder, `empty` with the previous owner, `set` and `get` with format, kind and size, `get`'s `source` for a synthesized format and `from_pid`, `close` with `changed` and the listeners told, `listener`; ARCHITECTURE "The clipboard"; scenario `clipboard_test`). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
@@ -731,7 +731,14 @@ keep one each: `target/failed/<name>.r<i>.log`), which ends with:
   standard error (`<iso>.qemu.stderr`, e.g. a forward it could not set
   up).
 - **Symbolized backtraces** (panic, state dump, watchdog), each block
-  saying whose backtrace it is.
+  saying whose backtrace it is. The addresses are resolved against the
+  kernel of the architecture the log itself names (`firmware: UEFI
+  aarch64`), not the one the host builds by default: an aarch64 run read
+  against the x86-64 kernel names unrelated functions instead of none,
+  which is worse than no symbols at all -- an `arm_lx_gimp` state dump
+  read as `net::udp::open` and `arch::x86_64::timer`, and was taken for
+  a corrupt stack walk (`xtask::kernel_elf`, unit test
+  `health::a_logs_addresses_are_symbolized_against_the_kernel_it_ran_on`).
 - **A failed screen check's screendumps**:
   `target/failed/<name>.screen<n>.png`, one per step the check reached,
   the screens as it saw them (the same pictures as `<iso>.screen<n>.png`
@@ -802,21 +809,54 @@ callback makes end before the call it was made from (host unit tests in
 
 ### Hang watchdog
 
-- **Stuck CPUs**: every timer interrupt counts its CPU's heartbeat; once
-  a second each CPU looks at the next online one's. One that has not
-  moved for 5 s (interrupts off: a lock never released, a loop in a
-  handler) is reported once with its last flight records, and gets an
-  NMI that prints `watchdog: CPU N kernel rip ...` and `watchdog: CPU N
-  backtrace: ...` (symbolized in the failed log). Scenario `watchdog`
-  (`hangtest` stalls CPU 1).
-- **Threads stuck in the kernel**: each thread's last progress is kept;
-  a tick that finds a thread in kernel code with no progress for 20 s is
-  reported with its name, rip and the CPU's last records, again every
-  20 s while it stays. Progress is returning from a system call, a tick
-  in user mode or a voluntary yield (a polling wait); blocking restarts
-  the count when the thread runs again (a long wait is not time in the
-  kernel); preemption is not progress. Scenario `kernel_watchdog`
-  (`spintest` spins the boot thread 25 s). A kernel thread with nothing
+- **Stuck CPUs**: every timer interrupt counts its CPU's heartbeat; each
+  CPU looks at the next online one's every second of its own run time
+  (its own ticks, not the clock). One whose heartbeat has not moved for
+  5 s of the watcher's ticks (interrupts off: a lock never released, a
+  loop in a handler) is reported once with its last flight records, and
+  gets an NMI that prints `watchdog: CPU N kernel rip ...` and
+  `watchdog: CPU N backtrace: ...` (symbolized in the failed log).
+  Scenario `watchdog` (`hangtest` stalls CPU 1). This one report does
+  **not** fail a run: a vCPU the host starves while its sibling keeps
+  running takes no timer interrupt either, and the guest cannot tell
+  that from interrupts off (ROADMAP "Defects known, not yet fixed").
+  Counting the watcher's ticks does settle the other half of it -- a
+  pause of the whole machine, where the clock ran on and every heartbeat
+  stood still, which is what `virtio_gpu_reset` reported over a pause of
+  QEMU's own.
+- **Threads stuck in the kernel**: each thread's ticks without progress
+  are counted; a thread that 20 s of ticks have found in kernel code
+  with no progress is reported with its name, rip and the CPU's last
+  records, again every 20 s while it stays. **Ticks that found that
+  thread there**, so the 20 s is time the thread itself ran in the
+  kernel: a machine the host stopped or starved takes no ticks, and a
+  thread that is ready but not running is waiting for a CPU, which the
+  clock counted as time in the kernel and this does not. Progress is a
+  system call that ends -- on either personality: the NT side when it
+  leaves the call (`nt::thread::set_in_syscall`), the Linux side where
+  it writes its `syscall-done` record -- a tick in user mode, a
+  voluntary yield (a polling wait), or a line of a file that `dump=`
+  prints; blocking
+  restarts the count when the thread runs again (a long wait is not time
+  in the kernel); preemption is not progress. **Bounded work that
+  reports no progress is a false report, and a false report is worse
+  than none**: the two found so far were the `dump=` of megabytes of
+  logs that ends every `office_word` run (the boot thread, rip
+  `console::print`) and gimp loading its libraries on aarch64 (a Linux
+  thread whose work is nearly all kernel time, before a finished call
+  counted), and both had been read as real hangs -- one of them written
+  down here as expected. This report now fails its boot test whatever
+  else the log holds, unless the scenario asks for the line in `expect`
+  (`judge_log`), which is what counting the thread's own ticks buys:
+  nothing the host does to the machine can produce one. Ticks are guest
+  time, though, which is only as good as the calibration: a report from
+  before the kernel found its rate wrong and recalibrated (`clock:
+  recalibrated:`, after `clock: WRONG`) does not fail the run either,
+  because those 20 s were 1 -- `calwrong` calibrates 20x low on purpose
+  (`arm_clock`, `clockcal_recal`), and a host busy during calibration
+  does it for real. What that leaves blind is a real hang in the seconds
+  before a recalibration, in a run that had one. Scenario
+  `kernel_watchdog` (`spintest` spins the boot thread 25 s). A kernel thread with nothing
   more to do ends (`sched::exit`) rather than halting in a loop, which
   the watchdog would rightly count as time in the kernel: the boot
   thread ends after `gala: boot ok` when there is no `qemu_exit`, so an
@@ -877,7 +917,11 @@ a new line, since QEMU's end can cut the guest's last one off):
    `sched: thread N (x) Waiting { until_tick: None } at
    kernel/src/lx/futex.rs:304`, the caller of `prepare_wait` through
    `#[track_caller]` wrappers; the only clue for a Linux thread, which
-   has no NT system-call record), the ledger, every registry change
+   has no NT system-call record -- `lx/dispatch.rs` never calls
+   `thread::set_in_syscall`, so the NT lines say `in a system call
+   false` and name no call, no arguments and no wait object for every
+   Linux thread, which reads as a thread doing nothing; ROADMAP
+   "Defects known, not yet fixed"), the ledger, every registry change
    notification armed (`statedump: registry watch pid P key K
    subordinate S filter F tree T waiting N (B thread-bound) change kept
    C`: who waits on which key), C:'s write-back (`statedump: persist:
@@ -1072,7 +1116,13 @@ stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
   without `stack_at=` there is nothing to read and the option says so.
 - **Scanned, not unwound.** Every word of the stack that falls inside a
   loaded image is named `<module>+<offset>`, dead values from earlier
-  frames with it, so a line is evidence rather than proof. The real
+  frames with it, so a line is evidence rather than proof. `stack_from=`
+  matches that same scan, so a module left in a dead word passes the
+  filter as readily as one in a live frame: `stack_from=wwlib` on Word's
+  writes captured calls `wwlib.dll` was not in, and the caller chain had
+  to be read from the frames themselves. The module must be *in* the
+  call, and whether it is is what the capture shows, not what the filter
+  promises. The real
   unwinder needs the unwind data and runs in user mode (gala's ntdll
   fills `crashreport::Walk` while it dispatches an exception; the kernel
   only reads it). At a system call the kernel has the stack and the
@@ -1664,11 +1714,11 @@ When the scenario fails, xtask writes each dumped file back out under
 names the directory; it holds that boot's files only, an earlier
 failure's are removed first), so a program's own log is read as the
 file it wrote.
-A long dump holds the boot thread in the kernel while it writes, so a
-run that dumps megabytes of logs (`office_word`'s Click-to-Run logs)
-ends with the watchdog's warning that thread 0 has been in the kernel
-without blocking: it is the printing, and nothing else of the run is
-affected.
+A long dump holds the boot thread in the kernel far longer than the
+hang watchdog's 20 s -- `office_word`'s Click-to-Run logs are some 5800
+lines -- so each line printed reports progress (`lib.rs::dump_line`)
+and a run that dumps megabytes reports no hang. It did report one until
+the line said so, which is how a watchdog stops being read.
 
 A program's own logging is an instrument of its own, and the cheapest
 one when the program is Microsoft's: Office writes nothing by default
