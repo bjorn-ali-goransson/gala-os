@@ -2517,15 +2517,31 @@ need gala's.
      the same box 4.4 s later. So neither the write nor what it holds
      decides anything, and the stretch before the box holds no registry
      read, no call into a DLL gala wrote, no exception and no cached
-     verdict either. What Word still has that gala has not read is what
-     it writes about itself: the `WINWORD\12` values are its own
-     session record in JSON
-     (`{"AppName":"winword.exe","AppVersion":{"Major":"16",...`), 360
-     bytes of it as Word starts and 401 written after the box, of which
-     a value event carries the first 64. Reading one of them whole is
-     the next instrument. What fails of the
-     reading is keys a fresh Windows does not
-     have either (`...\Office\16.0\Common\Graphics`,
+     verdict either. What Word writes about itself reads whole now
+     (`events_data=<n>`, OBSERVABILITY's `file` category), and it holds
+     no verdict: the `WINWORD\12` values are a session record in JSON
+     -- `AppName`, `AppVersion` (16.20527.20196), `ReleaseFork`
+     `2609-Sep`, `ReleaseChannel`, `ProcessId`, a `SessionId` GUID,
+     `SessionInitTime`, `ProcessorArchitecture` `x64`,
+     `InstallMethod`, `PreviousBuild` `Unknown` and an empty `EcsETag`
+     -- 360 bytes of it written under `Common\CrashPersistence` 6.3 s
+     before the box and 401 under `Common\GracefulExit` 2 s after,
+     which is the same record with a `SessionUninitTime` added. Not a
+     field of either names an error, a module or a code. What they do
+     say is that Word calls this exit a graceful one: after the
+     GracefulExit record it re-reads the CrashPersistence one, deletes
+     it with its two companions and enumerates to NO_MORE_ENTRIES --
+     the teardown of a clean shutdown, which agrees with the run taking
+     no exception. The box is a decision Word reaches and then tidies
+     up after. The only other thing under that key is a 4-byte value
+     (`6`) that appears 57 ms after the box and whose last byte counts
+     down by one over seven writes (`1e54e091`..`1e54e08b`) while the
+     box stands. So no record Word keeps says why, and the next
+     instrument is the box itself: a stack capture at the call that
+     puts it on the screen (`stack_from=` Word's own module,
+     OBSERVABILITY "Stack captures") names the caller that gave up.
+     What fails of the reading is keys a fresh Windows does not have
+     either (`...\Office\16.0\Common\Graphics`,
      `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
      own probe for a private `Microsoft.Windows.Common-Controls`
      assembly -- four paths, twice, `kernel32`'s `actctx/manifest.rs`
