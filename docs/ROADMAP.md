@@ -2455,17 +2455,48 @@ need gala's.
      (13)", "Microsoft Word 16.0")`.
      Nor is anything refused in what little that thread does ask for
      in those seven seconds -- 44 NtProtectVirtualMemory, 27
-     NtQueryPerformanceCounter, ten value reads, nine GalaScreenInfo
-     and no more. Those ten are named now: a `value` event says the
+     NtQueryPerformanceCounter and nine GalaScreenInfo among them.
+     Its registry reads are measured now: a `value` event says the
      key, the value's name, its type and the size of its data, or the
      status alone where there is no value (`events=file`,
      OBSERVABILITY's `file` category, scenario `events_registry`),
      where before this the stream named the key a program opened and
-     never the value it went on to read. The ledger cannot stand in
+     never the value it went on to read -- so the ten value reads
+     counted then were counted without one, and the number does not
+     survive the reading. The ledger cannot stand in
      for it -- it keeps one row an absent key and nothing at all about
      values -- so a read that is answered left no trace of itself
-     anywhere. Which ten they are and what Word was told is the next
-     reading. What fails of it is keys a fresh Windows does not
+     anywhere. The thread that writes the box is pid 12, tid 16 (the
+     capture over `NtWriteFile` names it, and it is the same thread
+     that sweeps `Word\Options`), and what it reads in the seven
+     seconds before the box is 175 values, not one of them a refusal:
+     94 absent, 56 answered, 15 ends of an enumeration, 10 size
+     probes. Every absence is a fresh profile's -- the `Word\Options`
+     compatibility and view flags (`EnableCopilot`,
+     `DisableModernComments`, the `RevMode*` group,
+     `MarginClipPrinting`), `16.0\Common\ScreenReaderPresent`,
+     HKLM's `Office\Common\ForceConcurrencyOverride` -- and a fresh
+     Windows lacks each of them too. It gets as far as choosing how to
+     draw text: its last reads are `NoClearTypeNW`,
+     `FontSmoothingThreshold`, `BoldFontSmoothingThreshold` and
+     `ClearTypeThreshold` twice over, ending 550 ms before the box,
+     then `NoTranslucentSelection` 460 ms before it, by which time it
+     has set a page size (`Word\Wizards\PageSize`, 14 bytes) and
+     registered its startup item (`Word\Resiliency\StartupItems`, 28
+     bytes). Those last 460 ms hold no value read, no call into a DLL
+     gala wrote and no exception, so Word decides on what it already
+     has. The one thing it has that gala saw and did not keep is what
+     it wrote itself: 4.9 s before the box it reads
+     `Software\Microsoft\Office\Common\Graphics\AdapterInformation`
+     -- the version-less key, not the absent `Office\16.0\Common\Graphics`
+     below, which reads alike -- under the adapter's own name
+     (`00010005-00000000-00000000-00000000_00000023-00000000-0000FFFF-0000FFFF`),
+     finds it absent and writes a 4-byte DWORD there: its verdict on
+     this adapter, whose size the stream records and whose value it
+     does not. So a `value set`'s data is what the stream wants next,
+     and since Word's `(13)` is documented nowhere public the
+     instrument is the only thing that can answer it. What fails of the
+     reading is keys a fresh Windows does not
      have either (`...\Office\16.0\Common\Graphics`,
      `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
      own probe for a private `Microsoft.Windows.Common-Controls`
