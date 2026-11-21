@@ -13484,6 +13484,18 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // `events_data=` carries the whole of a value the default cuts:
+        // the same 162-byte value `events_registry` shows 64 bytes of.
+        // Both ends of the one value are expected, because a peek that
+        // quietly stayed at its default would read as the one that was
+        // asked for.
+        "events_registry_data",
+        &[
+            r#""name":"long","kind":1,"bytes":162,"data":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","status":0"#,
+            r#""ev":"value set","pid":4,"#,
+        ],
+    ),
+    (
         // What a program asked the registry for, which the ledger
         // cannot say: it keeps one row an absent key and nothing at all
         // about values, so the value a program read last before it gave
@@ -13518,6 +13530,12 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
             // A number of each width, a string with its terminator
             // trimmed, and bytes that are not text at all as hex.
             r#""name":"q","kind":11,"bytes":8,"data":1234605616436508552,"status":0"#,
+            // A value longer than the peek: `bytes` says how much there
+            // was and `data` holds the first 64 of it, so the cut is
+            // visible without a field of its own. What the rest of it
+            // says needs `events_data=` (scenario
+            // `events_registry_data`).
+            r#""name":"long","kind":1,"bytes":162,"data":"0123456789abcdef0123456789abcdef","status":0"#,
             r#""name":"str","kind":1,"bytes":12,"data":"hello","status":0"#,
             r#""name":"bin","kind":3,"bytes":3,"data":"010203","status":0"#,
             // A multi-string keeps the separators it is made of, so the
@@ -15299,6 +15317,22 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=file run=registry_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["registry_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same program with `events_data=` raised: the value that
+        // `events_registry` shows cut is carried whole (see
+        // EVENT_EXPECT). What a program writes about itself -- Word's
+        // session record is 401 bytes of JSON -- is only legible this
+        // way, and the default stays small so a hive of long values
+        // does not become a second copy of itself in the stream.
+        name: "events_registry_data",
+        cmdline: "qemu_exit events=file events_data=256 run=registry_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "events: 256 bytes of each value's data are carried (events_data=)",
+            "registry_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // `events_from=` starts the stream late (here at once, after the
@@ -21378,6 +21412,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_pid", "process_test"),
     ("events_object", "object_test"),
     ("events_registry", "registry_test"),
+    ("events_registry_data", "registry_test"),
     ("import_threads", "lock_test"),
     ("import_answer_text", "import_strings_test"),
     ("import_answer_bytes", "import_strings_test"),

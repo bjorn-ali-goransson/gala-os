@@ -1129,10 +1129,58 @@ fn nt(c: &mut Checks, test: Hkey) -> Result<(), u32> {
     Ok(())
 }
 
+/// A value longer than a value event's peek, written and read back.
+/// Its data is a pattern so that what the stream shows of it says how
+/// much was read: the first 64 bytes are 32 characters of it, and
+/// `events_data=` asks for the rest (OBSERVABILITY "The event
+/// stream"). The key is its own, made after `written` has counted the
+/// values of its own, so a value here changes none of those counts.
+fn long(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: advapi32 calls with buffers of ours.
+    unsafe {
+        let mut key = 0;
+        let mut disposition = 0u32;
+        c.ok0(RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            w("Software\\GalaRegistryTest\\Long").as_ptr(),
+            0,
+            core::ptr::null(),
+            REG_OPTION_VOLATILE,
+            KEY_ALL_ACCESS,
+            core::ptr::null_mut(),
+            &mut key,
+            &mut disposition,
+        ))?;
+        let mut b = [0u8; 192];
+        let text =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let n = sz(text, &mut b);
+        c.eq(n.into(), 162)?; // 80 characters and a terminator
+        set(c, key, "long", REG_SZ, &b[..n as usize])?;
+        let mut kind = 0u32;
+        let mut size = 192u32;
+        let mut data = [0u8; 192];
+        c.ok0(RegQueryValueExW(
+            key,
+            w("long").as_ptr(),
+            core::ptr::null_mut(),
+            &mut kind,
+            data.as_mut_ptr(),
+            &mut size,
+        ))?;
+        c.eq(kind.into(), REG_SZ.into())?;
+        c.eq(size.into(), 162)?;
+        c.ok(same(&units(&data[..160])[..80], text), data[0].into())?;
+        c.ok0(RegCloseKey(key))?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     seeded(&mut c)?;
     written(&mut c)?;
+    long(&mut c)?;
     Ok(())
 }
 
