@@ -25183,6 +25183,13 @@ const DESKTOP_AT_BOOT_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[PixelCheck::Most(400, 700, 480, 30, 0xeef1f6, 80)],
         },
         ScreenStep { after: "shasha: the start menu opens", input: &["sendkey esc"], pixels: &[] },
+        ScreenStep {
+            // The close, before xtask stops the machine: the menu's rows
+            // are the wallpaper again.
+            after: "shasha: the start menu closes: Esc",
+            input: &[],
+            pixels: &[PixelCheck::Varied(400, 700, 480, 30, 16)],
+        },
     ],
 };
 
@@ -25293,12 +25300,13 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             after: "",
             input: &[],
             pixels: &[
-                PixelCheck::AnyIn(4, 4, 12, 12, 0x060e2b), // the night wallpaper's corner
-                PixelCheck::At(300, 110, 0xeef2f7),        // the active caption
+                PixelCheck::At(300, 110, 0xeef2f7), // the active caption
                 PixelCheck::At(101 + 100, 133 + 70, 0xff0000), // FillRect's red
                 PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // COLOR_WINDOW
                 PixelCheck::AnyIn(101 + 20, 133 + 140, 140, 16, 0x0000ff), // the text
-                // The taskbar is shasha's (the shasha scenario's).
+                // The wallpaper and the taskbar are shasha's (the shasha
+                // scenario's): the headless twin boots a BIOS image
+                // without shasha, whose desktop is its colour alone.
                 PixelCheck::At(121, 117, 0xff8000), // the class icon in its caption
             ],
         },
