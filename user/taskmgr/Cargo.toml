@@ -22,6 +22,9 @@ bench = false
 [dependencies]
 # The window is a gala_ui view (`window::view`).
 gala_ui = { path = "../ui" }
+# "Ask the agent about this process" hands the row to the agent panel in
+# its wire form (`agent::handoff`).
+agent = { path = "../agent" }
 
 [target.'cfg(windows)'.dependencies]
 # The bin's allocator (the host tests have std's).

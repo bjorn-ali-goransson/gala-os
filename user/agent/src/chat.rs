@@ -12,6 +12,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::handoff::About;
 use crate::{Answer, Context, Request};
 
 /// The relay's address on QEMU's user network (xtask's guestfwd).
@@ -22,11 +23,14 @@ pub const PATH: &str = "/v1/chat/completions";
 pub const MAX_REPLY: usize = 1 << 20;
 
 /// The request body for the conversation so far: a system message naming
-/// the program it is about, then each request asked (hand-offs are not
-/// asked yet) and each answer given, in order.
-pub fn body(context: Option<&Context>, requests: &[Request]) -> String {
+/// the program it is about (and the process handed over, with the text
+/// its sender gave for it), then each request asked (hand-offs are not
+/// asked yet) and each answer given, in order. With no process the
+/// system message is what it was before processes could be handed over,
+/// byte for byte (the recordings replay by the body's hash).
+pub fn body(context: Option<&Context>, about: Option<&About>, requests: &[Request]) -> String {
     let mut s = String::from("{\"messages\":[");
-    let system = match context {
+    let mut system = match context {
         Some(c) => alloc::format!(
             "You are the agent in gala's side panel. The user is working in {} \
              (window \"{}\"). Answer briefly.",
@@ -35,6 +39,16 @@ pub fn body(context: Option<&Context>, requests: &[Request]) -> String {
         ),
         None => String::from("You are the agent in gala's side panel. Answer briefly."),
     };
+    if let Some(a) = about {
+        system.push_str(&alloc::format!(
+            " The user asks about the process {} (pid {}, {}), as {} shows it:\n{}",
+            a.name,
+            a.pid,
+            a.personality(),
+            a.program,
+            a.text
+        ));
+    }
     message(&mut s, "system", &system);
     for r in requests {
         let Some(a) = &r.answer else { continue };
@@ -310,11 +324,28 @@ mod tests {
             asked("again", Answer::Asking),
         ];
         assert_eq!(
-            body(Some(&c), &rs),
+            body(Some(&c), None, &rs),
             "{\"messages\":[{\"role\":\"system\",\"content\":\"You are the agent in gala's \
              side panel. The user is working in Notepad (window \\\"a \\\"b\\\"\\\"). \
              Answer briefly.\"},{\"role\":\"user\",\"content\":\"hi\\n\"},{\"role\":\
              \"assistant\",\"content\":\"hello\"},{\"role\":\"user\",\"content\":\"again\"}]}"
+        );
+        // A process handed over: its text follows the system message's.
+        let a = About {
+            program: "Task Manager".into(),
+            title: "Task Manager".into(),
+            window: 0x20010,
+            name: "busy.exe".into(),
+            pid: 52,
+            linux: false,
+            command_line: "busy.exe".into(),
+            text: "CPU: 50.0%".into(),
+        };
+        assert_eq!(
+            body(None, Some(&a), &[]),
+            "{\"messages\":[{\"role\":\"system\",\"content\":\"You are the agent in gala's \
+             side panel. Answer briefly. The user asks about the process busy.exe (pid 52, \
+             Windows), as Task Manager shows it:\\nCPU: 50.0%\"}]}"
         );
         // Control characters are escaped.
         let mut s = String::new();

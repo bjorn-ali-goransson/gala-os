@@ -9566,6 +9566,23 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("explorer_agent", "oleaut32.dll", "Windows/System32"),
     ("explorer_agent", "uiautomationcore.dll", "Windows/System32"),
     ("explorer_agent", "comctl32.dll", "Windows/System32"),
+    // "Ask the agent about this process" (ROADMAP TM step 6): Task
+    // Manager and the docked panel it hands the process to, nothing else.
+    ("taskmgr_agent", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("taskmgr_agent", "user/bin/taskmgr.exe", "Windows/System32"),
+    ("taskmgr_agent", "user/bin/agent.exe", "Windows/System32"),
+    ("taskmgr_agent", "ntdll.dll", "Windows/System32"),
+    ("taskmgr_agent", "kernel32.dll", "Windows/System32"),
+    ("taskmgr_agent", "msvcrt.dll", "Windows/System32"),
+    ("taskmgr_agent", "advapi32.dll", "Windows/System32"),
+    ("taskmgr_agent", "bcryptprimitives.dll", "Windows/System32"),
+    ("taskmgr_agent", "user32.dll", "Windows/System32"),
+    ("taskmgr_agent", "gdi32.dll", "Windows/System32"),
+    ("taskmgr_agent", "shell32.dll", "Windows/System32"),
+    ("taskmgr_agent", "ole32.dll", "Windows/System32"),
+    ("taskmgr_agent", "oleaut32.dll", "Windows/System32"),
+    ("taskmgr_agent", "uiautomationcore.dll", "Windows/System32"),
+    ("taskmgr_agent", "comctl32.dll", "Windows/System32"),
     ("ui_test", "ntdll.dll", "Windows/System32"),
     ("ui_test", "kernel32.dll", "Windows/System32"),
     ("ui_test", "msvcrt.dll", "Windows/System32"),
@@ -11245,6 +11262,7 @@ const USER_PROGRAMS: &[&str] = &[
     "agent",
     "agent_test",
     "agent_chat_test",
+    "taskmgr_agent_test",
     "shasha",
     "shasha_test",
     "conpty_test",
@@ -13610,6 +13628,8 @@ const UEFI_SCENARIOS: &[&str] = &[
     "agent",
     "explorer_agent",
     "agent_chat",
+    // Task Manager handing a process to the panel (TASKMGR_AGENT_SCREEN).
+    "taskmgr_agent",
     // shasha's taskbar, clicked (SHASHA_SCREEN).
     "shasha",
     "shasha_tray",
@@ -16665,6 +16685,38 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "explorer: change: handed to the agent panel (window",
             "explorer: change: closed (handed to the agent panel)",
             "xtask: screen ok",
+        ],
+    },
+    Scenario {
+        // "Ask the agent about this process" (ROADMAP TM step 6;
+        // ARCHITECTURE "The task manager", "The agent panel"):
+        // TASKMGR_AGENT_SCREEN hides the docked panel, opens Task Manager
+        // (Ctrl+Shift+Esc), searches the test's own process, right-clicks
+        // its row and clicks the menu's item; Task Manager hands the
+        // process to the panel (WM_COPYDATA, `gala-process 1`), which
+        // docks again and is about it; Alt+F4 closes Task Manager. No
+        // network: the process is listed, not asked.
+        name: "taskmgr_agent",
+        cmdline: "qemu_exit wallpaper=night events=window run=taskmgr_agent_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "agent: started docked",
+            "agent: docked at 960,0 320x752",
+            "taskmgr_agent_test: docked",
+            "agent: click HideButton: Hide",
+            "taskmgr_agent_test: hidden",
+            "taskmgr_agent_test: task manager open",
+            "taskmgr: right click ProcessList.Process.",
+            "taskmgr: menu for taskmgr_agent_test.exe (pid",
+            "taskmgr_agent_test: menu",
+            "taskmgr: click Menu.AskTheAgent",
+            "agent: handoff from Task Manager (window",
+            "about taskmgr_agent_test.exe (pid",
+            "taskmgr: ask the agent about taskmgr_agent_test.exe (pid",
+            "): handed to the agent panel (window",
+            "taskmgr_agent_test: listed",
+            "taskmgr_agent_test: ok",
+            "exited with status 0x00000000",
         ],
     },
     Scenario {
@@ -24538,6 +24590,67 @@ const AGENT_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// "Ask the agent about this process" (scenario `taskmgr_agent`): the
+/// panel's Hide (found through UI Automation), Ctrl+Shift+Esc, the
+/// search `agent_` (only taskmgr_agent_test.exe has it), then the
+/// row and the menu's item at the places taskmgr_agent_test computes
+/// (Task Manager serves no UI Automation yet). A step's pixels are
+/// checked after its input: the search has left the list to one group
+/// before the right click (TASKMGR_FILTERED, see WORKFLOW "a click that
+/// aims at what an earlier key in the same step changed"); the menu is
+/// a white box at the click (row 1, screen (521, 237)); once the
+/// process is listed, the panel is docked again over the right edge
+/// (its surface and its white card right of Task Manager, which ends
+/// at x 1160), then Alt+F4 closes Task Manager.
+const TASKMGR_AGENT_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "taskmgr_agent_test: docked",
+    steps: &[
+        ScreenStep {
+            after: "taskmgr_agent_test: docked",
+            input: &["click_on taskmgr_agent_test: HideButton"],
+            pixels: &[PixelCheck::Most(1224, 380, 56, 40, 0x005fb8, 50)],
+        },
+        ScreenStep {
+            after: "taskmgr_agent_test: hidden",
+            input: &["sendkey ctrl-shift-esc"],
+            pixels: &[PixelCheck::AnyIn(137, 87, 120, 20, 0x1b1b1b)], // "Task Manager"
+        },
+        ScreenStep {
+            after: "taskmgr_agent_test: task manager open",
+            input: &[
+                "sendkey a",
+                "sendkey g",
+                "sendkey e",
+                "sendkey n",
+                "sendkey t",
+                "sendkey shift-minus",
+            ],
+            pixels: &[TASKMGR_FILTERED],
+        },
+        ScreenStep {
+            after: "",
+            input: &["right_click_on taskmgr_agent_test: ProcessRow"],
+            pixels: &[
+                PixelCheck::Most(530, 242, 240, 26, 0xffffff, 60), // the menu
+                PixelCheck::AnyIn(530, 242, 240, 26, 0x1b1b1b),    // its item's text
+            ],
+        },
+        ScreenStep {
+            after: "taskmgr_agent_test: menu",
+            input: &["click_on taskmgr_agent_test: AskTheAgent"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_agent_test: listed",
+            input: &["sendkey alt-f4"],
+            pixels: &[
+                PixelCheck::Most(1170, 400, 100, 300, 0xf3f3f3, 80),
+                PixelCheck::AnyIn(1170, 90, 98, 160, 0xffffff),
+            ],
+        },
+    ],
+};
+
 /// The panel's chat (scenario `agent_chat`): the prompt clicked (found
 /// by name) and `say pong` typed; Send clicked; the reply card (the
 /// chip's blue-grey, under the request's white card) shows once the
@@ -25658,6 +25771,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("agent", AGENT_SCREEN),
     ("shasha", SHASHA_SCREEN),
     ("explorer_agent", EXPLORER_AGENT_SCREEN),
+    ("taskmgr_agent", TASKMGR_AGENT_SCREEN),
     ("agent_chat", AGENT_CHAT_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("shasha_tray", SHASHA_TRAY_SCREEN),

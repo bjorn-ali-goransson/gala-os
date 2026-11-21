@@ -97,6 +97,7 @@ fn look<'a>(d: &'a Data, view: View, selected: Option<&'a Row>) -> Look<'a> {
             threads: &h[5],
             handles: &h[6],
         },
+        menu: None,
     }
 }
 
@@ -252,4 +253,58 @@ fn pictures_go_through_their_src() {
     for bad in ["", "trail:disk:1:2:3", "graph:cpux:1:0", "spark:memory:1:00:extra", "x:cpu:1:0"] {
         assert_eq!(Picture::parse(bad), None, "{bad}");
     }
+}
+
+#[test]
+fn a_process_row_has_its_menu_and_a_heading_none() {
+    let d = data();
+    let p = lay(&look(&d, View::Processes, None));
+    let right = |x, y| gala_ui::right_click(&p, x, y).map(|(id, m)| (String::from(id), m));
+    // busy.exe's row, on a cell: its menu.
+    assert_eq!(
+        right(LIST_X + 400, ROWS_Y + ROW_H + 10),
+        Some((String::from("ProcessList.Process.4"), Msg::Menu(Row::Process(0))))
+    );
+    // The Apps heading, the list below the rows, the navigation: none.
+    assert_eq!(right(LIST_X + 10, ROWS_Y + 5), None);
+    assert_eq!(right(600, H - 10), None);
+    assert_eq!(right(80, NAV_Y + 5), None);
+    // Details' rows have it too.
+    let p = lay(&look(&d, View::Details, None));
+    assert_eq!(
+        gala_ui::right_click(&p, LIST_X + 10, ROWS_Y + 5).map(|c| c.1),
+        Some(Msg::Menu(Row::Process(0)))
+    );
+}
+
+#[test]
+fn the_menu_opens_at_the_click_and_its_item_asks() {
+    let d = data();
+    let r = Row::Process(0);
+    let mut l = look(&d, View::Processes, Some(&r));
+    let point = (400, ROWS_Y + ROW_H + 12);
+    l.menu = Some(point);
+    let p = lay(&l);
+    let m = at(&p, "Menu");
+    assert_eq!(m.rect, [point.0, point.1, MENU_W, MENU_ROW + 2 * MENU_EDGE]);
+    assert_eq!(m.background, Some(WHITE));
+    let item = at(&p, "Menu.AskTheAgent");
+    assert_eq!(item.rect, [point.0 + MENU_EDGE, point.1 + MENU_EDGE, MENU_W - 8, MENU_ROW]);
+    assert!(p.iter().any(|e| e.text == ASK_TEXT));
+    // The item's middle (the test program's ITEM) asks; it is over the
+    // list, which the menu covers.
+    let mid = (point.0 + MENU_W / 2, point.1 + MENU_EDGE + MENU_ROW / 2);
+    assert_eq!(gala_ui::click(&p, mid.0, mid.1), Some(("Menu.AskTheAgent", Msg::Ask)));
+    assert_eq!(color_at(&p, point.0 + 2, point.1 + 2), Some(WHITE));
+    // The menu's edge is not the item: nothing asked there.
+    assert_eq!(gala_ui::click(&p, point.0 + 1, point.1 + 1), None);
+}
+
+#[test]
+fn the_menu_stays_in_the_window() {
+    let mh = MENU_ROW + 2 * MENU_EDGE;
+    assert_eq!(menu_at((W, H), (W - 10, H - 5)), (W - MENU_W, H - mh));
+    assert_eq!(menu_at((W, H), (10, 20)), (10, 20));
+    // A window smaller than the menu: at its top left.
+    assert_eq!(menu_at((100, 20), (50, 10)), (0, 0));
 }

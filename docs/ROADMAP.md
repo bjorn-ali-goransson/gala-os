@@ -274,7 +274,7 @@ has a section under "Open items".
 | GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
-| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-4 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding", every metric's last minute as a sparkline); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait), a Copy button for pasting a view into an agent, and "Ask the agent" on a process's right-click menu |
+| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-4 and 6 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding", every metric's last minute as a sparkline; `taskmgr_agent`: "Ask the agent about this process" on a row's right-click menu hands the row to the agent panel); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent (a row's text is done) |
 | EX | A file explorer over every file system | in progress | steps 1-2 done (the drives and the WSL distributions in one tree) and part of 3-4 (`explorer`); next the namespace's rest (Desktop, Recycle Bin, context menus), file dialogs, drag and drop |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); modules no process maps replaced whole and new ones added, every changed module taken by the flag alone (step 1f); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
@@ -6365,8 +6365,10 @@ own sections with step 4.
 every process gala runs, Windows and Linux (LX, WSL distributions)
 together, and lets the user end or inspect any of them.
 
-**Done so far** (scenario `taskmgr`, test `user/taskmgr_test`, host
-tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
+**Done so far** (scenarios `taskmgr` and `taskmgr_agent`, tests
+`user/taskmgr_test` and `user/taskmgr_agent_test`, host tests in
+`nt::tasks`, `nt::desktop`, `cargo test -p taskmgr` and `cargo test -p
+agent --lib`):
 - Step 1, the data: GalaTasks lists every process of both
   personalities in one layout (pid, parent, platform, image or `comm`,
   command line, user, CPU time from the scheduler's new per-thread
@@ -6402,6 +6404,26 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
   drawn, the busy window's CPU cell risen, and an idle `cat`'s flat on
   its floor. Not covered: no Disk or Network column per process to draw
   in (no per-process counters: ledgered), and no Statistics view yet.
+- Step 6, ask the agent: a right click on a process's row (Processes
+  or Details) selects it and opens its menu, whose one item "Ask the
+  agent about this process" (Menu.AskTheAgent) hands the process to
+  the docked agent panel by WM_COPYDATA, in `agent::handoff`'s process
+  form (`gala-process 1`; Explorer's request form is unchanged): name,
+  pid, personality, command line and the row as text
+  (`taskmgr::row_text`: every Details column, the window's title, the
+  CPU and Memory columns' last minute, oldest first), the command line
+  cut to fit the hand-off's 4096 bytes. The panel docks if hidden,
+  shows the process in its context chip ("<image>", "pid N, Windows"),
+  lists "About: <image> (pid N)" and gives the model the row's text in
+  the system message; another program's window becoming active lets
+  the process go. The scenario hides the panel, right-clicks its own
+  row in a filtered Processes list, chooses the item and checks the
+  panel docked with the process listed and Task Manager still in the
+  foreground. Not covered: the agent's tools cannot read more about
+  the process (its threads, stacks, handles: step 1's inspection
+  first), and Task Manager serves no UI Automation, so the menu's item
+  has its id and name but no client can find it (the test computes
+  where it is).
 
 **Next** (each test first, checked on the screen, screenshots):
 1. Inspection: open file location, a process's threads with their
@@ -6430,9 +6452,10 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
    the hot path), percentiles read from them on demand, exported as
    OpenTelemetry exponential histograms (item OT); the cost measured
    with `bench`, and each counter switchable at run time.
-4. Copy: a Copy button (and Ctrl+C) in every view that puts what the
-   view shows on the clipboard as text, ready to paste to a person or
-   an agent: the view's name, the time and window, the gala build, the
+4. Copy: a row's text is done (`taskmgr::row_text`, what step 6 hands
+   to the agent); still to come: a Copy button (and Ctrl+C) in every
+   view that puts what the view shows on the clipboard as text, ready
+   to paste to a person or an agent: the view's name, the time and window, the gala build, the
    sort and filter, then the visible rows as a Markdown table with
    their units (selected rows only when there is a selection), the
    values behind each sparkline, and in Statistics the percentiles'
@@ -6442,17 +6465,9 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
    each with its sparkline as CPU and Memory have (gala counts disk and
    network bytes for the machine, not per process: ledgered
    `taskmgr.exe!Processes(Disk)`, `(Network)`).
-6. Ask the agent (the owner): right-clicking a process (in Processes
-   or Details) offers "Ask the agent about this process", which opens
-   the docked agent panel (ROADMAP LY "Change this program", step 4)
-   with the process as its context: name, pid, personality, command
-   line, and the row's values with their recent sparkline history, the
-   same text Copy gives (step 4). The user then asks about it in the
-   panel ("why is this using so much CPU?"); the agent's tools can read
-   more about it (threads and their stacks, handles, from step 1's
-   inspection). Handed to the panel by WM_COPYDATA, as Explorer's
-   request card is; the panel shows it if it is hidden. Needs the
-   panel's chat and the relay first.
+6. Ask the agent: done (above). Still to come with step 1's
+   inspection: the agent's tools reading more about the process
+   (threads and their stacks, handles).
 
 **Done when**: a scenario with Windows programs and a WSL distribution
 running shows them all in one list, ends one of each from it, and its

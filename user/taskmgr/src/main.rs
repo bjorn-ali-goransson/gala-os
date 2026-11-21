@@ -28,11 +28,28 @@
 //! - **Details**: every process in one flat list with the full columns
 //!   (CPU time, commit size, threads, handles or fds, platform with the
 //!   distribution, command line), sortable and searchable too.
+//! - **Ask the agent** (ROADMAP TM step 6): a right click on a process's
+//!   row, in Processes or Details, selects it and opens its menu (Esc or
+//!   a click elsewhere closes it); its one item, "Ask the agent about
+//!   this process", hands the row as text (`taskmgr::row_text`: its
+//!   values and their last minute) to the docked agent panel by
+//!   WM_COPYDATA, in `agent::handoff`'s process form, as Explorer's
+//!   "Make the change" hands a request. The message is sent once the
+//!   window procedure has let go of the state, since the panel may send
+//!   back before it answers.
 //!
 //! One instance: a second start brings the first one's window forward.
 //! Not shown (the kernel has no counter for them: recorded in the
 //! ledger as `taskmgr.exe!Processes(<column>)` at start): per-process disk,
 //! network, GPU and power columns.
+//!
+//! Observability: each line on standard output (`taskmgr: ...`): every
+//! click and right click with the part hit (`click Menu.AskTheAgent`),
+//! the menu opened (`menu for <image> (pid N)`), every hand-off to the
+//! agent panel with the panel's window, its size and the answer
+//! (`handed to the agent panel (...): TRUE`, `not taken by the agent
+//! panel (...): FALSE`), or why there was none (no panel, the process
+//! ended, a row too long), and the command line's bytes cut to fit.
 
 #![no_std]
 #![no_main]
@@ -51,7 +68,7 @@ use gala_ui::{Canvas, Placed, Set};
 use taskmgr::window::{
     self, CPU_COLOR, Load, Look, MEMORY_COLOR, Msg as ViewMsg, Picture, View, WHITE,
 };
-use taskmgr::{Column, End, Group, History, Perf, Proc, Row, Shares, Sort, Trails};
+use taskmgr::{Column, End, Group, History, Perf, Proc, Row, Sender, Shares, Sort, Trails};
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -150,6 +167,7 @@ unsafe extern "system" {
     fn InvalidateRect(hwnd: Hwnd, rect: *const Rect, erase: Bool) -> Bool;
     fn SetTimer(hwnd: Hwnd, id: usize, ms: u32, f: *const c_void) -> usize;
     fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd;
+    fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
     fn SetForegroundWindow(hwnd: Hwnd) -> Bool;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
 }
@@ -189,6 +207,8 @@ const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_TIMER: u32 = 0x0113;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_RBUTTONUP: u32 = 0x0205;
+const WM_COPYDATA: u32 = 0x004a;
 const WM_MOUSEWHEEL: u32 = 0x020a;
 const VK_DELETE: usize = 0x2e;
 const VK_UP: usize = 0x26;
@@ -244,6 +264,24 @@ struct State {
     trails: Trails,
     /// Linux processes sent SIGTERM: (pid, when SIGKILL follows).
     pending: Vec<(u64, u32)>,
+    /// The process menu, open at this client point for the selected
+    /// process.
+    menu: Option<(i32, i32)>,
+}
+
+/// COPYDATASTRUCT.
+#[repr(C)]
+struct CopyData {
+    kind: usize,
+    size: u32,
+    data: *const u8,
+}
+
+/// A process to hand to the agent panel, once the state is let go.
+struct Handing {
+    image: String,
+    pid: u64,
+    bytes: Vec<u8>,
 }
 
 struct Global(core::cell::UnsafeCell<Option<State>>);
@@ -486,6 +524,7 @@ fn with_look<R>(s: &State, f: impl FnOnce(&Look) -> R) -> R {
         memory_scale,
         perf: s.perf.as_ref(),
         load: load(s),
+        menu: s.menu,
     };
     f(&look)
 }
@@ -700,28 +739,117 @@ fn graph(
 
 // ---- Input ------------------------------------------------------------------
 
-/// What a click at (x, y) hits: the part's id (logged) and its message.
-fn clicked(s: &State, x: i32, y: i32) -> Option<ViewMsg> {
+/// What a click (or, `right`, a right click) at (x, y) hits: the part's
+/// id (logged) and its message.
+fn clicked(s: &State, x: i32, y: i32, right: bool) -> Option<ViewMsg> {
     // SAFETY: our window's DC, released below after the Gdi is dropped.
     let hdc = unsafe { GetDC(s.hwnd) };
     if hdc.is_null() {
         record_missing("GetDC (the window's layout)");
         return None;
     }
-    let hit = laid_out(s, &mut Gdi::new(hdc))
-        .and_then(|p| gala_ui::click(&p, x, y).map(|(id, m)| (String::from(id), m)));
+    let hit = laid_out(s, &mut Gdi::new(hdc)).and_then(|p| {
+        let hit = if right { gala_ui::right_click(&p, x, y) } else { gala_ui::click(&p, x, y) };
+        hit.map(|(id, m)| (String::from(id), m))
+    });
     // SAFETY: the DC GetDC gave.
     unsafe { ReleaseDC(s.hwnd, hdc) };
     let (id, m) = hit?;
-    let mut l = String::from("click ");
+    let mut l = String::from(if right { "right click " } else { "click " });
     l.push_str(&id);
     log(&l);
     Some(m)
 }
 
-/// A click at (x, y).
-fn click(s: &mut State, x: i32, y: i32) {
-    match clicked(s, x, y) {
+/// A right click at (x, y): a process's row is selected and its menu
+/// opens there; anywhere else the menu closes.
+fn right_click(s: &mut State, x: i32, y: i32) {
+    s.menu = None;
+    let Some(ViewMsg::Menu(Row::Process(i))) = clicked(s, x, y, true) else { return };
+    let Some(p) = s.procs.get(i) else { return };
+    s.selection = Selection::Process(p.pid);
+    s.menu = Some((x, y));
+    let mut l = String::new();
+    let _ = write!(l, "menu for {} (pid {})", p.image, p.pid);
+    log(&l);
+}
+
+/// "Ask the agent about this process" for the selected process: what to
+/// hand to the panel, None (logged) when there is nothing to hand.
+fn ask(s: &State) -> Option<Handing> {
+    let Selection::Process(pid) = s.selection else { return None };
+    let Some(i) = s.procs.iter().position(|p| p.pid == pid) else {
+        let mut l = String::new();
+        let _ = write!(l, "ask the agent about pid {pid}: it has ended");
+        log(&l);
+        return None;
+    };
+    let p = &s.procs[i];
+    let share = s.shares.get(i).copied().unwrap_or(0);
+    let total = s.perf.as_ref().map_or(0, |p| p.memory_total);
+    let from = Sender { program: "Task Manager", title: "Task Manager", window: s.hwnd as u64 };
+    let mut l = String::new();
+    let Some(a) = taskmgr::ask(p, share, &s.trails, total, &from) else {
+        let _ = write!(
+            l,
+            "ask the agent about {} (pid {}): its row does not fit in a hand-off",
+            p.image, p.pid
+        );
+        log(&l);
+        return None;
+    };
+    if a.cut > 0 {
+        let _ = write!(
+            l,
+            "ask the agent about {} (pid {}): {} bytes of its command line cut to fit",
+            p.image, p.pid, a.cut
+        );
+        log(&l);
+    }
+    Some(Handing { image: p.image.clone(), pid: p.pid, bytes: a.bytes })
+}
+
+/// The process goes to the docked agent panel (WM_COPYDATA), logged
+/// with the panel's answer. Called with the state let go: the send waits
+/// for the panel, which may send to this window meanwhile.
+fn hand_off(hwnd: Hwnd, h: &Handing) {
+    use agent::handoff;
+    let mut l = String::new();
+    let _ = write!(l, "ask the agent about {} (pid {}): ", h.image, h.pid);
+    let (class, title) = (wide(handoff::CLASS), wide(handoff::TITLE));
+    // SAFETY: valid strings.
+    let panel = unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) };
+    if panel.is_null() {
+        l.push_str("no agent panel to hand the process to");
+        log(&l);
+        return;
+    }
+    let cds = CopyData { kind: handoff::KIND, size: h.bytes.len() as u32, data: h.bytes.as_ptr() };
+    // SAFETY: the panel's window; the structure and its bytes live across
+    // the call (user32 copies them to the panel's process).
+    let taken =
+        unsafe { SendMessageW(panel, WM_COPYDATA, hwnd as usize, &cds as *const _ as isize) };
+    let _ = write!(
+        l,
+        "{} the agent panel (window {:#x}, {} bytes): {}",
+        if taken != 0 { "handed to" } else { "not taken by" },
+        panel as usize,
+        h.bytes.len(),
+        if taken != 0 { "TRUE" } else { "FALSE" }
+    );
+    log(&l);
+}
+
+/// A click at (x, y); with the menu open, the click is the menu's (its
+/// item asks, anywhere else closes it). What to hand to the agent panel
+/// when the item was chosen.
+fn click(s: &mut State, x: i32, y: i32) -> Option<Handing> {
+    if s.menu.is_some() {
+        let m = clicked(s, x, y, false);
+        s.menu = None;
+        return if m == Some(ViewMsg::Ask) { ask(s) } else { None };
+    }
+    match clicked(s, x, y, false) {
         Some(ViewMsg::Nav(v)) => {
             s.view = v;
             s.scroll = 0;
@@ -736,8 +864,10 @@ fn click(s: &mut State, x: i32, y: i32) {
             s.selection = s.procs.get(i).map_or(Selection::None, |p| Selection::Process(p.pid))
         }
         Some(ViewMsg::Deselect) => s.selection = Selection::None,
-        None => {}
+        // The menu's: only while it is open (above).
+        Some(ViewMsg::Menu(_) | ViewMsg::Ask) | None => {}
     }
+    None
 }
 
 fn row_count(s: &State) -> usize {
@@ -783,7 +913,17 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
         }
         WM_LBUTTONDOWN => {
             let (x, y) = ((lparam & 0xffff) as i16 as i32, ((lparam >> 16) & 0xffff) as i16 as i32);
-            click(state(), x, y);
+            let handing = click(state(), x, y);
+            redraw(hwnd);
+            // The state is let go: the panel may send back meanwhile.
+            if let Some(h) = handing {
+                hand_off(hwnd, &h);
+            }
+            0
+        }
+        WM_RBUTTONUP => {
+            let (x, y) = ((lparam & 0xffff) as i16 as i32, ((lparam >> 16) & 0xffff) as i16 as i32);
+            right_click(state(), x, y);
             redraw(hwnd);
             0
         }
@@ -811,6 +951,12 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             match wparam {
                 0x08 => {
                     s.search.pop();
+                }
+                // Esc closes the menu, else clears the search.
+                0x1b if s.menu.is_some() => {
+                    s.menu = None;
+                    redraw(hwnd);
+                    return 0;
                 }
                 0x1b => s.search.clear(),
                 0x20..=0x7e if s.search.len() < 40 => s.search.push(wparam as u8 as char),
@@ -875,6 +1021,7 @@ pub extern "C" fn mainCRTStartup() -> ! {
             handles: History::new(HISTORY),
             trails: Trails::new(HISTORY),
             pending: Vec::new(),
+            menu: None,
         });
     }
     let s = state();

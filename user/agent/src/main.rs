@@ -20,9 +20,10 @@
 //!   first placement, so a window activated once the panel is docked is
 //!   always its context.
 //! - **Hand-off**: WM_COPYDATA of kind `handoff::KIND` from another
-//!   program (Explorer's "Make the change"): the panel docks if hidden
-//!   and lists the request; any other kind, or a malformed one, is
-//!   logged and not taken.
+//!   program: a request (Explorer's "Make the change") or a process to
+//!   ask about (Task Manager's "Ask the agent about this process"); the
+//!   panel docks if hidden and lists it; any other kind, or a malformed
+//!   one, is logged and not taken.
 //! - **Chat**: a request sent is asked of the model on a worker thread
 //!   (`ask`): `agent::chat::body` POSTed to the relay at `chat::HOST`
 //!   over winhttp, loaded on the first ask (a panel that is never asked
@@ -37,8 +38,10 @@
 //! Observability: each line on standard output (`agent: ...`, the serial
 //! log for a program the desktop starts): the start and the remembered
 //! state, every placement with its rectangle, every context, every
-//! hand-off (its program, window, text and element) or why one was not
-//! taken, every request asked (`asking the model: request N, B bytes`)
+//! hand-off (its program, window, text and element, or the process and
+//! the length of its text) or why one was not taken, a process let go
+//! when another program's window is active, every request asked
+//! (`asking the model: request N, B bytes`)
 //! and its answer or why there is none (the winhttp call that failed and
 //! its error, the HTTP status, the relay's message), every message the
 //! panel handled (gala_ui's `click HideButton: Hide`), and what failed
@@ -633,7 +636,7 @@ impl Component for App {
 
     fn update(&mut self, msg: Msg) {
         let placing = matches!(msg, Msg::Hide | Msg::Show)
-            || matches!(msg, Msg::Handoff(_)) && self.panel.hidden;
+            || matches!(msg, Msg::Handoff(_) | Msg::About(_)) && self.panel.hidden;
         if let Msg::Handoff(h) = &msg {
             log(&format!(
                 "handoff from {} (window {:#x}): {:?} on {}",
@@ -643,8 +646,27 @@ impl Component for App {
                 h.element.as_ref().map_or("the whole window", |e| e.id.as_str())
             ));
         }
+        if let Msg::About(a) = &msg {
+            log(&format!(
+                "handoff from {} (window {:#x}): about {} (pid {}, {}), {} bytes of text",
+                a.program,
+                a.window,
+                a.name,
+                a.pid,
+                a.personality(),
+                a.text.len()
+            ));
+        }
         if let Msg::Context(c) = &msg {
             log(&format!("context {}: {}", c.program, c.title));
+            if let Some(a) = &self.panel.about
+                && a.program != c.program
+            {
+                log(&format!(
+                    "no longer about {} (pid {}): {} is active",
+                    a.name, a.pid, c.program
+                ));
+            }
         }
         if let Msg::Send = &msg {
             log(&format!("request {:?}", self.panel.draft));
@@ -678,8 +700,9 @@ impl Component for App {
                     // SAFETY: as above: `size` bytes at `data`.
                     unsafe { core::slice::from_raw_parts(cds.data, cds.size as usize) }
                 };
-                match handoff::decode(bytes) {
-                    Ok(h) => Some(Msg::Handoff(h)),
+                match handoff::receive(bytes) {
+                    Ok(handoff::Received::Request(h)) => Some(Msg::Handoff(h)),
+                    Ok(handoff::Received::About(a)) => Some(Msg::About(a)),
                     Err(e) => {
                         log(&format!("handoff refused ({} bytes): {e:?}", bytes.len()));
                         None

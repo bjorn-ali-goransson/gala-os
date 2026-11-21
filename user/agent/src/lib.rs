@@ -13,7 +13,11 @@
 //! - **Hand-off** ([`handoff`]): a request another program made for
 //!   itself (Explorer's "Make the change"), received by WM_COPYDATA; the
 //!   panel docks if hidden, takes the program as its context and lists
-//!   the request with the part of the window it is about.
+//!   the request with the part of the window it is about. A process
+//!   handed over (Task Manager's "Ask the agent about this process",
+//!   [`handoff::About`]) docks the panel too, is named by the context
+//!   chip and listed ("About: <name> (pid N)"), and its text goes to the
+//!   model with every request asked while it is the panel's subject.
 //!
 //! - **Chat** ([`chat`]): a request typed and sent is asked of the model
 //!   (the program POSTs `chat::body` on a worker thread); its reply card
@@ -122,55 +126,144 @@ pub mod handoff {
         pub element: Option<Element>,
     }
 
+    /// A process handed over to be asked about (Task Manager's "Ask the
+    /// agent about this process"): who sent it, the process, and the
+    /// text Task Manager gives for its row (`taskmgr::row_text`).
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct About {
+        /// The sender's name ("Task Manager"), its window's title and
+        /// its window.
+        pub program: String,
+        pub title: String,
+        pub window: u64,
+        /// The process: its name (its image), pid and personality.
+        pub name: String,
+        pub pid: u64,
+        pub linux: bool,
+        /// Its command line, empty where it is not known.
+        pub command_line: String,
+        /// The row as text: its values and their recent history.
+        pub text: String,
+    }
+
+    impl About {
+        /// Its personality as the wire form and the panel say it.
+        pub fn personality(&self) -> &'static str {
+            if self.linux { "Linux" } else { "Windows" }
+        }
+    }
+
+    /// What a hand-off is: a request on a program, or a process to ask
+    /// about.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Received {
+        Request(Handoff),
+        About(About),
+    }
+
     /// Why a hand-off was not taken.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Refused {
         TooLong,
         NotUtf8,
-        /// Not `gala-handoff 1` and its fields.
+        /// Not one of the forms below (`gala-handoff 1`, `gala-process
+        /// 1`) and its fields.
         Malformed,
     }
 
     const MAGIC: &str = "gala-handoff 1";
+    const MAGIC_ABOUT: &str = "gala-process 1";
+
+    /// Fields `f` as the wire form: each without NULs, each ended by one.
+    fn fields(f: &[&str]) -> Vec<u8> {
+        let mut out = String::new();
+        for s in f {
+            out.extend(s.chars().filter(|&c| c != '\0'));
+            out.push('\0');
+        }
+        out.into_bytes()
+    }
+
+    /// The fields of a hand-off of at most `MAX` bytes of UTF-8, each
+    /// ended by a NUL.
+    fn split(bytes: &[u8]) -> Result<Vec<&str>, Refused> {
+        if bytes.len() > MAX {
+            return Err(Refused::TooLong);
+        }
+        let s = core::str::from_utf8(bytes).map_err(|_| Refused::NotUtf8)?;
+        let s = s.strip_suffix('\0').ok_or(Refused::Malformed)?;
+        Ok(s.split('\0').collect())
+    }
+
+    /// A process to ask about, in its wire form: the magic `gala-process
+    /// 1`, the sender's program, title and window (hex), the process's
+    /// name, pid (decimal), personality (`Windows` or `Linux`), command
+    /// line and text, each ended by a NUL as a request's fields are. Its
+    /// own magic, so a request's form (`encode`) is unchanged and a
+    /// panel that knows only requests refuses it as Malformed.
+    pub fn encode_about(a: &About) -> Vec<u8> {
+        fields(&[
+            MAGIC_ABOUT,
+            &a.program,
+            &a.title,
+            &alloc::format!("{:x}", a.window),
+            &a.name,
+            &alloc::format!("{}", a.pid),
+            a.personality(),
+            &a.command_line,
+            &a.text,
+        ])
+    }
+
+    /// Either form, by its magic.
+    pub fn receive(bytes: &[u8]) -> Result<Received, Refused> {
+        let f = split(bytes)?;
+        match f.first() {
+            Some(&MAGIC) => decode(bytes).map(Received::Request),
+            Some(&MAGIC_ABOUT) => {
+                let [_, program, title, window, name, pid, personality, command_line, text] = f[..]
+                else {
+                    return Err(Refused::Malformed);
+                };
+                let linux = match personality {
+                    "Windows" => false,
+                    "Linux" => true,
+                    _ => return Err(Refused::Malformed),
+                };
+                Ok(Received::About(About {
+                    program: program.into(),
+                    title: title.into(),
+                    window: u64::from_str_radix(window, 16).map_err(|_| Refused::Malformed)?,
+                    name: name.into(),
+                    pid: pid.parse().map_err(|_| Refused::Malformed)?,
+                    linux,
+                    command_line: command_line.into(),
+                    text: text.into(),
+                }))
+            }
+            _ => Err(Refused::Malformed),
+        }
+    }
 
     /// The wire form: UTF-8, fields separated by NUL (no field holds
     /// one; a NUL typed into a field is dropped): the magic, program,
     /// title, window (hex), text, then the element's id, label and
     /// rectangle (x, y, w, h in decimal), empty when there is none.
     pub fn encode(h: &Handoff) -> Vec<u8> {
-        let mut out = String::new();
-        let mut field = |s: &str| {
-            out.extend(s.chars().filter(|&c| c != '\0'));
-            out.push('\0');
-        };
-        field(MAGIC);
-        field(&h.program);
-        field(&h.title);
-        field(&alloc::format!("{:x}", h.window));
-        field(&h.text);
-        match &h.element {
+        let window = alloc::format!("{:x}", h.window);
+        let (id, label, rect) = match &h.element {
             Some(e) => {
-                field(&e.id);
-                field(&e.label);
                 let [x, y, w, hh] = e.rect;
-                field(&alloc::format!("{x},{y},{w},{hh}"));
+                (e.id.as_str(), e.label.as_str(), alloc::format!("{x},{y},{w},{hh}"))
             }
-            None => {
-                field("");
-                field("");
-                field("");
-            }
-        }
-        out.into_bytes()
+            None => ("", "", String::new()),
+        };
+        fields(&[MAGIC, &h.program, &h.title, &window, &h.text, id, label, &rect])
     }
 
+    /// A request (`gala-handoff 1`); a process's form is Malformed here.
     pub fn decode(bytes: &[u8]) -> Result<Handoff, Refused> {
-        if bytes.len() > MAX {
-            return Err(Refused::TooLong);
-        }
-        let s = core::str::from_utf8(bytes).map_err(|_| Refused::NotUtf8)?;
-        let s = s.strip_suffix('\0').ok_or(Refused::Malformed)?;
-        let f: Vec<&str> = s.split('\0').collect();
+        let f = split(bytes)?;
         let [magic, program, title, window, text, id, label, rect] = f[..] else {
             return Err(Refused::Malformed);
         };
@@ -211,6 +304,8 @@ pub enum Msg {
     Context(Context),
     /// A program handed a request over (WM_COPYDATA).
     Handoff(handoff::Handoff),
+    /// A program handed a process over to be asked about (WM_COPYDATA).
+    About(handoff::About),
     /// The model's reply to request `.0` (the program's worker thread).
     Answer(usize, Reply),
 }
@@ -222,6 +317,10 @@ pub struct Panel {
     pub context: Option<Context>,
     pub draft: String,
     pub requests: Vec<Request>,
+    /// The process the panel is about (Task Manager's "Ask the agent"),
+    /// until a window of another program is active: the chip names it
+    /// and the model is told about it (`chat::body`).
+    pub about: Option<handoff::About>,
 }
 
 /// The name a program goes by, from its file's name: gala's own
@@ -276,8 +375,23 @@ impl Panel {
                     .on_click(Msg::Show),
             );
         }
-        let chip = match &self.context {
-            Some(c) => row()
+        let chip = match (&self.about, &self.context) {
+            (Some(a), _) => row()
+                .id("ContextChip")
+                .gap(6)
+                .padding((6, 12))
+                .radius(14)
+                .bg(CHIP)
+                .align(Align::Center)
+                .child(text(a.name.clone()).id("ContextProgram").bold().size(13))
+                .child(
+                    text(alloc::format!("pid {}, {}", a.pid, a.personality()))
+                        .id("ContextTitle")
+                        .size(13)
+                        .color(MUTED)
+                        .ellipsis(),
+                ),
+            (None, Some(c)) => row()
                 .id("ContextChip")
                 .gap(6)
                 .padding((6, 12))
@@ -286,7 +400,7 @@ impl Panel {
                 .align(Align::Center)
                 .child(text(c.program.clone()).id("ContextProgram").bold().size(13))
                 .child(text(c.title.clone()).id("ContextTitle").size(13).color(MUTED).ellipsis()),
-            None => row()
+            (None, None) => row()
                 .id("ContextChip")
                 .padding((6, 12))
                 .radius(14)
@@ -373,7 +487,7 @@ impl Panel {
     pub fn asking(&self) -> Option<(usize, String)> {
         let i = self.requests.len().checked_sub(1)?;
         (self.requests[i].answer == Some(Answer::Asking))
-            .then(|| (i, chat::body(self.context.as_ref(), &self.requests)))
+            .then(|| (i, chat::body(self.context.as_ref(), self.about.as_ref(), &self.requests)))
     }
 
     pub fn update(&mut self, msg: Msg) {
@@ -405,10 +519,10 @@ impl Panel {
                     };
                 }
             }
-            Msg::Context(c) => self.context = Some(c),
+            Msg::Context(c) => self.set_context(c),
             Msg::Handoff(h) => {
                 self.hidden = false;
-                self.context = Some(Context { program: h.program.clone(), title: h.title });
+                self.set_context(Context { program: h.program.clone(), title: h.title });
                 self.requests.push(Request {
                     program: h.program,
                     text: h.text,
@@ -416,7 +530,29 @@ impl Panel {
                     answer: None,
                 });
             }
+            Msg::About(a) => {
+                self.hidden = false;
+                self.context = Some(Context { program: a.program.clone(), title: a.title.clone() });
+                self.requests.push(Request {
+                    program: a.program.clone(),
+                    text: alloc::format!("About: {} (pid {})", a.name, a.pid),
+                    element: None,
+                    answer: None,
+                });
+                self.about = Some(a);
+            }
         }
+    }
+
+    /// The active window's program and title. A process handed over
+    /// stays what the panel is about while its sender's windows are
+    /// active (Task Manager's, the panel's own never being a context)
+    /// and is let go when another program's is.
+    fn set_context(&mut self, c: Context) {
+        if self.about.as_ref().is_some_and(|a| a.program != c.program) {
+            self.about = None;
+        }
+        self.context = Some(c);
     }
 }
 
@@ -541,6 +677,134 @@ mod tests {
         assert_eq!(decode(b"gala-handoff 1\0a"), Err(Refused::Malformed));
         assert_eq!(decode(&[0xff, 0]), Err(Refused::NotUtf8));
         assert_eq!(decode(&[b'a'; handoff::MAX + 1]), Err(Refused::TooLong));
+    }
+
+    fn process() -> handoff::About {
+        handoff::About {
+            program: "Task Manager".into(),
+            title: "Task Manager".into(),
+            window: 0x20030,
+            name: "sleep".into(),
+            pid: 4108,
+            linux: true,
+            command_line: "sleep 1000".into(),
+            text: "Name: sleep\nPID: 4108\nCPU over the last 3 s: 0.0, 0.1, 0.0".into(),
+        }
+    }
+
+    #[test]
+    fn a_request_keeps_its_bytes() {
+        // Explorer's form, byte for byte as before processes could be
+        // handed over (agent_test sends these same bytes).
+        assert_eq!(
+            handoff::encode(&sample()),
+            b"gala-handoff 1\0File Explorer\0tmp\x0020010\0bigger, with\ntwo lines\0\
+              AddressBar\0the address bar\x0064,-2,600,32\0"
+        );
+        let none = handoff::Handoff { element: None, ..sample() };
+        assert_eq!(
+            handoff::encode(&none),
+            b"gala-handoff 1\0File Explorer\0tmp\x0020010\0bigger, with\ntwo lines\0\0\0\0"
+        );
+        assert_eq!(handoff::receive(&handoff::encode(&none)), Ok(handoff::Received::Request(none)));
+    }
+
+    #[test]
+    fn a_process_round_trips_and_refuses() {
+        use handoff::{Received, Refused, decode, encode_about, receive};
+        let a = process();
+        let bytes = encode_about(&a);
+        assert_eq!(
+            bytes,
+            b"gala-process 1\0Task Manager\0Task Manager\x0020030\0sleep\x004108\0Linux\0\
+              sleep 1000\0Name: sleep\nPID: 4108\nCPU over the last 3 s: 0.0, 0.1, 0.0\0"
+        );
+        assert_eq!(receive(&bytes), Ok(Received::About(a.clone())));
+        let windows = handoff::About { linux: false, command_line: String::new(), ..a.clone() };
+        assert_eq!(receive(&encode_about(&windows)), Ok(Received::About(windows)));
+        // A NUL in the text cannot split it.
+        let nul = handoff::About { text: "a\0b".into(), ..a.clone() };
+        assert_eq!(
+            receive(&encode_about(&nul)),
+            Ok(Received::About(handoff::About { text: "ab".into(), ..a.clone() }))
+        );
+        // Only `receive` takes it: a panel that knows requests alone
+        // (`decode`) refuses it.
+        assert_eq!(decode(&bytes), Err(Refused::Malformed));
+        let refused = |b: &[u8]| receive(b).err();
+        assert_eq!(
+            refused(b"gala-process 2\0a\0b\x001\0n\x001\0Windows\0\0t\0"),
+            Some(Refused::Malformed)
+        );
+        assert_eq!(
+            refused(b"gala-process 1\0a\0b\x001\0n\x001\0Mac\0\0t\0"),
+            Some(Refused::Malformed)
+        );
+        assert_eq!(
+            refused(b"gala-process 1\0a\0b\x001\0n\0-1\0Linux\0\0t\0"),
+            Some(Refused::Malformed)
+        );
+        assert_eq!(
+            refused(b"gala-process 1\0a\0b\0zz\0n\x001\0Linux\0\0t\0"),
+            Some(Refused::Malformed)
+        );
+        assert_eq!(
+            refused(b"gala-process 1\0a\0b\x001\0n\x001\0Linux\0\0"),
+            Some(Refused::Malformed)
+        );
+        assert_eq!(
+            refused(b"gala-process 1\0a\0b\x001\0n\x001\0Linux\0\0t"),
+            Some(Refused::Malformed)
+        );
+        assert_eq!(refused(b"gala-handoff 1\0short\0"), Some(Refused::Malformed));
+        assert_eq!(refused(b""), Some(Refused::Malformed));
+        assert_eq!(refused(&[0xff, 0]), Some(Refused::NotUtf8));
+        let long = handoff::About { text: "x".repeat(handoff::MAX), ..a };
+        assert_eq!(refused(&encode_about(&long)), Some(Refused::TooLong));
+    }
+
+    #[test]
+    fn a_process_docks_and_is_what_the_panel_is_about() {
+        let mut p = Panel { hidden: true, ..Panel::default() };
+        p.update(Msg::About(process()));
+        assert!(!p.hidden);
+        let placed = lay(&p, WIDTH, 752);
+        assert_eq!(at(&placed, "ContextProgram").text, "sleep");
+        assert_eq!(at(&placed, "ContextTitle").text, "pid 4108, Linux");
+        assert_eq!(at(&placed, "Request0Text").text, "About: sleep (pid 4108)");
+        assert!(placed.iter().all(|e| e.id.as_deref() != Some("Request0Element")));
+        // Listed, not asked.
+        assert_eq!(p.asking(), None);
+        assert!(placed.iter().all(|e| e.id.as_deref() != Some("Reply0")));
+        // A question then goes to the model with the process's text.
+        p.update(Msg::Draft("why is it busy?".into()));
+        p.update(Msg::Send);
+        let (i, body) = p.asking().unwrap();
+        assert_eq!(i, 1);
+        assert!(body.contains("as Task Manager shows it:\\nName: sleep\\nPID: 4108"), "{body}");
+        assert!(body.ends_with("{\"role\":\"user\",\"content\":\"why is it busy?\"}]}"), "{body}");
+        // Task Manager active again: still about the process.
+        p.update(Msg::Context(Context {
+            program: "Task Manager".into(),
+            title: "Task Manager".into(),
+        }));
+        assert_eq!(at(&lay(&p, WIDTH, 752), "ContextProgram").text, "sleep");
+        // Another program active: the chip names it, the process is let
+        // go (its card stays), and the model is no longer told of it.
+        p.update(Msg::Context(Context { program: "Notepad".into(), title: "a.txt".into() }));
+        let placed = lay(&p, WIDTH, 752);
+        assert_eq!(at(&placed, "ContextProgram").text, "Notepad");
+        assert_eq!(at(&placed, "ContextTitle").text, "a.txt");
+        assert_eq!(at(&placed, "Request0Text").text, "About: sleep (pid 4108)");
+        assert_eq!(p.about, None);
+        p.update(Msg::Draft("and now?".into()));
+        p.update(Msg::Send);
+        assert!(!p.asking().unwrap().1.contains("asks about the process"));
+        // A request handed over by another program lets it go too.
+        p.update(Msg::About(process()));
+        p.update(Msg::Handoff(sample()));
+        assert_eq!(p.about, None);
+        assert_eq!(at(&lay(&p, WIDTH, 752), "ContextProgram").text, "File Explorer");
     }
 
     #[test]

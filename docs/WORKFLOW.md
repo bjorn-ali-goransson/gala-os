@@ -2871,12 +2871,44 @@ A root is what its workload opened on real 26.04, traced:
   victim's list filtered (4, 7, 10, 13) and its row selected (5 the
   app, 8 `sleep`, 11 `sh`, 14 the distribution's heading), 16 what is
   left).
+- Scenario `taskmgr_agent` (`cargo xtask boot-test 'taskmgr_agent$'`):
+  UEFI with `user/taskmgr_agent_test` and the agent panel (both
+  `taskmgr.exe` and `agent.exe` in System32). The test waits for the
+  panel docked and prints where its Hide button is; TASKMGR_AGENT_SCREEN
+  clicks it (`click_on`), opens Task Manager with Ctrl+Shift+Esc and
+  types `agent_`, which leaves the test's own row first under
+  Background processes; the test prints where that row is,
+  `right_click_on` right-clicks it (the screen then has the white menu
+  over the list), the test prints where the menu's item is and
+  `click_on` clicks it; the test then waits for the panel docked with
+  `Request0Text` "About: taskmgr_agent_test.exe (pid N)", checks the
+  chip (`ContextProgram`, `ContextTitle` "pid N, Windows"), that
+  nothing else was listed or asked and that Task Manager kept the
+  foreground, prints `listed`, and Alt+F4 closes Task Manager. No
+  relay: nothing is asked. Reading a run: `taskmgr: right click
+  ProcessList.Process.<pid>`, `taskmgr: menu for ... (pid N)`,
+  `taskmgr: click Menu.AskTheAgent`, `agent: handoff from Task Manager
+  (window 0x..): about ... (pid N, Windows), B bytes of text` and
+  `taskmgr: ask the agent about ... (pid N): handed to the agent panel
+  (window 0x.., B bytes): TRUE` (the panel's line comes first: it is
+  written while Task Manager's send waits).
+- Pitfalls (`taskmgr_agent`): Task Manager serves no UI Automation, so
+  the test cannot find its row or menu item by id; it computes them
+  from the window's geometry (`ROWS_Y`, `ROW_H`, the menu's
+  `MENU_EDGE` and `MENU_ROW`: change them and the test with them). The
+  client origin comes from GetWindowRect and AdjustWindowRectEx of the
+  window's styles, since gala's ClientToScreen fails for another
+  process's window (ARCHITECTURE "Plan: windows across processes").
+  The panel must be hidden first, or the hand-off's "docks if hidden"
+  is not exercised.
 - Host tests: `cargo test -p kernel --lib nt::tasks` (the layout),
   `nt::desktop` (Ctrl+Shift+Esc, the PROGRAMS entry), `cargo
   test -p taskmgr` (parsing, groups, sorting, search, CPU shares,
-  formats, End task's targets, the window's view: `window::tests`
-  checks each part's rectangle, the clicks' messages and the pictures'
-  `src`). `cargo clippy -p taskmgr --lib --tests`
+  formats, End task's targets, a row's text and its hand-off to the
+  agent panel, the window's view: `window::tests` checks each part's
+  rectangle, the clicks' and right clicks' messages, the process menu
+  and the pictures' `src`); `cargo test -p agent --lib` the hand-off's
+  forms both ways. `cargo clippy -p taskmgr --lib --tests`
   checks the library on the host (the program links Windows DLLs).
 - Reading a run: `desktop: Ctrl+Shift+Esc: Task Manager`, `desktop:
   system key starts Task Manager: ...` (or shasha's `shasha: start

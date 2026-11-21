@@ -4,9 +4,14 @@
 //! task, the column headers, the rows, and Performance's graphs and list.
 //! Every part that can be clicked has its automation id (SearchBox,
 //! NavigationPane.<view>, EndTaskButton, ColumnHeader.<column>,
-//! ProcessList, ProcessList.Process.<pid>, ProcessList.Group.<heading>);
-//! `taskmgr.exe` paints the laid-out view and routes clicks through
-//! `gala_ui::click`.
+//! ProcessList, ProcessList.Process.<pid>, ProcessList.Group.<heading>,
+//! and the process menu's Menu and Menu.AskTheAgent); `taskmgr.exe`
+//! paints the laid-out view and routes clicks through `gala_ui::click`
+//! and right clicks through `gala_ui::right_click`.
+//!
+//! A right click on a process's row opens its menu ([`Look::menu`], drawn
+//! last so it is on top of the list): one item, "Ask the agent about this
+//! process" ([`Msg::Ask`]), which hands the process to the agent panel.
 //!
 //! The sparklines and the graphs are images ([`Picture`]): the view says
 //! where and of what, the program draws them (`Canvas::image`), since
@@ -63,6 +68,12 @@ pub const SIDE_W: i32 = 196;
 pub const SIDE_ROW_H: i32 = 56;
 /// Where the columns start.
 pub const LIST_X: i32 = NAV_W + 8;
+/// The process menu: its width, its edge and an item's height.
+pub const MENU_W: i32 = 260;
+pub const MENU_EDGE: i32 = 4;
+pub const MENU_ROW: i32 = 30;
+/// The menu's item, as Windows' context menus put it.
+pub const ASK_TEXT: &str = "Ask the agent about this process";
 
 pub const PROCESS_COLUMNS: &[(Column, i32)] = &[
     (Column::Name, 300),
@@ -110,6 +121,10 @@ pub enum Msg {
     Select(Row),
     /// The list below its rows: nothing selected.
     Deselect,
+    /// A right click on a process's row (its index): its menu.
+    Menu(Row),
+    /// The menu's "Ask the agent about this process".
+    Ask,
 }
 
 /// A metric with a minute of samples.
@@ -263,6 +278,9 @@ pub struct Look<'a> {
     pub memory_scale: u32,
     pub perf: Option<&'a Perf>,
     pub load: Load<'a>,
+    /// The process menu, open where it was asked for (the client
+    /// point of the right click), for the selected row.
+    pub menu: Option<(i32, i32)>,
 }
 
 /// The id of a part named `name`: the kind's id, a dot, the name
@@ -466,11 +484,16 @@ fn list(l: &Look) -> Node<Msg> {
     let processes_view = l.view == View::Processes;
     let fits = ((h - ROWS_Y) / ROW_H).max(0) as usize;
     let row_of = |k: usize, id: String, on: bool, m: Row| {
-        at(0, ROW_H * k as i32, w - NAV_W - 1, ROW_H).id(id).on_click(Msg::Select(m)).bg(if on {
-            SELECTED
-        } else {
-            CONTENT
-        })
+        // A process's row has its menu; a group's heading has none.
+        let menu = matches!(m, Row::Process(_)).then(|| Msg::Menu(m.clone()));
+        let r = at(0, ROW_H * k as i32, w - NAV_W - 1, ROW_H)
+            .id(id)
+            .on_click(Msg::Select(m))
+            .bg(if on { SELECTED } else { CONTENT });
+        match menu {
+            Some(m) => r.on_right_click(m),
+            None => r,
+        }
     };
     let rows: Vec<Node<Msg>> = if processes_view {
         l.rows
@@ -679,6 +702,27 @@ fn performance(l: &Look) -> Vec<Node<Msg>> {
     out
 }
 
+/// Where the process menu opened at the client point `(x, y)` goes: its
+/// top left corner at the point, moved in so the whole menu is in the
+/// window.
+pub fn menu_at(size: (i32, i32), (x, y): (i32, i32)) -> (i32, i32) {
+    let (w, h) = size;
+    let mh = MENU_ROW + 2 * MENU_EDGE;
+    (x.min(w - MENU_W).max(0), y.min(h - mh).max(0))
+}
+
+/// The process menu at `at` (from [`menu_at`]): white, framed, its one
+/// item.
+fn menu(size: (i32, i32), point: (i32, i32)) -> Node<Msg> {
+    let (x, y) = menu_at(size, point);
+    at(x, y, MENU_W, MENU_ROW + 2 * MENU_EDGE).id("Menu").bg(WHITE).border(CONTROL_BORDER).child(
+        at(MENU_EDGE, MENU_EDGE, MENU_W - 2 * MENU_EDGE, MENU_ROW)
+            .id("Menu.AskTheAgent")
+            .on_click(Msg::Ask)
+            .child(label(ASK_TEXT, 12, 7, MENU_W - 2 * MENU_EDGE - 24)),
+    )
+}
+
 /// The window, laid out for `l.size`.
 pub fn view(l: &Look) -> Node<Msg> {
     let (w, h) = l.size;
@@ -703,6 +747,7 @@ pub fn view(l: &Look) -> Node<Msg> {
         .color(TEXT)
         .child(top(l))
         .child(page)
+        .children(l.menu.map(|at| menu(l.size, at)))
 }
 
 #[cfg(test)]

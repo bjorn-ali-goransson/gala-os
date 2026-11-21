@@ -8687,6 +8687,27 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   across processes. Explorer's "Make the change" is the first sender
   ("The file explorer"); test `agent` sends one of each, and scenario
   `explorer_agent` drives Explorer's end to end.
+- **A process to ask about** (Task Manager's "Ask the agent about this
+  process", "The task manager"): the same channel and kind, its own
+  form (`handoff::encode_about`): `gala-process 1`, the program, its
+  window's title, its window (hex), the process's name, pid
+  (decimal), personality (`Windows` or `Linux`), command line (empty
+  when not known) and the row as text (`taskmgr::row_text`), each
+  ended by a NUL. `handoff::receive` reads either form by its first
+  field. A form of its own rather than fields added to the request's:
+  the request's bytes stay what they were (host test
+  `a_request_keeps_its_bytes`), and a panel that knows only requests
+  refuses a process as Malformed instead of misreading it; a wrong
+  field count, an unknown personality or a pid or window that is not
+  a number is Malformed too. Taken, the panel docks if hidden, the
+  context chip shows the process (`ContextProgram` its name,
+  `ContextTitle` "pid N, <personality>"), the process is listed as
+  "About: <name> (pid N)" (a hand-off: listed, not asked) and kept as
+  what the panel is about until another program's window becomes the
+  context; while it is kept, `chat::body`'s system message adds "The
+  user asks about the process <name> (pid N, <personality>), as
+  <program> shows it:" and the text, so the next question is about it.
+  Scenario `taskmgr_agent` drives it end to end.
 - **Chat**: Send lists the prompt as a request and asks the model on a
   worker thread: `chat::body` (the chat-completions form without a
   model: a system message naming the context's program and title,
@@ -8714,7 +8735,8 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   Each exchange is a line `xtask: agent-relay: <hash> replayed |
   recorded | not recorded (...)`, added to the end of the serial log.
 - **Not there yet** (ROADMAP): the `run` tool and asking on a
-  hand-off.
+  hand-off; tools that read more about a process handed to it (its
+  threads, stacks and handles: ROADMAP TM step 1's inspection).
 - **Observability**: `agent: started docked` / `started hidden
   (remembered)`, `agent: docked at x,y wxh`, `agent: hidden: the dock
   tab at x,y wxh`, `agent: docked without a strip: ABM_NEW refused`,
@@ -8722,7 +8744,10 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   <title>`, gala_ui's `agent: click <id>: <message>`, `agent: request
   ...`, `agent: handoff from <program> (window 0x..): "<text>" on
   <element id | the whole window>`, `agent: handoff refused (<n>
-  bytes): <why>`, `agent: WM_COPYDATA of kind 0x.. not taken`,
+  bytes): <why>`, `agent: handoff from <program> (window 0x..): about
+  <name> (pid N, <personality>), B bytes of text`, `agent: no longer
+  about <name> (pid N): <program> is active`, `agent: WM_COPYDATA of
+  kind 0x.. not taken`,
   `agent: asking the model: request N, B bytes`, `agent: answer N:
   "..."`, `agent: no answer N: <why>` (the winhttp call and its error,
   the HTTP status, the relay's message),
@@ -15322,7 +15347,8 @@ query; host tests there), `user/taskmgr` (gala's `taskmgr.exe`: the
 library is the model, host-tested with `cargo test -p taskmgr`;
 `main.rs` the window), `nt::desktop` (Ctrl+Shift+Esc, the taskbar's
 context menu, the start menu's tile). Test: `taskmgr_test`, scenario
-`taskmgr` (screen check `TASKMGR_SCREEN`).
+`taskmgr` (screen check `TASKMGR_SCREEN`); `taskmgr_agent_test`,
+scenario `taskmgr_agent` (`TASKMGR_AGENT_SCREEN`: "Ask the agent").
 
 ### The data (step 1)
 
@@ -15449,7 +15475,7 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   that are clicked have automation ids (SearchBox,
   NavigationPane.<view>, EndTaskButton, ColumnHeader.<column>,
   ProcessList, ProcessList.Process.<pid>,
-  ProcessList.Group.<heading>). The sparklines and graphs are images
+  ProcessList.Group.<heading>, Menu, Menu.AskTheAgent). The sparklines and graphs are images
   whose `src` is a `window::Picture` (`trail:cpu:<process>:<scale>:<cell
   colour>`, `graph:<series>:...`, `spark:<series>:...`): the view says
   where and of what, and `main.rs`'s canvas (`Pictures`, over
@@ -15457,7 +15483,9 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   does not know is logged `taskmgr: picture: not one of the view's`.
   A click lays the view out again for the state as it is and goes
   through `gala_ui::click` (logged `taskmgr: click <id>`) to the
-  window's message (`window::Msg`); a refused view is logged
+  window's message (`window::Msg`); a right click goes through
+  `gala_ui::right_click` the same way (`taskmgr: right click <id>`;
+  only a process's row has a message for it); a refused view is logged
   `taskmgr: view: <error>`. The timer, the wheel and the keys stay the
   program's: the view is built from the state at each paint, so the
   refresh needed nothing of `gala_ui`. The geometry is the hand-drawn
@@ -15549,9 +15577,48 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   window). The taskbar's context menu is not in shasha yet. `gala start "Task Manager"`
   is the CLI's way; `gala ps` lists both personalities from the same
   query and `gala kill <pid>` ends a Linux process as End task does.
+- **Ask the agent** (step 6): a right click (WM_RBUTTONUP) on a
+  process's row, in Processes or Details, selects the process and
+  opens its menu where the click was (`Look::menu`, moved in so it is
+  all in the window by `window::menu_at`; the view's last child, so it
+  is drawn over the list and hit first). Its one item, "Ask the agent
+  about this process" (`Menu.AskTheAgent`, `Msg::Ask`), hands the
+  process to the docked agent panel ("The agent panel", A process to
+  ask about) by WM_COPYDATA in `agent::handoff`'s process form, built by
+  `taskmgr::ask`: name (the image), pid, personality, command line and
+  `taskmgr::row_text`, the row as text (`<column>: <value>` lines with
+  `\r\n` between them for every Details column, the command line only
+  when known, `Window: <title>` when there is one, then the CPU and
+  Memory columns' rings oldest first as percentages, of all the
+  processors and of the machine's memory). That text is the one Copy
+  will put on the clipboard (ROADMAP TM step 4), host-tested
+  byte-for-byte. A row longer than the hand-off's `MAX` has its command
+  line cut (in the field and the text alike, at a character's edge,
+  with "..."), then the window's title; a row that still does not fit
+  is not handed. While the menu is open a left click is the menu's:
+  the item asks, anywhere else closes it; Esc closes it too (and the
+  search is kept). **Invariant**: the WM_COPYDATA is sent after the
+  window procedure has let go of the state (`click` returns what to
+  hand, `hand_off` sends it): SendMessageW waits for the panel, which
+  may send to this window meanwhile, and `state()` is never borrowed
+  twice. Observability: `taskmgr: right click <id>`, `taskmgr: menu
+  for <image> (pid N)`, `taskmgr: click Menu.AskTheAgent`, then
+  `taskmgr: ask the agent about <image> (pid N): handed to the agent
+  panel (window 0x.., B bytes): TRUE`, `... not taken by the agent
+  panel (...): FALSE`, `... no agent panel to hand the process to`,
+  `ask the agent about pid N: it has ended`, `...: its row does not
+  fit in a hand-off` or `...: B bytes of its command line cut to fit`.
+  Scenario `taskmgr_agent`: the panel hidden, Ctrl+Shift+Esc, a search
+  that leaves the test's own row first, a right click on it, the item,
+  then the panel docked with the process listed and Task Manager still
+  in the foreground.
 - **Limits**: no per-process disk, network, GPU or power columns (no
   counters: ledgered), and so no sparkline for them either; no process
-  tree within a group; "Not responding"
+  tree within a group; the window serves no UI Automation (its window
+  procedure is its own, not `gala_ui::win::open`), so its parts,
+  the menu's item included, have ids and names that no client can find
+  yet; the process menu has one item (no End task, Open file location
+  or Properties on it yet); "Not responding"
   is decided for Windows windows only (below); the Users, Services, Startup and App history pages are not
   there; End task waits for a distribution's end on the window's
   thread (up to `lx::distro`'s 10 s).
@@ -16962,6 +17029,14 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
   as numbers. GetWindowText of another process's window returns the
   mirrored text, as documented (it does not send WM_GETTEXT across
   processes; programs send WM_GETTEXT themselves).
+- ClientToScreen, ScreenToClient and MapWindowPoints know the calling
+  process's windows only: the registry record has a window's rectangle
+  and styles but not its client area, so for another process's window
+  they fail (0, the point untouched), where Windows succeeds. A
+  program that needs another window's client origin takes
+  GetWindowRect and insets it by AdjustWindowRectEx of the window's
+  GWL_STYLE and GWL_EXSTYLE, which holds on Windows too
+  (`taskmgr_agent_test` finds Task Manager's row that way).
 - GalaWindowSend's request has flags at bytes 44..48 (0: SendMessage),
   given back by GalaWindowReceive's header at 44..48:
   - SEND_NOTIFY (1, SendNotifyMessage): nobody waits; the entry goes

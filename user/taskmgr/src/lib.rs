@@ -18,6 +18,10 @@
 //!   box (a Performance graph's, a row's sparkline), and [`Trails`],
 //!   one ring pair per process behind the CPU and Memory columns'
 //!   sparklines;
+//! - [`row_text`]: a process's row as text, its values and their recent
+//!   history (what Copy gives, ROADMAP TM step 4), and [`ask`], the
+//!   same text handed to the agent panel ("Ask the agent about this
+//!   process", step 6) in `agent::handoff`'s process form;
 //! - [`window`]: the window as a `gala_ui` view.
 //!
 //! `no_std` with `alloc`: `taskmgr.exe` is freestanding (`gala_heap`).
@@ -788,6 +792,141 @@ pub fn end_of(row: &Row, procs: &[Proc]) -> End {
 /// How long a Linux process has after SIGTERM before SIGKILL, in ms.
 pub const SIGTERM_GRACE_MS: u64 = 3000;
 
+/// How often the program samples (its timer), which is the spacing of a
+/// row's history.
+pub const SAMPLE_SECONDS: u32 = 1;
+
+/// A process's row as text, one `<column>: <value>` line each (`\r\n`
+/// between them, as text on the clipboard): every Details column with
+/// the image as its name and the command line only when it is known,
+/// its window's title when it has one, and the CPU and Memory columns'
+/// recent history (`trails`; oldest first, a sample every
+/// [`SAMPLE_SECONDS`]) as percentages: the CPU of all the processors,
+/// the memory of the machine's `memory_total`. `share` is its CPU now
+/// (per mille of all processors).
+pub fn row_text(p: &Proc, share: u32, trails: &Trails, memory_total: u64) -> String {
+    let mut s = String::new();
+    let line = |s: &mut String, title: &str, value: &str| {
+        if !s.is_empty() {
+            s.push_str("\r\n");
+        }
+        s.push_str(title);
+        s.push_str(": ");
+        s.push_str(value);
+    };
+    for &(c, _) in window::DETAIL_COLUMNS {
+        let value = cell(p, share, c, false);
+        if c == Column::CommandLine && value.is_empty() {
+            continue;
+        }
+        line(&mut s, c.title(), &value);
+    }
+    if !p.title.is_empty() {
+        line(&mut s, "Window", &p.title);
+    }
+    let history = |h: &History| {
+        let mut v = String::new();
+        for (k, x) in h.iter().enumerate() {
+            if k > 0 {
+                v.push_str(", ");
+            }
+            v.push_str(&percent(x));
+        }
+        v
+    };
+    if let Some(h) = trails.cpu(p).filter(|h| !h.is_empty()) {
+        let mut t = String::new();
+        let _ = write!(
+            t,
+            "CPU over the last {} s (a sample every {} s, oldest first, of all processors)",
+            h.len() as u32 * SAMPLE_SECONDS,
+            SAMPLE_SECONDS
+        );
+        line(&mut s, &t, &history(h));
+    }
+    if let Some(h) = trails.memory(p).filter(|h| !h.is_empty() && memory_total > 0) {
+        let mut t = String::new();
+        let _ = write!(
+            t,
+            "Memory over the last {} s (a sample every {} s, oldest first, of the machine's {})",
+            h.len() as u32 * SAMPLE_SECONDS,
+            SAMPLE_SECONDS,
+            memory(memory_total)
+        );
+        line(&mut s, &t, &history(h));
+    }
+    s
+}
+
+/// The sender of [`ask`]: Task Manager's name, its window's title and
+/// its window.
+pub struct Sender<'a> {
+    pub program: &'a str,
+    pub title: &'a str,
+    pub window: u64,
+}
+
+/// "Ask the agent about this process": `p`'s row ([`row_text`]) in the
+/// agent panel's process form (`agent::handoff::encode_about`), its
+/// bytes within the hand-off's `MAX`.
+pub struct Ask {
+    pub about: agent::handoff::About,
+    pub bytes: Vec<u8>,
+    /// The bytes cut from the command line (and the window's title,
+    /// for a title too long to fit beside it) so it fits; 0: none.
+    pub cut: usize,
+}
+
+/// `s` cut by at least `by` bytes (at a character's edge), with "..."
+/// to say so; empty when that leaves nothing.
+fn shorten(s: &mut String, by: usize) {
+    let mut keep = s.len().saturating_sub(by + 3);
+    while !s.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    s.truncate(keep);
+    if !s.is_empty() {
+        s.push_str("...");
+    }
+}
+
+/// `p`'s hand-off to the agent panel (see [`Ask`]). What does not fit is
+/// the command line, which is cut in the field and the text alike, then
+/// the window's title; None when even without them it would not fit
+/// (a name or user beyond what the kernel lists).
+pub fn ask(p: &Proc, share: u32, trails: &Trails, memory_total: u64, from: &Sender) -> Option<Ask> {
+    use agent::handoff::{About, MAX, encode_about};
+    let mut q = p.clone();
+    let mut cut = 0;
+    loop {
+        let about = About {
+            program: String::from(from.program),
+            title: String::from(from.title),
+            window: from.window,
+            name: q.image.clone(),
+            pid: q.pid,
+            linux: q.is_linux(),
+            command_line: q.command_line.clone(),
+            text: row_text(&q, share, trails, memory_total),
+        };
+        let bytes = encode_about(&about);
+        let Some(over) = bytes.len().checked_sub(MAX).filter(|&o| o > 0) else {
+            return Some(Ask { about, bytes, cut });
+        };
+        // The command line is there twice (its field and its line).
+        let field = if !q.command_line.is_empty() {
+            &mut q.command_line
+        } else if !q.title.is_empty() {
+            &mut q.title
+        } else {
+            return None;
+        };
+        let before = field.len();
+        shorten(field, over.div_ceil(2));
+        cut += before.saturating_sub(field.len());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1197,5 +1336,104 @@ mod tests {
         assert_eq!(t.memory_scale(procs.iter(), 10), 100);
         assert_eq!(t.memory_scale(procs[1..].iter(), 10), 10);
         assert_eq!(t.memory_scale(core::iter::empty(), 10), 10);
+    }
+
+    fn notepad() -> Proc {
+        Proc {
+            working_set: 3 << 20,
+            commit: 1 << 20,
+            threads: 2,
+            handles: 10,
+            cpu_ns: 61_000_000_000,
+            user: "user".into(),
+            command_line: "notepad.exe a.txt".into(),
+            ..p(42, "notepad.exe", FLAG_WINDOW, "")
+        }
+    }
+
+    #[test]
+    fn a_row_as_text_has_every_value_and_its_history() {
+        let n = notepad();
+        let mut t = Trails::new(60);
+        t.update(core::slice::from_ref(&n), &[0], 1 << 30);
+        t.update(core::slice::from_ref(&n), &[125], 1 << 30);
+        assert_eq!(
+            row_text(&n, 125, &t, 1 << 30),
+            "Name: notepad.exe\r\nPID: 42\r\nStatus: Running\r\nUser name: user\r\n\
+             CPU: 12.5%\r\nCPU time: 0:01:01\r\nMemory: 3.0 MB\r\nCommit size: 1.0 MB\r\n\
+             Threads: 2\r\nHandles: 10\r\nPlatform: Windows\r\n\
+             Command line: notepad.exe a.txt\r\nWindow: A window\r\n\
+             CPU over the last 2 s (a sample every 1 s, oldest first, of all processors): \
+             0%, 12.5%\r\n\
+             Memory over the last 2 s (a sample every 1 s, oldest first, of the machine's \
+             1.0 GB): 0.2%, 0.2%"
+        );
+    }
+
+    #[test]
+    fn a_row_says_only_what_is_known() {
+        // A Linux process: its distribution, no command line, no window,
+        // no samples yet (and so no history lines).
+        let sh = p(7, "sh", FLAG_LINUX, "Ubuntu");
+        let text = row_text(&sh, 0, &Trails::new(60), 1 << 30);
+        assert!(text.contains("Platform: Linux (Ubuntu)"), "{text}");
+        assert!(text.ends_with("Platform: Linux (Ubuntu)"), "{text}");
+        assert!(!text.contains("Command line"), "{text}");
+        assert!(!text.contains("Window"), "{text}");
+        // No machine's memory known: no memory history.
+        let mut t = Trails::new(60);
+        t.update(core::slice::from_ref(&sh), &[0], 0);
+        let text = row_text(&sh, 0, &t, 0);
+        assert!(text.contains("CPU over the last 1 s"), "{text}");
+        assert!(!text.contains("Memory over"), "{text}");
+    }
+
+    const TM: Sender = Sender { program: "Task Manager", title: "Task Manager", window: 0x1234 };
+
+    #[test]
+    fn asking_hands_the_row_in_the_agents_form() {
+        use agent::handoff::{Received, receive};
+        let n = notepad();
+        let t = Trails::new(60);
+        let a = ask(&n, 125, &t, 1 << 30, &TM).unwrap();
+        assert_eq!(a.cut, 0);
+        assert_eq!(a.about.text, row_text(&n, 125, &t, 1 << 30));
+        let Ok(Received::About(back)) = receive(&a.bytes) else { panic!("refused") };
+        assert_eq!(back, a.about);
+        assert_eq!((back.name.as_str(), back.pid, back.linux), ("notepad.exe", 42, false));
+        assert_eq!(back.command_line, "notepad.exe a.txt");
+        assert_eq!((back.program.as_str(), back.window), ("Task Manager", 0x1234));
+        let sh = p(7, "sh", FLAG_LINUX, "Ubuntu");
+        let a = ask(&sh, 0, &t, 1 << 30, &TM).unwrap();
+        let Ok(Received::About(back)) = receive(&a.bytes) else { panic!("refused") };
+        assert!(back.linux && back.command_line.is_empty());
+    }
+
+    #[test]
+    fn a_long_command_line_is_cut_to_fit() {
+        use agent::handoff::{MAX, Received, receive};
+        let mut n = notepad();
+        // Multi-byte characters, so the cut has to find their edges.
+        n.command_line = "notepad.exe ".into();
+        n.command_line.extend(core::iter::repeat_n('\u{e9}', 3000));
+        let a = ask(&n, 0, &Trails::new(60), 1 << 30, &TM).unwrap();
+        assert!(a.bytes.len() <= MAX, "{}", a.bytes.len());
+        assert!(a.cut > 0);
+        let Ok(Received::About(back)) = receive(&a.bytes) else { panic!("refused") };
+        assert!(back.command_line.starts_with("notepad.exe \u{e9}"));
+        assert!(back.command_line.ends_with("..."));
+        // The field and the text say the same.
+        let mut line = String::from("Command line: ");
+        line.push_str(&back.command_line);
+        assert!(back.text.contains(&line));
+        // A title too long beside it is cut next.
+        n.title = core::iter::repeat_n('t', 5000).collect();
+        let a = ask(&n, 0, &Trails::new(60), 1 << 30, &TM).unwrap();
+        assert!(a.bytes.len() <= MAX);
+        assert!(a.about.command_line.is_empty());
+        assert!(a.about.text.contains("Window: ttt"));
+        // Nothing left to cut: no hand-off.
+        n.image = core::iter::repeat_n('x', MAX).collect();
+        assert!(ask(&n, 0, &Trails::new(60), 1 << 30, &TM).is_none());
     }
 }
