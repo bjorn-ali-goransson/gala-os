@@ -9116,10 +9116,34 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   process is ERROR_ACCESS_DENIED (Wine's server; not measured on
   Windows); setting one for another thread wakes the waiters
   (`wow64_gui_test`).
-- **SystemParametersInfoW** (`spi.rs`): the non-client metrics with the
-  GUI font, the work area, the icon title font, high contrast off, three
-  wheel lines, and Windows' defaults for the visual-effect switches;
-  unknown actions fail and are recorded.
+- **SystemParametersInfoW** (`spi.rs`, `spi_test`, which measures every
+  action on a real Windows first): the settings a program asks the
+  desktop for, in the three kinds GetSystemMetrics' answers come in.
+  The desktop's own sizes are the system metrics: the non-client
+  metrics are what GetSystemMetrics answers for the same measurements,
+  read from it rather than written again here, because two copies of a
+  desktop's sizes drift -- this structure said a caption button was 32
+  wide while the metric said 46, and the metrics once answered 0 for a
+  scroll bar where this said 17. Windows holds every size in it equal
+  to its metric, and a caption's height a pixel under it, the metric
+  counting the border below the caption as well. Beside them: the icon
+  and minimized metrics, the work area, the icon title and GUI fonts.
+  What a desktop chooses is Windows' own values: every animation and
+  fade on, UI effects on, flat menus, ClearType, three lines to a wheel
+  notch, the keyboard's fastest repeat, keyboard cues after Alt, no
+  screen reader and no high contrast. A setting that is a machine's own
+  rather than the system's (the foreground lock timeout, the taskbar's
+  flash count) is answered with a value from Windows' range, and
+  `spi_test` asks only that it is answered.
+- An action a program is answered leaves a "reached" row
+  (`user32.dll!SystemParametersInfo[AW](0x<action>)`, the action as the
+  detail), one row and one kernel call for an action for the life of
+  the process, at most 96 of them and a row saying so if a program asks
+  for more; an action gala has no answer for leaves an "unsupported"
+  one and fails with ERROR_INVALID_PARAMETER. A setting is handed to
+  the caller rather than refused, so a wrong answer diverts the program
+  and leaves nothing behind, which is why a value gets a row ("Gaps are
+  never silent"). Word asks for eight settings, all inside the last three seconds of its life: client-area animation at 36255 ms and UI effects at 36633 ms -- the question its own AnimationDisabledReason scope asks -- then high contrast and the non-client metrics beside the 34 system metrics at 36637 ms, the screen reader at 37629 ms, and font smoothing and the caret's width at 39033 ms, 150 ms before the box (ROADMAP OF).
 - **uxtheme**: themes off ("Other DLLs and programs"), so programs draw
   their controls themselves.
 

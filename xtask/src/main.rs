@@ -10891,6 +10891,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("metrics_test", "ntdll.dll", "Windows/System32"),
     ("metrics_test", "kernel32.dll", "Windows/System32"),
     ("metrics_test", "user32.dll", "Windows/System32"),
+    // The system parameters (user/spi_test).
+    ("spi_test", "ntdll.dll", "Windows/System32"),
+    ("spi_test", "kernel32.dll", "Windows/System32"),
+    ("spi_test", "user32.dll", "Windows/System32"),
     // The device capabilities (user/caps_test).
     ("caps_test", "ntdll.dll", "Windows/System32"),
     ("caps_test", "kernel32.dll", "Windows/System32"),
@@ -11310,6 +11314,7 @@ const USER_PROGRAMS: &[&str] = &[
     "uisettings_test",
     "display_test",
     "metrics_test",
+    "spi_test",
     "caps_test",
     "tray_test",
     "wintrust_test",
@@ -16535,6 +16540,23 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "metrics_test: ok",
             r#"ledger: {"service":"user32.dll!GetSystemMetrics(0)","what":"reached""#,
             r#"ledger: {"service":"user32.dll!GetSystemMetrics(32767)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The system parameters: the settings SystemParametersInfoW
+        // answers a program that asks the desktop about itself, against
+        // what a real Windows answers for each, and the rows an action
+        // a program is answered and an action gala has no answer for
+        // leave (user/spi_test).
+        name: "spi_test",
+        cmdline: "qemu_exit run=spi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "spi_test: ok",
+            r#"ledger: {"service":"user32.dll!SystemParametersInfoW(0x1042)","what":"reached""#,
+            r#"ledger: {"service":"user32.dll!SystemParametersInfoA(0x1042)","what":"reached""#,
+            r#"ledger: {"service":"user32.dll!SystemParametersInfoW(action)","what":"unsupported""#,
             "exited with status 0x00000000",
         ],
     },
