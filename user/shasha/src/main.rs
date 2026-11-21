@@ -36,6 +36,19 @@
 //!   install (ACTION_INSTALL with the winget id, `gala install <id>`
 //!   without a window) and the menu stays open, its tile showing the
 //!   install's state and bar; a click on one under way does nothing.
+//! - **The Linux section** (part 11): after the catalog, a "Linux"
+//!   heading and its tiles (ACTION_LINUX_LIST: the suggested and the
+//!   installed distributions, and an installed one's terminal and
+//!   applications; `shasha::linux`), read when the menu opens and
+//!   whenever the desktop says the section changed (WM_GALA_CATALOG with
+//!   wparam 1, passed on as the catalog's). A click asks for ACTION_LINUX
+//!   with the distribution's name: on one not installed, failed or gone
+//!   quiet its install (`gala linux-install`, the menu staying open, the
+//!   tile showing the state and bar); on an installed one its desktop
+//!   session, on a terminal's tile a terminal, on an application's the
+//!   application, the menu closing. A click on one under way does
+//!   nothing. Dismissing a suggestion and the section's collapse and
+//!   hide choices are the kernel menu's alone so far.
 //! - **The notification area** (part 8): the strip's window is
 //!   `Shell_TrayWnd`, the class Explorer's taskbar has, which shell32's
 //!   Shell_NotifyIcon finds and sends its request to (WM_COPYDATA,
@@ -71,7 +84,11 @@
 //! 7zip.7zip asked: pid N`, or refused with the status) or not (one
 //! under way), each catalog tile whose state changed (`catalog: 7-Zip
 //! failed (gala exit 4)`), the catalog not read (the status) or the
-//! desktop's word not passed on, the hot key refused, every notification-area
+//! desktop's word not passed on, each Linux click and the desktop's
+//! answer (`linux: Ubuntu: install asked: pid N`, refused with the
+//! status, or what the click does not do), each distribution whose state
+//! changed and each terminal or application listed (`linux: Ubuntu
+//! downloading`, `linux: Ubuntu lists XTerm`), the section not read, the hot key refused, every notification-area
 //! request (`notification-area icon added: window W id N "tip"`, or
 //! refused and why), every click on an icon and what it posted, a post
 //! that failed (the icon dropped), each balloon shown and how it went,
@@ -160,13 +177,16 @@ const WM_COPYDATA: u32 = 0x004a;
 const WM_APP_BALLOON: u32 = 0x8003;
 /// The balloon was clicked (posted to the taskbar's window).
 const WM_APP_BALLOON_CLICK: u32 = 0x8004;
-/// Read the catalog again (the desktop window's, posted to the menu on
-/// the kernel's WM_GALA_CATALOG).
+/// Read the catalog (wparam CHANGED_CATALOG) or the Linux section
+/// (CHANGED_LINUX) again (the desktop window's, posted to the menu on the
+/// kernel's WM_GALA_CATALOG with its wparam).
 const WM_APP_CATALOG: u32 = 0x8005;
 /// gala's own message to the shell's window: a start menu catalog tile
-/// changed (kernel/src/nt/desktop `WM_GALA_CATALOG`, in the system range
-/// Windows leaves unused).
+/// or the Linux section changed (kernel/src/nt/desktop `WM_GALA_CATALOG`,
+/// in the system range Windows leaves unused; its wparam says which).
 const WM_GALA_CATALOG: u32 = 0x03a0;
+const CHANGED_CATALOG: usize = 0;
+const CHANGED_LINUX: usize = 1;
 /// WM_COPYDATA's dwData from shell32 (user/shell32/src/tray.rs).
 const COPY_NOTIFY: usize = 1;
 const COPY_TOP_LEFT: usize = 3;
@@ -194,7 +214,9 @@ const ACTION_MINIMIZE: u32 = 4;
 const ACTION_START: u32 = 1;
 const ACTION_PROGRAMS: u32 = 11;
 const ACTION_INSTALL: u32 = 16;
+const ACTION_LINUX: u32 = 17;
 const ACTION_CATALOG: u32 = 18;
+const ACTION_LINUX_LIST: u32 = 19;
 /// ACTION_START's flag: a console program in a console window of its own.
 const LAUNCH_CONSOLE_WINDOW: i32 = 1;
 const LIST_HEADER: usize = 8;
@@ -203,6 +225,9 @@ const MAX_PROGRAMS: usize = 64;
 const WINDOW_ENTRY: usize = 40 + 2 * 128;
 const MAX_WINDOWS: usize = 64;
 const MAX_CATALOG: usize = 64;
+/// The Linux section's entries read at most (six distributions, each with
+/// its terminal and eight applications: 60).
+const MAX_LINUX: usize = 64;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -405,6 +430,18 @@ fn catalog() -> Option<Vec<shasha::CatalogEntry>> {
         return None;
     }
     Some(parse_catalog(&b[..n.min(b.len())]))
+}
+
+/// The desktop's Linux section, or None (logged).
+fn linux_list() -> Option<Vec<shasha::linux::LinuxEntry>> {
+    use shasha::linux::{LINUX_ENTRY, parse_linux};
+    let mut b: Vec<u8> = alloc::vec![0; LIST_HEADER + MAX_LINUX * LINUX_ENTRY];
+    let (status, n) = action(ACTION_LINUX_LIST, 0, &mut b);
+    if status != 0 {
+        log(&format!("the Linux section is not read: status {status:#x}"));
+        return None;
+    }
+    Some(parse_linux(&b[..n.min(b.len())]))
 }
 
 fn clock() -> alloc::string::String {
@@ -803,12 +840,13 @@ impl Component for DesktopWindow {
     fn message(&mut self, _: usize, msg: u32, wparam: usize, _: isize) -> Option<DesktopMsg> {
         if msg == WM_GALA_CATALOG {
             // The start menu's to read: this window is the shell's, the
-            // one the kernel tells.
+            // one the kernel tells. The wparam says which list.
             // SAFETY: a plain post to our own window (or none).
-            if unsafe { PostMessageW(menu_window(), WM_APP_CATALOG, 0, 0) } == 0 {
+            if unsafe { PostMessageW(menu_window(), WM_APP_CATALOG, wparam, 0) } == 0 {
                 // SAFETY: plain call.
                 let e = unsafe { GetLastError() };
-                log(&format!("the catalog's change is not passed to the start menu: error {e}"));
+                let what = if wparam == CHANGED_LINUX { "Linux section" } else { "catalog" };
+                log(&format!("the {what}'s change is not passed to the start menu: error {e}"));
             }
             return None;
         }
@@ -973,6 +1011,7 @@ impl Menu {
         log(&format!("the start menu opens: {} program(s): {}", programs.len(), names.join(", ")));
         self.menu.open(programs);
         self.read_catalog();
+        self.read_linux();
         // SAFETY: our window.
         unsafe {
             ShowWindow(hwnd, SW_SHOW);
@@ -994,6 +1033,42 @@ impl Menu {
         let Some(c) = catalog() else { return };
         for line in self.menu.set_catalog(c) {
             log(&line);
+        }
+    }
+
+    /// The Linux section again, each change logged.
+    fn read_linux(&mut self) {
+        let Some(l) = linux_list() else { return };
+        for line in self.menu.set_linux(l) {
+            log(&line);
+        }
+    }
+
+    /// Linux tile `i` clicked: what it is asked for (ACTION_LINUX with
+    /// the distribution's name, the operation and its index), unless
+    /// there is nothing to ask. Whether the menu closes is the click's
+    /// (`LinuxClick::request`).
+    fn linux(&mut self, hwnd: Handle, i: usize) {
+        let Some(e) = self.menu.linux.get(i).cloned() else { return };
+        let label = shasha::linux::linux_label(&e);
+        let click = e.click();
+        let Some((op, index, closes)) = click.request() else {
+            log(&format!("linux: {label}: {}: the click does nothing", click.word()));
+            return;
+        };
+        let mut out = [0u8; 8];
+        let (status, n) = request(ACTION_LINUX, 0, [0, op, index as i32, 0], &e.name, &mut out);
+        if status == 0 && n >= 4 {
+            let pid = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
+            log(&format!("linux: {label}: {} asked: pid {pid}", click.word()));
+        } else {
+            log(&format!("linux: {label}: {} refused: status {status:#x}", click.word()));
+        }
+        if closes {
+            self.hide(hwnd, "a Linux program started");
+        } else {
+            // Where it is now (downloading), without waiting for the word.
+            self.read_linux();
         }
     }
 
@@ -1054,6 +1129,8 @@ impl Component for Menu {
             }
             MenuMsg::Install(i) => self.install(*i),
             MenuMsg::CatalogChanged => self.read_catalog(),
+            MenuMsg::Linux(i) => self.linux(hwnd, *i),
+            MenuMsg::LinuxChanged => self.read_linux(),
             MenuMsg::Deactivated | MenuMsg::Escape | MenuMsg::Query(_) => {}
         }
         self.menu.update(msg);
@@ -1062,7 +1139,8 @@ impl Component for Menu {
     fn message(&mut self, window: usize, msg: u32, wparam: usize, _: isize) -> Option<MenuMsg> {
         match msg {
             WM_APP_TOGGLE => Some(MenuMsg::Toggle),
-            WM_APP_CATALOG => Some(MenuMsg::CatalogChanged),
+            WM_APP_CATALOG if wparam == CHANGED_LINUX => Some(MenuMsg::LinuxChanged),
+            WM_APP_CATALOG if wparam == CHANGED_CATALOG => Some(MenuMsg::CatalogChanged),
             WM_HOTKEY if wparam == MENU_HOT_KEY as usize => Some(MenuMsg::Toggle),
             WM_KEYDOWN if wparam == VK_ESCAPE => Some(MenuMsg::Escape),
             // SAFETY: our window.

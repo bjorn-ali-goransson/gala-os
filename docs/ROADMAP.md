@@ -925,8 +925,7 @@ shell part) leaves it.
       event `present` shows each copy. Tests: every UEFI scenario now
       boots with it (`desktop_at_boot` checks shasha's taskbar, wallpaper
       and start menu: Windows key, Esc). Not yet: the task buttons'
-      icons; the scenarios that test the kernel's own shell
-      (`linux_menu`, `hotkey_test`, which plays the shell) run with
+      icons; `hotkey_test`, which plays the shell, runs with
       `shell=desktop` until it is removed.
    11. The kernel's shell code removed, its scenarios moved to shasha.
       Done: the notification area. The kernel's tray (`desktop/tray.rs`,
@@ -957,8 +956,30 @@ shell part) leaves it.
       install failing with gala's exit 4 in the scenario's network and
       no console window for it). Not yet: an install's notification
       above shasha's notification area (the kernel logs it).
-      Next: the Linux tiles (`linux_menu`) and the shell keys
-      (`hotkey_test`); then the kernel's menu, taskbar, clock and
+      Done: the Linux tiles. shasha's start menu has the Linux section
+      after the catalog (GalaDesktopAction's LinuxList: each entry's
+      kind, the distribution's name, its label, the index the Linux
+      action takes, its install state and bar; the suggestions the
+      user has not dismissed and the installed distributions, each
+      installed one followed by its terminal and its applications): a
+      "Linux" heading, a tile per distribution (`Linux<name>`, its
+      `<id>State` and `<id>Bar` as a catalog tile's), its terminal's
+      (`LinuxTerminal<name>`) and its applications'
+      (`LinuxApp<name>_<index>`). A click asks for GalaDesktopAction's
+      Linux: the install of one not installed, failed or gone quiet
+      (the menu stays open; the desktop marks the tile downloading and
+      watches the installer's pid, one that ended before it was
+      watched handled as if it had just ended), else its desktop
+      session, terminal or application (the menu closes). Each change
+      of the section posts WM_GALA_CATALOG with wparam 1 to the shell's
+      window. Test: `linux_menu` now runs against shasha
+      (`linux_menu_test` through UI Automation: the section, Ubuntu
+      installed from its tile with its progress, its desktop session,
+      terminal and XTerm started from their tiles). Not yet: the
+      section's choices (dismissing a suggestion, collapsing and hiding
+      the section, which LinuxList's dismissals honour but shasha
+      cannot make) and the tiles' icons.
+      Next: the shell keys (`hotkey_test`); then the kernel's menu, taskbar, clock and
       wallpaper (`nt/desktop`'s `paint.rs`, `linux.rs`, `pkg.rs` and
       most of `mod.rs`) and `shell=desktop` go.
 2. Supervision: the session (RS B4's session manager, the kernel until
@@ -4642,6 +4663,10 @@ the next breakthroughs).
    `.desktop` files), X and Wayland programs reaching the desktop
    through WSLg's environment and a socket node in the distribution's
    tree. The scenario's distributions are stand-ins served by the host.
+   shasha's menu (SH step 1 part 11) has the tiles, the install, the
+   desktop, the terminal and the applications (each its own tile there,
+   not a context menu's item); the collapse, dismiss and hide choices
+   are still the kernel menu's only (`shell=desktop`).
    Open: the desktop session is gala's script, which a real
    distribution lacks (it should come from gala, through `/mnt/c` or
    WSLg's `/mnt/wslg`, once CT step 3 mounts them, with Xwayland

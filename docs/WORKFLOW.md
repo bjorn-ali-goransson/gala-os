@@ -2784,22 +2784,22 @@ A root is what its workload opened on real 26.04, traced:
 ### The start menu's Linux distributions (ROADMAP LD step 7)
 
 - Scenario `linux_menu` (`cargo xtask boot-test 'linux_menu$'`, about
-  two minutes of run time under TCG): UEFI (the screen: on a headless
-  desktop the test frame exists only once something brings the desktop
-  up) with `wayland=on xwayland=on`, `linux_mirror=http://10.0.2.100`
-  and `user/linux_menu_test`, which asks for the start menu's programs
-  (bringing the desktop up), prints `linux_menu_test: ready` and follows
-  the registry (the choices in HKCU\Software\gala\StartMenu, Ubuntu's
-  Lxss registration, the tarball gone); LINUX_MENU_SCREEN clicks:
-  collapse, expand, dismiss Alpine, install Ubuntu, its desktop, `exit`,
-  its context menu's terminal and XTerm, Hide, and the menu's own context
-  menu's "Show Linux distributions" (the test ends only after that, so
-  the hidden section's screendump is taken before the guest ends). The screendumps are the
-  states' pictures (`target/debug/test-linux_menu.screen<n>.png`,
-  numbered from 0: 0 shown, 1 collapsed, 2 expanded, 3 Alpine dismissed,
-  5 installing, 6 installed, 8 desktop started, 10 context menu, 13
-  terminal, 17 application, 19 hidden). Its steps wait up to 300 s for
-  their line (SCREEN_STEP_WAITS: the install).
+  four minutes): UEFI with shasha (the default shell), `wayland=on
+  xwayland=on`, `linux_mirror=http://10.0.2.100` and
+  `user/linux_menu_test`, which finds shasha's start menu tiles through
+  UI Automation and announces them, and LINUX_MENU_SCREEN, which clicks
+  them (`click_on linux_menu_test: <element>`): the Start button,
+  Ubuntu's tile (the install; the test waits for "Downloading N%" and
+  the bar), Ubuntu's tile again once installed (its desktop session: the
+  test announces a point inside the session's xterm, `Session`, the
+  screen check clicks there, waits for the xterm's white and types
+  `exit`), the terminal's tile (`echo $SHELL$SHELL`, `exit`) and
+  XTerm's. The test follows the tiles' states, the window list
+  (ACTION_WINDOWS: "Xwayland on :1", "wsl.exe", "xterm"), `gala ps`
+  (wsl.exe ended) and the registry (Ubuntu's Lxss registration, its
+  tree, the tarball gone). Its steps wait up to SCREEN_STEP_WAIT for
+  their line; the test's own waits are its own (the install up to 30
+  minutes, a program's window 4).
 - **The host serves the rootfs**: `linux_menu` is a HOST_PAGE_SCENARIO:
   10.0.2.100:80 is `cargo xtask serve-page` (QEMU's guestfwd runs it per
   connection), which answers a request whose last path component names
@@ -2814,26 +2814,28 @@ A root is what its workload opened on real 26.04, traced:
   request is in `<iso>.serve.log` (added to the serial log). No real
   download: the kernel turns the suggestions' URLs into
   `<linux_mirror>/<file name>`.
-- Reading a run: `desktop: start menu: linux <op> <name>: <command>`,
-  `desktop: start menu: Linux distribution Ubuntu: downloading (n%)`,
-  gala.exe's `gala: linux: Ubuntu: ...`, `wsl: Ubuntu: imported`,
-  `wayland: listening in a distribution's tree too`, the session's
-  `session: display :1 ready`; `events=window` has the `start menu`
-  events (`linux install`, `linux progress`, `linux prefs`, ...).
+- Reading a run: shasha's `shasha: linux: <name> <state>` and
+  `shasha: linux: <label>: <op> asked: pid <p>`, the kernel's
+  `desktop: start menu: linux <op> <name>: <command>`, `desktop: the
+  shell's window <hwnd> told of the Linux section`, `desktop: start
+  menu: Linux distribution Ubuntu: downloading (n%)`, gala.exe's `gala:
+  linux: Ubuntu: ...`, `wsl: Ubuntu: imported`, `wayland: listening in
+  a distribution's tree too`, the session's `session: display :1
+  ready`; `events=window` has the `start menu` events (`linux install`,
+  `linux progress`, ...) and each launch.
 - Pitfalls: the menu stays open during an install (a click elsewhere
-  would close it); the progress step's check races nothing: serve-page
-  sends 60% of the Ubuntu stand-in, then holds the rest until that
-  step's pixels have passed (xtask writes `<iso>.serve.release`:
-  HELD_DOWNLOADS), so the bar is seen mid-download under KVM as under
-  TCG;
-  the start button moves left by 24 pixels per window on the taskbar
-  (the console window of the terminal stays after `exit`; the xterm's
-  goes, which the Hide step waits for: `desktop: window 'xterm' left the
-  screen`); the xterm's window shows before its shell runs, so `exit`
-  is typed only once its pixels show dash's prompt (keys sent earlier
-  reached Xwayland before the xterm had the X focus and were lost, and
-  the xterm never ended); each move is relative to where the step
-  before left the pointer. A distribution's processes run as the
+  would close it); the download is seen mid-way by construction:
+  serve-page sends 60% of the Ubuntu stand-in, then holds the rest until
+  the screen step after `linux_menu_test: downloading shown` has passed
+  (xtask writes `<iso>.serve.release`: HELD_DOWNLOADS, the step's
+  index), so the tile is seen downloading under KVM as under TCG. The
+  console window of the terminal stays after `exit` (the test waits for
+  wsl.exe to end instead). twm's focus follows the pointer, so `exit`
+  reaches the session's xterm only with the pointer on it: the
+  `Session` point is the window's corner + (292, 292), and the step's
+  pixel (500, 250) white is the xterm drawn there (the window at (64,
+  48), where the desktop places it), a readiness gate rather than a
+  picture. A distribution's processes run as the
   Windows user's Linux ids (uid 1000), so its `/etc/passwd` must name
   uid 1000: Xwayland refuses its own local clients ("Authorization
   required") when the user of the peer is unknown; the stand-in has the

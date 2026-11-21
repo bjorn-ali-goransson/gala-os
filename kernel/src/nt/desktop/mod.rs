@@ -736,6 +736,10 @@ pub struct Desktop {
     /// one tell shasha's window after the lock (`tell_catalog`), as a
     /// method may not post or log.
     catalog_changed: CatalogChange,
+    /// The same for the Linux section's tiles (`take_linux_changed`,
+    /// `tell_linux`): an install began, moved on, ended or went quiet,
+    /// or the tiles listed changed.
+    linux_changed: CatalogChange,
     /// What the "Linux distributions" section lists (registered
     /// distributions and the user's choices), its tiles, the installs
     /// under way, the context menu open in the start menu, what it asked
@@ -816,6 +820,7 @@ impl Desktop {
             installers: Vec::new(),
             quieted: Vec::new(),
             catalog_changed: CatalogChange::None,
+            linux_changed: CatalogChange::None,
             progress: Vec::new(),
             context: None,
             linux_launch: None,
@@ -2301,6 +2306,7 @@ impl Desktop {
         if self.progress.try_push((d.name, linux::Progress::Downloading(0))).is_ok() {
             self.linux_launch = Some(linux::Request::Install(d.name, s));
         }
+        self.linux_change(CatalogChange::State);
         self.menu_dirty = true;
     }
 
@@ -2313,6 +2319,7 @@ impl Desktop {
         }
         self.prefs_changed = true;
         self.linux_tiles = linux::entries(&self.linux);
+        self.linux_change(CatalogChange::State);
         self.menu_dirty = true;
     }
 
@@ -2338,10 +2345,14 @@ impl Desktop {
         let tiles = linux::entries(&self.linux);
         if tiles != self.linux_tiles {
             self.linux_tiles = tiles;
+            self.linux_change(CatalogChange::State);
             self.menu_dirty = true;
         }
         // As a package's listing does, this tells an install that
         // worked (before `linux_progress`'s own last word).
+        if !done.is_empty() {
+            self.linux_change(CatalogChange::State);
+        }
         for n in done {
             self.install_done(n.as_str());
         }
@@ -2516,6 +2527,7 @@ impl Desktop {
                 };
                 self.progress.retain(|(m, _)| *m != n);
                 let _ = self.progress.try_push((n, linux::Progress::Lost(at)));
+                self.linux_change(CatalogChange::State);
                 at
             }
         };
@@ -2566,8 +2578,51 @@ impl Desktop {
             _ => {}
         }
         self.watch_only_waiting();
+        let state = |p: Option<linux::Progress>| p.as_ref().map(core::mem::discriminant);
+        self.linux_change(if state(before) == state(progress) {
+            CatalogChange::Bar
+        } else {
+            CatalogChange::State
+        });
         self.menu_dirty = true;
         self.refresh();
+    }
+
+    /// A user-mode shell's tile asked for distribution `name`'s install
+    /// (GalaDesktopAction's Linux with LINUX_INSTALL): it is downloading
+    /// from nothing from now on, as a click on the kernel menu's tile
+    /// makes it (`linux_click`), so that the installer's pid is watched
+    /// (`linux_install_started`) and its progress finds it under way.
+    /// One already under way starts again: the new `gala linux-install`
+    /// is the one whose word counts.
+    pub fn begin_linux_install(&mut self, name: linux::Name) {
+        self.progress.retain(|(n, _)| *n != name);
+        let _ = self.progress.try_push((name, linux::Progress::Downloading(0)));
+        self.linux_change(CatalogChange::State);
+        self.menu_dirty = true;
+    }
+
+    /// Where distribution `name`'s install is, if one is under way or
+    /// ended without the distribution being registered (the Linux
+    /// section's tiles).
+    pub fn linux_install_of(&self, name: linux::Name) -> Option<linux::Progress> {
+        self.progress.iter().find(|(n, _)| *n == name).map(|&(_, p)| p)
+    }
+
+    /// The choices the section's tiles are listed with: the desktop's
+    /// while they wait to be saved, else `read`'s (from the registry).
+    pub fn linux_prefs(&self, read: linux::Prefs) -> linux::Prefs {
+        if self.prefs_changed { self.linux.prefs } else { read }
+    }
+
+    fn linux_change(&mut self, c: CatalogChange) {
+        self.linux_changed = self.linux_changed.max(c);
+    }
+
+    /// How the Linux section's tiles changed since the last call
+    /// (`linux_changed`), and from now on not.
+    pub fn take_linux_changed(&mut self) -> CatalogChange {
+        core::mem::replace(&mut self.linux_changed, CatalogChange::None)
     }
 
     /// The user's choices once they changed (to be saved in the
@@ -3896,10 +3951,11 @@ pub fn process_ended(shell: &Shell, owner: u64) {
     tell_quiet(&mut d);
     redraw_damage(&mut d);
     let wakes = d.take_wakes();
-    let catalog = d.take_catalog_changed();
+    let (catalog, linux) = (d.take_catalog_changed(), d.take_linux_changed());
     drop(d);
     signal(wakes);
     tell_catalog(shell.session, catalog);
+    tell_linux(shell.session, linux);
 }
 
 /// Mouse input: the pointer moved by (dx, dy) with `buttons` held (bit 0
@@ -3951,8 +4007,11 @@ fn pointer_on(
     }
     let prefs = d.take_prefs();
     let wakes = d.take_wakes();
+    let (catalog, linux) = (d.take_catalog_changed(), d.take_linux_changed());
     drop(d);
     signal(wakes);
+    tell_catalog(shell.session, catalog);
+    tell_linux(shell.session, linux);
     if let Some(p) = prefs {
         save_prefs(p);
     }
@@ -4162,10 +4221,6 @@ fn reg_text<const N: usize>(v: &super::registry::Value) -> Option<linux::Text<N>
     linux::Text::new(&b[..n])
 }
 
-/// What the start menu's "Linux distributions" section lists: the
-/// boot user's registered distributions (Lxss keys in State 1, each with
-/// its applications) and their choices. Reads the registry and the
-/// distributions' files: never under the desktop's lock.
 /// Registered distribution `name`'s application `index` (as its start
 /// menu tile's context menu lists them), or None: no such distribution
 /// or application.
@@ -4175,6 +4230,10 @@ pub fn linux_app(name: &[u8], index: usize) -> Option<linux::App> {
     distro.apps().nth(index).copied()
 }
 
+/// What the start menu's "Linux distributions" section lists: the
+/// boot user's registered distributions (Lxss keys in State 1, each with
+/// its applications) and their choices. Reads the registry and the
+/// distributions' files: never under the desktop's lock.
 fn linux_listing() -> linux::Listing {
     use super::registry::{self, ROOT};
     let mut listing = linux::Listing::default();
@@ -4522,10 +4581,16 @@ pub fn catalog(shell: &Shell) -> Vec<CatalogTile> {
 }
 
 /// gala's own message to the shell's window (shasha's Progman): a
-/// catalog tile changed, read the catalog again (GalaDesktopAction's
-/// Catalog). In the system range Windows leaves unused (0x0390..0x03DF),
+/// catalog tile or a Linux section's tile changed, read that list again
+/// (GalaDesktopAction's Catalog or LinuxList, as the wparam says:
+/// CHANGED_*). In the system range Windows leaves unused (0x0390..0x03DF),
 /// so that no program's own message is taken for it.
 pub const WM_GALA_CATALOG: u32 = 0x03a0;
+/// WM_GALA_CATALOG's wparam: which list to read again, the catalog's
+/// tiles (GalaDesktopAction's Catalog) or the Linux section's
+/// (LinuxList).
+pub const CHANGED_CATALOG: u64 = 0;
+pub const CHANGED_LINUX: u64 = 1;
 
 /// How a catalog tile changed (`Desktop::take_catalog_changed`): not
 /// at all, its bar alone (a download moving on), or its state.
@@ -4547,7 +4612,7 @@ fn tell_catalog(session: u32, change: CatalogChange) {
     }
     let Some(desk) = super::session::desk(session) else { return };
     let logged = change == CatalogChange::State;
-    tell_shell_window(&desk.windows, WM_GALA_CATALOG, 0, "the catalog", logged);
+    tell_shell_window(&desk.windows, WM_GALA_CATALOG, CHANGED_CATALOG, "the catalog", logged);
 }
 
 /// Posts `message` (`wparam`) to the shell's window (shasha's Progman,
@@ -4626,6 +4691,63 @@ pub fn linux_install_started(session: u32, name: linux::Name, pid: Option<u64>) 
     tell_quiet(&mut d);
     not_watched(watched, pid);
     redraw_damage(&mut d);
+    let linux = d.take_linux_changed();
+    drop(d);
+    tell_linux(session, linux);
+}
+
+/// A user-mode shell's tile asked for distribution `name`'s install
+/// (GalaDesktopAction's Linux, LINUX_INSTALL): its tile is downloading
+/// (`Desktop::begin_linux_install`) before the installer starts, and the
+/// shell's window hears of it.
+pub fn begin_linux_install(shell: &Shell, name: linux::Name) {
+    let mut d = shell.d.lock();
+    d.begin_linux_install(name);
+    redraw_damage(&mut d);
+    let linux = d.take_linux_changed();
+    drop(d);
+    tell_linux(shell.session, linux);
+}
+
+/// A tile of the user-mode shell's Linux section: the distribution (its
+/// applications an installed one's) and where its install is (None: none
+/// under way or ended; an installed distribution has none).
+#[derive(Clone, Copy)]
+pub struct LinuxTile {
+    pub distro: linux::Distro,
+    pub install: Option<linux::Progress>,
+}
+
+/// The Linux section's tiles for `shell`'s start menu (GalaDesktopAction's
+/// LinuxList): the kernel menu's (`linux::entries`, the dismissed
+/// suggestions left out), read from the registry and the distributions'
+/// files before the desktop's lock, each with its install's progress.
+/// Reads only: what the desktop keeps is changed by the installs' own
+/// reports (`linux_progress`).
+pub fn linux_section(shell: &Shell) -> Vec<LinuxTile> {
+    let mut listing = linux_listing();
+    let d = shell.d.lock();
+    listing.prefs = d.linux_prefs(listing.prefs);
+    let mut out = Vec::new();
+    for distro in linux::entries(&listing) {
+        let install = if distro.installed { None } else { d.linux_install_of(distro.name) };
+        if out.try_push(LinuxTile { distro, install }).is_err() {
+            break;
+        }
+    }
+    out
+}
+
+/// Tells session `session`'s shell window that the Linux section changed
+/// (`WM_GALA_CATALOG` with wparam `CHANGED_LINUX`), as `tell_catalog`
+/// tells of the catalog: a state leaves a line, a bar that moved does not.
+fn tell_linux(session: u32, change: CatalogChange) {
+    if change == CatalogChange::None {
+        return;
+    }
+    let Some(desk) = super::session::desk(session) else { return };
+    let logged = change == CatalogChange::State;
+    tell_shell_window(&desk.windows, WM_GALA_CATALOG, CHANGED_LINUX, "the Linux section", logged);
 }
 
 /// The catalog entry whose package is `id`: winget's ids, matched without
@@ -4661,6 +4783,9 @@ pub fn linux_progress(
     }
     d.linux_progress(name, progress);
     redraw_damage(&mut d);
+    let linux = d.take_linux_changed();
+    drop(d);
+    tell_linux(shell.session, linux);
     Ok(())
 }
 
@@ -4933,7 +5058,10 @@ fn key_on(
         crate::info!("desktop: Win+E: {FILE_EXPLORER}");
     }
     let wakes = d.take_wakes();
+    let (catalog, linux) = (d.take_catalog_changed(), d.take_linux_changed());
     drop(d);
+    tell_catalog(shell.session, catalog);
+    tell_linux(shell.session, linux);
     match hot {
         Some((key, Ok(event), repeat)) => {
             if !repeat && cfg!(not(test)) {

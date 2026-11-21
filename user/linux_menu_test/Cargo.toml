@@ -12,3 +12,5 @@ bench = false
 
 [dependencies]
 gala_heap = { path = "../gala_heap" }
+ntrt = { path = "../ntrt" }
+uia_client = { path = "../uia_client" }

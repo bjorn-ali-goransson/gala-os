@@ -20,6 +20,13 @@
 //! quiet asks for its install ([`MenuMsg::Install`]); on one under way it
 //! does nothing.
 //!
+//! After them comes the Linux section (GalaDesktopAction
+//! ACTION_LINUX_LIST, [`crate::linux`]): a "Linux" heading and a tile
+//! per entry the search shows, a distribution's with its state's Text and
+//! bar as a catalog tile's, a terminal's or an application's a button. A
+//! click asks for what the entry is ([`MenuMsg::Linux`],
+//! [`crate::linux::LinuxEntry::click`]).
+//!
 //! The program shows and hides the window and reads the lists; what this
 //! keeps is the lists and the search, which [`StartMenu::open`] clears.
 
@@ -28,6 +35,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use gala_ui::{Node, button, column, fr, grid, input, row, text};
+
+use crate::linux::{LinuxEntry, LinuxKind, LinuxState, linux_changes, linux_id, linux_label};
 
 /// The menu's size, and its gap above the taskbar.
 pub const MENU_WIDTH: i32 = 520;
@@ -68,15 +77,23 @@ pub enum MenuMsg {
     Launch(usize),
     /// A catalog tile (its index in the catalog): install it.
     Install(usize),
-    /// The desktop says a catalog tile changed (WM_GALA_CATALOG): read
-    /// the catalog again.
+    /// The desktop says a catalog tile changed (WM_GALA_CATALOG, wparam
+    /// 0): read the catalog again.
     CatalogChanged,
+    /// A Linux section tile (its index in the section): ask for what it
+    /// is.
+    Linux(usize),
+    /// The desktop says the Linux section changed (WM_GALA_CATALOG,
+    /// wparam 1): read it again.
+    LinuxChanged,
 }
 
 #[derive(Default)]
 pub struct StartMenu {
     pub programs: Vec<Program>,
     pub catalog: Vec<CatalogEntry>,
+    /// The Linux section, in the desktop's order.
+    pub linux: Vec<LinuxEntry>,
     pub query: String,
 }
 
@@ -275,6 +292,24 @@ impl StartMenu {
         lines
     }
 
+    /// The desktop's Linux section, read again; a line for the log for
+    /// each distribution whose state changed and each terminal or
+    /// application that came ([`linux_changes`]).
+    pub fn set_linux(&mut self, linux: Vec<LinuxEntry>) -> Vec<String> {
+        let lines = linux_changes(&self.linux, &linux);
+        self.linux = linux;
+        lines
+    }
+
+    /// The Linux tiles the search shows (their button's name holds it,
+    /// ignoring case), as indices into the section.
+    pub fn shown_linux(&self) -> Vec<usize> {
+        let q = self.query.to_lowercase();
+        (0..self.linux.len())
+            .filter(|&i| linux_label(&self.linux[i]).to_lowercase().contains(q.as_str()))
+            .collect()
+    }
+
     /// The catalog tiles the menu shows, as indices into the catalog:
     /// those whose program is not on this machine (an installed one is
     /// among the programs), which the search shows.
@@ -302,8 +337,8 @@ impl StartMenu {
         if let MenuMsg::Query(q) = msg {
             self.query = q;
         }
-        // Toggle, Deactivated, Launch, Install and CatalogChanged are the
-        // program's to act on.
+        // Toggle, Deactivated, Launch, Install, CatalogChanged, Linux and
+        // LinuxChanged are the program's to act on.
     }
 
     pub fn view(&self) -> Node<MenuMsg> {
@@ -320,7 +355,8 @@ impl StartMenu {
                 .on_click(MenuMsg::Launch(i))
         });
         let tiles = tiles.chain(catalog.iter().map(|&i| catalog_tile(&self.catalog[i], i)));
-        let list = if shown.is_empty() && catalog.is_empty() {
+        let linux = self.shown_linux();
+        let list = if shown.is_empty() && catalog.is_empty() && linux.is_empty() {
             column().child(
                 text(format!("No program matches \"{}\"", self.query)).id("NoMatch").color(MUTED),
             )
@@ -338,7 +374,50 @@ impl StartMenu {
             .child(input("Search", &self.query).placeholder("Search").on_input(MenuMsg::Query))
             .child(text("Programs").id("ProgramsTitle").bold())
             .child(list)
+            .child_if(!linux.is_empty(), text("Linux").id("LinuxTitle").bold())
+            .child_if(
+                !linux.is_empty(),
+                grid((0..TILES_IN_ROW).map(|_| fr(1)))
+                    .id("Linux")
+                    .gap(8)
+                    .children(linux.iter().map(|&i| linux_tile(&self.linux[i], i))),
+            )
     }
+}
+
+/// A Linux section tile: a distribution's is its button, a badge while
+/// it is not installed, its state's words and, once an install was asked
+/// for, its bar; a terminal's or an application's is a button.
+fn linux_tile(e: &LinuxEntry, i: usize) -> Node<MenuMsg> {
+    let id = linux_id(e);
+    let b = button(id.clone(), linux_label(e)).size(13).bg(TILE).on_click(MenuMsg::Linux(i));
+    if e.kind != LinuxKind::Distribution {
+        return b.height(72).border(LINE).radius(6);
+    }
+    let words = text(crate::linux::linux_state_text(e))
+        .id(format!("{id}State"))
+        .size(11)
+        .color(MUTED)
+        .ellipsis();
+    let state = row().gap(4).align(gala_ui::Align::Center).child_if(
+        e.state == LinuxState::NotInstalled,
+        column().id(format!("{id}Badge")).width(10).height(10).radius(5).bg(ACCENT),
+    );
+    let colour = match e.state {
+        LinuxState::Failed => FAILED,
+        LinuxState::Lost => QUIET,
+        _ => ACCENT,
+    };
+    column()
+        .bg(TILE)
+        .border(LINE)
+        .radius(6)
+        .padding(4)
+        .gap(2)
+        .height(72)
+        .child(b)
+        .child(state.child(words))
+        .child_if(e.state.has_bar(), bar(&id, e.percent, colour))
 }
 
 /// A catalog tile: its button, a badge while it is not installed, the
@@ -578,6 +657,95 @@ mod tests {
             .collect();
         assert_eq!(parts, [Some(FAILED), Some(LINE)]);
         assert!(find(&placed, "Program7ZipBadge").is_none());
+    }
+
+    fn linux(
+        kind: LinuxKind,
+        state: LinuxState,
+        percent: u8,
+        index: u32,
+        label: &str,
+    ) -> LinuxEntry {
+        LinuxEntry {
+            kind,
+            state,
+            percent,
+            index,
+            name: "Ubuntu".to_string(),
+            label: label.to_string(),
+        }
+    }
+
+    /// The Linux section: its heading and a tile per entry after the
+    /// programs and the catalog, a distribution's with its state's Text
+    /// and, once an install was asked for, its bar; a terminal's and an
+    /// application's a button; a click on each says which; the search
+    /// filters them.
+    #[test]
+    fn the_linux_section_follows_the_catalog() {
+        use LinuxKind::*;
+        let mut m = StartMenu::default();
+        m.open(vec![program("Command Prompt", "a")]);
+        m.set_catalog(vec![tile("7-Zip", "7zip.7zip", CatalogState::NotInstalled, 0, 0)]);
+        let lines =
+            m.set_linux(vec![linux(Distribution, LinuxState::Downloading, 48, 0, "Ubuntu")]);
+        assert_eq!(lines, ["linux: Ubuntu downloading"]);
+        let placed = lay(&m);
+        let b = find(&placed, "LinuxUbuntu").expect("the distribution's button");
+        assert_eq!((b.kind, b.text.as_str()), (gala_ui::Kind::Button, "Ubuntu"));
+        assert!(matches!(b.on_click, Some(MenuMsg::Linux(0))));
+        let state = find(&placed, "LinuxUbuntuState").map(|s| s.text.as_str());
+        assert_eq!(state, Some("Downloading 48%"));
+        assert!(find(&placed, "LinuxUbuntuBar").is_some());
+        assert!(find(&placed, "LinuxUbuntuBadge").is_none());
+        let zip = find(&placed, "Program7Zip").expect("the catalog tile").rect;
+        let title = find(&placed, "LinuxTitle").expect("the heading");
+        assert_eq!(title.text, "Linux");
+        assert!(zip[1] < title.rect[1] && title.rect[1] < b.rect[1]);
+        m.set_linux(vec![
+            linux(Distribution, LinuxState::Installed, 0, 0, "Ubuntu"),
+            linux(Terminal, LinuxState::Installed, 0, 0, "Terminal"),
+            linux(App, LinuxState::Installed, 0, 0, "XTerm"),
+        ]);
+        let placed = lay(&m);
+        assert_eq!(find(&placed, "LinuxUbuntuState").map(|s| s.text.as_str()), Some("Installed"));
+        assert!(find(&placed, "LinuxUbuntuBar").is_none());
+        let t = find(&placed, "LinuxTerminalUbuntu").expect("the terminal's button");
+        assert_eq!(t.text, "Terminal (Ubuntu)");
+        assert!(matches!(t.on_click, Some(MenuMsg::Linux(1))));
+        let a = find(&placed, "LinuxAppUbuntu_0").expect("the application's button");
+        assert_eq!(a.text, "XTerm (Ubuntu)");
+        assert!(matches!(a.on_click, Some(MenuMsg::Linux(2))));
+        m.update(MenuMsg::Query("xterm".to_string()));
+        assert_eq!(m.shown_linux(), [2]);
+        m.update(MenuMsg::Query("zz".to_string()));
+        let placed = lay(&m);
+        assert!(find(&placed, "LinuxTitle").is_none() && find(&placed, "NoMatch").is_some());
+    }
+
+    /// The whole menu fits: the desktop's programs and catalog as the
+    /// linux_menu image has them (every catalog tile not installed) and
+    /// an installed distribution's tiles beside a suggested one's.
+    #[test]
+    fn a_full_menu_fits() {
+        use LinuxKind::*;
+        let mut m = StartMenu::default();
+        let names = ["Command Prompt", "Hello window", "Linux", "Task Manager", "File Explorer"];
+        m.open(names.iter().map(|n| program(n, "p")).collect());
+        let ids = ["Office", "FileZilla", "NET", "Python", "Chromium", "Git", "7-Zip"];
+        m.set_catalog(ids.iter().map(|n| tile(n, n, CatalogState::NotInstalled, 0, 0)).collect());
+        let mut alpine = linux(Distribution, LinuxState::Failed, 100, 1, "Alpine");
+        alpine.name = "Alpine".to_string();
+        m.set_linux(vec![
+            linux(Distribution, LinuxState::Installed, 0, 0, "Ubuntu"),
+            linux(Terminal, LinuxState::Installed, 0, 0, "Terminal"),
+            linux(App, LinuxState::Installed, 0, 0, "XTerm"),
+            linux(App, LinuxState::Installed, 0, 1, "Files"),
+            alpine,
+        ]);
+        let placed = lay(&m);
+        let last = find(&placed, "LinuxAlpineBar").expect("the last tile's bar").rect;
+        assert!(last[1] + last[3] <= MENU_HEIGHT - 24, "{last:?}");
     }
 
     #[test]

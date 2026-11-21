@@ -1393,6 +1393,8 @@ name = "linux_menu_test"
 version = "0.1.0"
 dependencies = [
  "gala_heap",
+ "ntrt",
+ "uia_client",
 ]
 
 [[package]]

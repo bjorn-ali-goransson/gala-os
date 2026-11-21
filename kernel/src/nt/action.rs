@@ -18,10 +18,10 @@
 //! | 36..40 | zero |
 //! | 40..   | the text (UTF-16): Start's program and arguments, Wallpaper's name, LinuxProgress's distribution, InstallProgress's package id |
 //!
-//! The output: Start writes the new process id (u64). Windows, Programs
-//! and Catalog write a header (u32 version 1, u32 how many there are),
-//! then as many entries as fit (WINDOW_ENTRY / PROGRAM_ENTRY /
-//! CATALOG_ENTRY bytes each). Actions 12 and 13 were the kernel taskbar's
+//! The output: Start writes the new process id (u64). Windows, Programs,
+//! Catalog and LinuxList write a header (u32 version 1, u32 how many
+//! there are), then as many entries as fit (WINDOW_ENTRY / PROGRAM_ENTRY
+//! / CATALOG_ENTRY / LINUX_ENTRY bytes each). Actions 12 and 13 were the kernel taskbar's
 //! notification area (its icons and a click on one): they are gone with
 //! it, as shasha's icons are UI Automation elements
 //! (`TrayIcon<hwnd>_<id>`), and stay unused.
@@ -29,7 +29,9 @@
 //! A catalog tile that changes (an install asked for, moving on, ended
 //! or gone quiet) posts gala's `WM_GALA_CATALOG` (0x03A0, in Windows'
 //! unused system range) to the shell's window, which reads Catalog
-//! again (`desktop::tell_catalog`).
+//! again (`desktop::tell_catalog`); a Linux section's tile that does
+//! (the same, or the tiles listed changing) posts it with wparam 1,
+//! for LinuxList (`desktop::tell_linux`).
 
 use super::desktop::{self, Action, SnapTo};
 use super::status::NtStatus;
@@ -82,6 +84,12 @@ pub const ACTION_LINUX: u32 = 17;
 /// (`desktop::catalog`): STATUS_NOT_SUPPORTED where no shell runs, as
 /// Programs.
 pub const ACTION_CATALOG: u32 = 18;
+/// A user-mode shell's start menu (ROADMAP SH step 1, part 11): the
+/// Linux section's entries, LINUX_ENTRY bytes each (`desktop::
+/// linux_section`, `linux_entries`): each distribution's tile in the
+/// section's order, an installed one's followed by its terminal and its
+/// applications. STATUS_NOT_SUPPORTED where no shell runs, as Programs.
+pub const ACTION_LINUX_LIST: u32 = 19;
 
 /// The launch verbs' flags (Start, Install, Linux: args[0]): start a
 /// console program in a console window of its own (conhost.exe, as
@@ -142,6 +150,39 @@ pub const CATALOG_DOWNLOADING: u32 = 3;
 pub const CATALOG_INSTALLING: u32 = 4;
 pub const CATALOG_FAILED: u32 = 5;
 pub const CATALOG_LOST: u32 = 6;
+
+/// A Linux section's entry: its kind (u32, LINUX_KIND_*), state (u32,
+/// LINUX_STATE_*), how much of its bar is filled (u32 percent,
+/// `linux::Progress::percent`; 0 without an install), the index the
+/// Linux action takes with it (u32: a distribution's suggestion, the
+/// `SUGGESTIONS` index for LINUX_INSTALL, LINUX_NOT_SUGGESTED for one
+/// gala does not suggest; an application's index among its
+/// distribution's for LINUX_APP; 0 for a terminal), the name's and the
+/// label's lengths (2 x u32), the distribution's name (32 UTF-16 units)
+/// and the label (48: the application's name, `Terminal` for a
+/// terminal, the distribution's name again for a distribution).
+pub const LINUX_ENTRY: usize = 24 + 2 * LINUX_NAME + 2 * LINUX_LABEL;
+const LINUX_NAME: usize = desktop::linux::NAME;
+const LINUX_LABEL: usize = desktop::linux::APP_NAME;
+/// A Linux section entry's kinds: a distribution's tile (LINUX_INSTALL
+/// when it is not installed, LINUX_DESKTOP when it is), an installed
+/// distribution's terminal (LINUX_TERMINAL), one of its applications
+/// (LINUX_APP).
+pub const LINUX_KIND_DISTRIBUTION: u32 = 0;
+pub const LINUX_KIND_TERMINAL: u32 = 1;
+pub const LINUX_KIND_APP: u32 = 2;
+/// A distribution's states: not registered and no install under way;
+/// registered (a terminal's and an application's state too); its
+/// `gala linux-install` downloading, importing; failed; gone without a
+/// word (`linux::Progress::Lost`).
+pub const LINUX_STATE_NOT_INSTALLED: u32 = 0;
+pub const LINUX_STATE_INSTALLED: u32 = 1;
+pub const LINUX_STATE_DOWNLOADING: u32 = 2;
+pub const LINUX_STATE_IMPORTING: u32 = 3;
+pub const LINUX_STATE_FAILED: u32 = 4;
+pub const LINUX_STATE_LOST: u32 = 5;
+/// A distribution entry's index when gala does not suggest it.
+pub const LINUX_NOT_SUGGESTED: u32 = u32::MAX;
 
 /// A decoded request.
 #[derive(Debug, PartialEq, Eq)]
@@ -264,7 +305,7 @@ fn run_launch(r: &Request, caller: &Caller) -> Result<Output, NtStatus> {
         }
         _ => {
             let r = linux_request(text, r.args[1], r.args[2])?;
-            ("linux", launch_linux(r, token))
+            ("linux", linux_for_shell(r, token, &caller.desk))
         }
     };
     let text = text.unwrap_or("");
@@ -400,6 +441,13 @@ fn run_other(
                 catalog_entry(&mut out, t.program.name, id, state, percent, exit)?;
             }
         }
+        ACTION_LINUX_LIST => {
+            if !desktop::has_shell(&caller.desk.shell) {
+                return Err(NtStatus::NOT_SUPPORTED);
+            }
+            let tiles = desktop::linux_section(&caller.desk.shell);
+            linux_entries(&mut out, &tiles)?;
+        }
         ACTION_WALLPAPER => {
             let mut name = [0u8; 260];
             let name = ascii(&r.text, &mut name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
@@ -510,6 +558,84 @@ fn catalog_entry(
         for (u, b) in units.iter_mut().zip(text.bytes().take(room)) {
             *u = u16::from(b);
         }
+        for u in &units[..room] {
+            push(out, &u.to_le_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// A Linux section distribution's state and bar (LINUX_ENTRY's): a
+/// registered distribution is installed whatever its install last said.
+pub fn linux_state(installed: bool, install: Option<desktop::linux::Progress>) -> (u32, u32) {
+    use desktop::linux::Progress;
+    let Some(p) = install.filter(|_| !installed) else {
+        return (if installed { LINUX_STATE_INSTALLED } else { LINUX_STATE_NOT_INSTALLED }, 0);
+    };
+    let state = match p {
+        Progress::Downloading(_) => LINUX_STATE_DOWNLOADING,
+        Progress::Importing => LINUX_STATE_IMPORTING,
+        Progress::Failed => LINUX_STATE_FAILED,
+        Progress::Lost(_) => LINUX_STATE_LOST,
+    };
+    (state, u32::from(p.percent()))
+}
+
+/// LinuxList's output for `tiles`: the header, then each tile's entry,
+/// an installed distribution's followed by its terminal's and its
+/// applications'.
+fn linux_entries(out: &mut Vec<u8>, tiles: &[desktop::LinuxTile]) -> Result<(), NtStatus> {
+    let count: usize = tiles
+        .iter()
+        .map(|t| if t.distro.installed { 2 + t.distro.apps().count() } else { 1 })
+        .sum();
+    list_header(out, count)?;
+    for t in tiles {
+        let d = &t.distro;
+        let name = d.name.as_str();
+        let (state, percent) = linux_state(d.installed, t.install);
+        let index = d.suggestion.map_or(LINUX_NOT_SUGGESTED, |s| s as u32);
+        linux_entry(out, LINUX_KIND_DISTRIBUTION, state, percent, index, name, name)?;
+        if !d.installed {
+            continue;
+        }
+        linux_entry(out, LINUX_KIND_TERMINAL, state, 0, 0, name, "Terminal")?;
+        for (k, app) in d.apps().enumerate() {
+            linux_entry(out, LINUX_KIND_APP, state, 0, k as u32, name, app.name.as_str())?;
+        }
+    }
+    Ok(())
+}
+
+fn linux_entry(
+    out: &mut Vec<u8>,
+    kind: u32,
+    state: u32,
+    percent: u32,
+    index: u32,
+    name: &str,
+    label: &str,
+) -> Result<(), NtStatus> {
+    let mut texts = [([0u16; LINUX_LABEL], 0usize); 2];
+    for ((units, n), (text, room)) in
+        texts.iter_mut().zip([(name, LINUX_NAME), (label, LINUX_LABEL)])
+    {
+        // Whole characters only: one cut at the room's end keeps none of
+        // its surrogates.
+        for c in text.chars() {
+            let mut pair = [0u16; 2];
+            let c = c.encode_utf16(&mut pair);
+            if *n + c.len() > room {
+                break;
+            }
+            units[*n..*n + c.len()].copy_from_slice(c);
+            *n += c.len();
+        }
+    }
+    for v in [kind, state, percent, index, texts[0].1 as u32, texts[1].1 as u32] {
+        push(out, &v.to_le_bytes())?;
+    }
+    for ((units, _), room) in texts.iter().zip([LINUX_NAME, LINUX_LABEL]) {
         for u in &units[..room] {
             push(out, &u.to_le_bytes())?;
         }
@@ -944,7 +1070,8 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
         Request::App(_, app) => app.name,
         _ => desktop::linux::Text::cut(op),
     };
-    let (pid, status) = match launch_linux(r, None) {
+    let started = launch_linux(r, None);
+    let (pid, status) = match &started {
         Ok(s) => (s.pid, 0),
         Err(e) => (0, e.0),
     };
@@ -959,7 +1086,52 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
     );
     // As a package's install does, the tile hears what became of it.
     if matches!(r, Request::Install(..)) {
-        desktop::linux_install_started(session, name, (status == 0).then_some(pid));
+        linux_installer_registered(session, name, started.as_ref().ok());
+    }
+}
+
+/// GalaDesktopAction's Linux for the caller's desktop `desk`: an install
+/// of a distribution makes its tile downloading before `gala
+/// linux-install` starts (`desktop::begin_linux_install`), and the
+/// installer's pid is watched so that one ending without a word leaves
+/// the tile quiet instead of waiting for ever
+/// (`linux_installer_registered`), as the kernel menu's tile does
+/// (`start_linux`). Without a shell it just starts.
+fn linux_for_shell(
+    r: desktop::linux::Request,
+    token: Option<super::object::ObjectRef>,
+    desk: &super::session::Desk,
+) -> Result<Started, NtStatus> {
+    let desktop::linux::Request::Install(name, _) = r else {
+        return launch_linux(r, token);
+    };
+    if !desktop::has_shell(&desk.shell) {
+        return launch_linux(r, token);
+    }
+    desktop::begin_linux_install(&desk.shell, name);
+    let started = launch_linux(r, token);
+    linux_installer_registered(desk.session, name, started.as_ref().ok());
+    started
+}
+
+/// Tells the desktop which `gala linux-install` distribution `name`'s
+/// tile waits for a word from (None: it never started), as
+/// `installer_registered` does for a package's: one that has ended
+/// before it was watched is told as gone (`desktop::process_ended`
+/// again).
+fn linux_installer_registered(session: u32, name: desktop::linux::Name, started: Option<&Started>) {
+    desktop::linux_install_started(session, name, started.map(|s| s.pid));
+    if let Some(s) = started
+        && s.process.exit_status().is_some()
+    {
+        crate::info!(
+            "desktop: start menu: {}'s installer (pid {}) ended before it was watched",
+            name.as_str(),
+            s.pid
+        );
+        if let Some(desk) = super::session::desk(session) {
+            desktop::process_ended(&desk.shell, s.pid);
+        }
     }
 }
 
@@ -1254,6 +1426,82 @@ mod tests {
         assert_eq!(out.len(), CATALOG_ENTRY);
         assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 32);
         assert_eq!(i32::from_le_bytes(out[16..20].try_into().unwrap()), -1);
+    }
+
+    /// A Linux section distribution's state: a registered one is
+    /// installed whatever its install last said; otherwise where its
+    /// install is and its bar (`Progress::percent`).
+    #[test]
+    fn linux_tiles_say_where_their_install_is() {
+        use desktop::linux::Progress;
+        assert_eq!(linux_state(false, None), (LINUX_STATE_NOT_INSTALLED, 0));
+        assert_eq!(linux_state(true, None), (LINUX_STATE_INSTALLED, 0));
+        assert_eq!(linux_state(true, Some(Progress::Failed)), (LINUX_STATE_INSTALLED, 0));
+        assert_eq!(
+            linux_state(false, Some(Progress::Downloading(0))),
+            (LINUX_STATE_DOWNLOADING, 0)
+        );
+        assert_eq!(
+            linux_state(false, Some(Progress::Downloading(60))),
+            (LINUX_STATE_DOWNLOADING, 48)
+        );
+        assert_eq!(linux_state(false, Some(Progress::Importing)), (LINUX_STATE_IMPORTING, 90));
+        assert_eq!(linux_state(false, Some(Progress::Failed)), (LINUX_STATE_FAILED, 100));
+        assert_eq!(linux_state(false, Some(Progress::Lost(48))), (LINUX_STATE_LOST, 48));
+    }
+
+    /// LinuxList's bytes, as shasha reads them: a suggestion not
+    /// installed is one entry; an installed distribution is followed by
+    /// its terminal and its applications, each with the index the Linux
+    /// action takes.
+    #[test]
+    fn linux_entries_are_laid_out_as_documented() {
+        use desktop::linux::{App, Distro, Name, Progress, Text};
+        assert_eq!(LINUX_ENTRY, 184);
+        let mut ubuntu = Distro::new(Name::cut("Ubuntu"), true);
+        ubuntu.apps[0] = Some(App { name: Text::cut("XTerm"), exec: Text::cut("xterm") });
+        let tiles = [
+            desktop::LinuxTile { distro: ubuntu, install: None },
+            desktop::LinuxTile {
+                distro: Distro::new(Name::cut("Alpine"), false),
+                install: Some(Progress::Downloading(50)),
+            },
+            desktop::LinuxTile { distro: Distro::new(Name::cut("Mine"), true), install: None },
+        ];
+        let mut out = Vec::new();
+        linux_entries(&mut out, &tiles).unwrap();
+        assert_eq!(out.len(), LIST_HEADER + 6 * LINUX_ENTRY);
+        let u32_at = |at: usize| u32::from_le_bytes(out[at..at + 4].try_into().unwrap());
+        assert_eq!([u32_at(0), u32_at(4)], [LIST_VERSION, 6]);
+        let units = |at: usize, n: usize| -> String {
+            let u: Vec<u16> =
+                out[at..at + 2 * n].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16(&u).unwrap()
+        };
+        let entry = |k: usize| {
+            let at = LIST_HEADER + k * LINUX_ENTRY;
+            let head: Vec<u32> = (0..6).map(|i| u32_at(at + 4 * i)).collect();
+            let name = units(at + 24, head[4] as usize);
+            let label = units(at + 24 + 2 * LINUX_NAME, head[5] as usize);
+            (head[..4].to_vec(), name, label)
+        };
+        let e = |kind, state, percent, index, name: &str, label: &str| {
+            (vec![kind, state, percent, index], String::from(name), String::from(label))
+        };
+        let (d, t, a) = (LINUX_KIND_DISTRIBUTION, LINUX_KIND_TERMINAL, LINUX_KIND_APP);
+        let installed = LINUX_STATE_INSTALLED;
+        assert_eq!(entry(0), e(d, installed, 0, 0, "Ubuntu", "Ubuntu"));
+        assert_eq!(entry(1), e(t, installed, 0, 0, "Ubuntu", "Terminal"));
+        assert_eq!(entry(2), e(a, installed, 0, 0, "Ubuntu", "XTerm"));
+        assert_eq!(entry(3), e(d, LINUX_STATE_DOWNLOADING, 40, 1, "Alpine", "Alpine"));
+        assert_eq!(entry(4), e(d, installed, 0, LINUX_NOT_SUGGESTED, "Mine", "Mine"));
+        assert_eq!(entry(5), e(t, installed, 0, 0, "Mine", "Terminal"));
+        // A label too long for its room is cut at a whole character.
+        let mut out = Vec::new();
+        let long = "\u{1f427}".repeat(30);
+        linux_entry(&mut out, a, installed, 0, 0, "Ubuntu", &long).unwrap();
+        assert_eq!(out.len(), LINUX_ENTRY);
+        assert_eq!(u32::from_le_bytes(out[20..24].try_into().unwrap()), 48);
     }
 
     #[test]

@@ -9208,6 +9208,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("linux_menu", "crypt32.dll", "Windows/System32"),
     ("linux_menu", "bcrypt.dll", "Windows/System32"),
     ("linux_menu", "ncrypt.dll", "Windows/System32"),
+    // linux_menu_test finds the menu's tiles through UI Automation.
+    ("linux_menu", "ole32.dll", "Windows/System32"),
+    ("linux_menu", "oleaut32.dll", "Windows/System32"),
+    ("linux_menu", "uiautomationcore.dll", "Windows/System32"),
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
@@ -20515,37 +20519,58 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &["wsl_test: imported bb", "wsl: bb: pid", "xtask: screen ok", "run: end wsl.exe"],
     },
     Scenario {
-        // The start menu's "Linux distributions" (LD step 7) on the screen
-        // (UEFI): LINUX_MENU_SCREEN collapses and expands the section,
-        // dismisses Alpine, installs Ubuntu from its tile (its rootfs a
-        // stand-in served by the host: `linux_menu_rootfs`; fetched by
-        // `gala linux-install`, imported by `wsl --import`, the progress
-        // on the tile), starts its desktop (LD step 6's session), opens a
-        // terminal and XTerm from its context menu, and hides the
-        // section; linux_menu_test follows the registry.
+        // The start menu's Linux section (LD step 7, SH step 1 part 11):
+        // shasha's menu reads it (ACTION_LINUX_LIST) and asks for what a
+        // tile is (ACTION_LINUX). LINUX_MENU_SCREEN clicks what
+        // linux_menu_test finds through UI Automation: Ubuntu's tile
+        // installs it (its rootfs a stand-in served by the host:
+        // `linux_menu_rootfs`; fetched by `gala linux-install`, imported
+        // by `wsl --import`, the progress on the tile), then starts its
+        // desktop (LD step 6's session), its terminal and XTerm (from its
+        // .desktop file); linux_menu_test follows the tiles, the window
+        // list and the registry.
         name: "linux_menu",
-        // The kernel's own start menu's Linux tiles (shell=desktop: no shasha) until SH
-        // removes it and the test moves to shasha's (ROADMAP SH).
-        cmdline: "qemu_exit shell=desktop wayland=on xwayland=on events=wsl,window wallpaper=night linux_mirror=http://10.0.2.100 run=linux_menu_test.exe",
+        cmdline: "qemu_exit wayland=on xwayland=on events=wsl,window wallpaper=night agent=off linux_mirror=http://10.0.2.100 run=linux_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
-            "linux_menu_test: ready",
-            "desktop: start menu: Linux distributions shown, dismissed [Alpine]",
-            "linux_menu_test: Alpine dismissed",
+            "linux_menu_test: StartButton at",
+            "linux_menu_test: listed",
+            "shasha: linux: Ubuntu not installed",
+            "shasha: linux: Alpine not installed",
+            "linux_menu_test: Linux section shown",
+            // The tile's click: the install asked for, as the caller,
+            // without a window, and watched by the desktop.
             "desktop: start menu: linux install Ubuntu: C:\\gala\\gala.exe linux-install Ubuntu http://10.0.2.100/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+            "asks for linux \"Ubuntu\" (flags 0x0): started",
+            "shasha: linux: Ubuntu: install asked: pid",
+            "desktop: the shell's window ",
+            " told of the Linux section",
+            "shasha: linux: Ubuntu downloading",
+            "linux_menu_test: downloading shown",
             "gala: linux: Ubuntu: installed",
+            "shasha: linux: Ubuntu installed",
+            "shasha: linux: Ubuntu lists Terminal",
+            "shasha: linux: Ubuntu lists XTerm",
             "linux_menu_test: Ubuntu installed",
             "desktop: start menu: linux desktop Ubuntu",
+            "shasha: linux: Ubuntu: desktop asked: pid",
+            "shasha: the start menu closes: a Linux program started",
             "wayland: listening in a distribution's tree too",
             "desktop: shown window 'Xwayland on :1'",
+            "linux_menu_test: desktop session shown",
+            "session: done",
+            "linux_menu_test: desktop session ended",
+            "linux_menu_test: menu open again",
             "desktop: start menu: linux terminal Ubuntu",
+            "shasha: linux: Terminal (Ubuntu): terminal asked: pid",
             "desktop: shown window 'wsl.exe'",
+            "/bin/sh/bin/sh",
+            "linux_menu_test: terminal ended",
+            "linux_menu_test: app tile shown",
             "desktop: start menu: linux app Ubuntu",
+            "shasha: linux: XTerm (Ubuntu): application asked: pid",
             "desktop: shown window 'xterm'",
-            "desktop: start menu: Linux distributions hidden, dismissed [Alpine]",
-            "linux_menu_test: section hidden",
-            "desktop: start menu: Linux distributions shown, dismissed [Alpine]",
-            "linux_menu_test: section shown again",
+            "linux_menu_test: application shown",
             "xtask: screen ok",
             "linux_menu_test: ok",
             "exited with status 0x00000000",
@@ -24236,131 +24261,64 @@ const XDESKTOP_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
-/// The start menu's Linux distributions (`linux_menu`, UEFI's screen of
-/// 1280 x 800, wallpaper "night"). The menu (600 x 640) at (340, 100):
-/// the pinned grid's two rows from y 216, the section's heading at (372,
-/// 388) ("Linux distributions" from x 392, "Hide" at 852..908), its
-/// tiles from (372, 416), 89 apart: an icon at tile + (26, 10), a
-/// download badge at icon + (20, 20), a suggestion's dismiss cross at its
-/// top right (tile + (67, 0), 18 x 18), the progress bar at tile + (12,
-/// 68). The start button at (640, 776) alone on the taskbar, (616, 776)
-/// beside one window. A context menu opens at the pointer, 32-pixel items
-/// from 4 below its top. The pointer starts at (640, 400); each move is
-/// from where the step before left it.
+/// The start menu's Linux section (`linux_menu`): clicks on what
+/// linux_menu_test finds through UI Automation and announces (`click_on
+/// linux_menu_test: <element>`), each once the test has printed that the
+/// step before did its work, and the keys of the session's xterm and of
+/// the terminal. Behaviour, not pictures: the one pixel check is the
+/// desktop session's readiness (its xterm drawn under the pointer, at
+/// the place linux_menu_test's `Session` point is: the window at (64,
+/// 48), the point 292 in and down), without which the keys typed there
+/// go nowhere.
 const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
-    marker: "linux_menu_test: ready",
+    marker: "linux_menu_test: listed",
     steps: &[
-        // The menu: the section shown, Ubuntu and Alpine not installed
-        // (each with a download badge). Its picture: "section shown".
         ScreenStep {
-            after: "",
-            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
-            pixels: &[
-                PixelCheck::AnyIn(392, 390, 140, 18, 0x1b1b1b), // "Linux distributions"
-                PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8),  // Ubuntu's badge
-                PixelCheck::AnyIn(507, 446, 16, 16, 0x005fb8),  // Alpine's badge
-            ],
-        },
-        // The heading: collapsed (no tiles). "section collapsed".
-        ScreenStep {
-            after: "",
-            input: &[
-                "mouse_move -190 -255",
-                "mouse_move 0 -121",
-                "mouse_button 1",
-                "mouse_button 0",
-            ],
-            pixels: &[PixelCheck::At(410, 440, 0xf2f4f8), PixelCheck::At(426, 454, 0xf2f4f8)],
-        },
-        // Expanded again.
-        ScreenStep {
-            after: "",
-            input: &["mouse_move 2 0", "mouse_button 1", "mouse_button 0"],
-            pixels: &[PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8)],
-        },
-        // Alpine's dismiss cross: its tile goes.
-        ScreenStep {
-            after: "",
-            input: &["mouse_move 85 25", "mouse_button 1", "mouse_button 0"],
-            pixels: &[
-                PixelCheck::At(515, 454, 0xf2f4f8),
-                PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8),
-            ],
+            after: "linux_menu_test: listed",
+            input: &["click_on linux_menu_test: StartButton"],
+            pixels: &[],
         },
         // Ubuntu's tile: it installs (the menu stays open).
         ScreenStep {
-            after: "linux_menu_test: Alpine dismissed",
-            input: &["mouse_move -122 15", "mouse_button 1", "mouse_button 0"],
+            after: "linux_menu_test: Linux section shown",
+            input: &["click_on linux_menu_test: Ubuntu"],
             pixels: &[],
         },
-        // Its progress bar while it downloads (the host holds the rest of
-        // the file until this check passes: HELD_DOWNLOADS): "installing".
-        ScreenStep {
-            after: "Linux distribution Ubuntu: downloading (5",
-            input: &[],
-            pixels: &[PixelCheck::AnyIn(384, 484, 61, 4, 0x005fb8)],
-        },
-        // Installed: in full colour, no badge, no bar. "installed".
+        // The test has seen the tile downloading with its bar: the host
+        // sends the rest of the file once this step has passed
+        // (HELD_DOWNLOADS).
+        ScreenStep { after: "linux_menu_test: downloading shown", input: &[], pixels: &[] },
+        // Installed: a click starts its desktop (rootful Xwayland on :1,
+        // twm, an xterm).
         ScreenStep {
             after: "linux_menu_test: Ubuntu installed",
-            input: &[],
-            pixels: &[PixelCheck::AnyIn(398, 426, 32, 32, 0xdc6034)],
-        },
-        // A click: its desktop (rootful Xwayland on :1, twm, an xterm).
-        ScreenStep {
-            after: "",
-            input: &["mouse_move 1 0", "mouse_button 1", "mouse_button 0"],
+            input: &["click_on linux_menu_test: UbuntuDesktop"],
             pixels: &[],
         },
-        // "desktop started": the frame at (64, 48), the X root black,
-        // twm's title bar, the xterm.
-        ScreenStep {
-            after: "desktop: shown window 'Xwayland on :1'",
-            input: &[],
-            pixels: &[
-                PixelCheck::At(800, 600, 0x000000),
-                PixelCheck::AnyIn(100, 120, 80, 24, 0x3465a4),
-                PixelCheck::At(300, 300, 0xffffff),
-            ],
-        },
-        // `exit` in its xterm ends the session. twm's focus follows the
-        // pointer (as on Ubuntu 26.04: keys go to the xterm only with the
-        // pointer on it): the pointer from (416, 440), the xterm's edge,
-        // into it (356, 340), its white beside the arrow, then `exit`.
+        // The pointer onto the session's xterm (twm's focus follows it,
+        // as on Ubuntu 26.04: keys go to the xterm only with the pointer
+        // on it), the xterm drawn there, then `exit` ends the session.
+        ScreenStep { after: "linux_menu_test: desktop session shown", input: &[], pixels: &[] },
         ScreenStep {
             after: "session: display :1 ready",
-            input: &["mouse_move -60 -100"],
+            input: &["click_on linux_menu_test: Session"],
             pixels: &[PixelCheck::At(500, 250, 0xffffff)],
         },
         ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
-        // The menu again, Ubuntu's context menu: "Open terminal" and
-        // XTerm (from its .desktop file). "context menu".
+        // The menu again: the terminal's tile, `wsl -d Ubuntu` in a
+        // console window.
         ScreenStep {
-            after: "session: done",
-            input: &[
-                "mouse_move 284 355",
-                "mouse_move 0 81",
-                "mouse_button 1",
-                "mouse_button 0",
-                "mouse_move -225 -255",
-                "mouse_move 0 -81",
-                "mouse_button 2",
-                "mouse_button 0",
-            ],
-            pixels: &[
-                PixelCheck::AnyIn(430, 452, 100, 16, 0x1b1b1b), // "Open terminal"
-                PixelCheck::AnyIn(430, 484, 60, 16, 0x1b1b1b),  // "XTerm"
-                PixelCheck::At(620, 500, 0xffffff),
-            ],
+            after: "linux_menu_test: desktop session ended",
+            input: &["click_on linux_menu_test: StartButton"],
+            pixels: &[],
         },
-        // "Open terminal": `wsl -d Ubuntu` in a console window.
         ScreenStep {
-            after: "",
-            input: &["mouse_move 85 20", "mouse_button 1", "mouse_button 0"],
+            after: "linux_menu_test: menu open again",
+            input: &["click_on linux_menu_test: UbuntuTerminal"],
             pixels: &[],
         },
         // dash's prompt, then `echo $SHELL$SHELL` (an output that is not
-        // its own echo: /bin/sh/bin/sh).
+        // its own echo: /bin/sh/bin/sh), then `exit`.
         ScreenStep {
             after: "desktop: shown window 'wsl.exe'",
             input: typed!(
@@ -24369,82 +24327,17 @@ const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
             ),
             pixels: &[],
         },
-        // "terminal": the command and its output in the console.
+        ScreenStep { after: "/bin/sh/bin/sh", input: typed!("e", "x", "i", "t"), pixels: &[] },
+        // The menu again: XTerm's tile, an xterm under the desktop's
+        // rootless Xwayland.
         ScreenStep {
-            after: "/bin/sh/bin/sh",
-            input: &[],
-            pixels: &[PixelCheck::AnyIn(66, 98, 300, 60, 0xcccccc)],
-        },
-        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
-        // The menu (beside the console window's button), the context menu,
-        // XTerm: an xterm under the desktop's rootless Xwayland. Nothing to
-        // wait for after `exit`: the console's window stays (the taskbar
-        // does not change), and the keys are read before these moves
-        // (InputPace).
-        ScreenStep {
-            after: "",
-            input: &[
-                "mouse_move 116 255",
-                "mouse_move 0 61",
-                "mouse_button 1",
-                "mouse_button 0",
-                "mouse_move -201 -255",
-                "mouse_move 0 -81",
-                "mouse_button 2",
-                "mouse_button 0",
-            ],
-            pixels: &[PixelCheck::AnyIn(430, 484, 60, 16, 0x1b1b1b)],
-        },
-        ScreenStep {
-            after: "",
-            input: &["mouse_move 85 52", "mouse_button 1", "mouse_button 0"],
+            after: "linux_menu_test: terminal ended",
+            input: &["click_on linux_menu_test: StartButton"],
             pixels: &[],
         },
-        // "application": its window (shasha's frame at (96, 80): the
-        // second Wayland window), white with dash's prompt (its client
-        // area from (97, 113), as lx_xterm's from (65, 81)). The window
-        // shows before the shell runs; `exit` waits for the prompt, or
-        // its keys reach Xwayland before the xterm has the X focus.
         ScreenStep {
-            after: "desktop: shown window 'xterm'",
-            input: &[],
-            pixels: &[
-                PixelCheck::AnyIn(104, 90, 40, 16, 0x1b1b1b), // "xterm" in its caption
-                PixelCheck::At(300, 300, 0xffffff),
-                PixelCheck::AnyIn(98, 116, 12, 12, 0x000000), // the prompt "$"
-            ],
-        },
-        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
-        // "Hide": the section goes. "section hidden". Once the xterm's
-        // window has gone: until then the taskbar has two buttons beside
-        // the start button, which is then at (570, 776).
-        ScreenStep {
-            after: "desktop: window 'xterm' left the screen",
-            input: &[
-                "mouse_move 116 255",
-                "mouse_move 0 29",
-                "mouse_button 1",
-                "mouse_button 0",
-                "mouse_move 255 -255",
-                "mouse_move 9 -121",
-                "mouse_button 1",
-                "mouse_button 0",
-            ],
-            pixels: &[PixelCheck::At(450, 440, 0xf2f4f8), PixelCheck::At(500, 398, 0xf2f4f8)],
-        },
-        // The menu's own context menu (a right click on its background,
-        // at (880, 400): the card kept inside the menu, at (712, 400))
-        // shows the section again; linux_menu_test waits for that before
-        // it ends (no pixels here: the guest is ending).
-        ScreenStep {
-            after: "linux_menu_test: section hidden",
-            input: &[
-                "mouse_button 2",
-                "mouse_button 0",
-                "mouse_move -80 20",
-                "mouse_button 1",
-                "mouse_button 0",
-            ],
+            after: "linux_menu_test: app tile shown",
+            input: &["click_on linux_menu_test: XTerm"],
             pixels: &[],
         },
     ],
@@ -26769,13 +26662,13 @@ fn guest_ps2_read(monitor: &mut std::os::unix::net::UnixStream, at: u64) -> Resu
 }
 
 /// Downloads `serve-page` holds part-way until a screen step has seen
-/// them in progress: (scenario, the step whose pixels must pass first).
-/// `linux_menu`'s progress step checks the tile's bar while the rootfs
-/// is still downloading; without the hold a fast machine (KVM) finished
-/// the install before the screendump. serve-page sends HELD_FRACTION of
-/// the file, then waits for `<iso>.serve.release` (written once that
-/// step passes) before the rest.
-const HELD_DOWNLOADS: &[(&str, usize)] = &[("linux_menu", 5)];
+/// them in progress: (scenario, the step that must pass first).
+/// `linux_menu`'s step 2 comes once linux_menu_test has seen the tile
+/// downloading with its bar; without the hold a fast machine (KVM)
+/// finished the install before the test looked. serve-page sends
+/// HELD_PERCENT of the file, then waits for `<iso>.serve.release`
+/// (written once that step passes) before the rest.
+const HELD_DOWNLOADS: &[(&str, usize)] = &[("linux_menu", 2)];
 /// How much of a held download goes first, in percent.
 const HELD_PERCENT: usize = 60;
 

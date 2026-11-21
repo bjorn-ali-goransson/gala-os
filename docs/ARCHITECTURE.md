@@ -8182,7 +8182,9 @@ session's is shown by nothing unless GalaSession attaches a presenter
     no reason: `wsl --import` gives no code to say one.
 - **Linux distributions** (ROADMAP LD step 7; `desktop/linux.rs` the
   model and `.desktop` parsing, host tests there and in
-  `desktop/tests.rs`; scenario `linux_menu`): a section below the pinned
+  `desktop/tests.rs`; scenario `linux_menu` runs shasha's, "The Linux
+  section" in "The user-mode shell", which reads this model through
+  GalaDesktopAction's LinuxList): a section below the pinned
   grid (which then shows at most two rows; not while searching): a
   heading "Linux distributions" with a chevron (a click collapses or
   expands it) and "Hide" at its right, then one row of tiles: the
@@ -8520,6 +8522,31 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   hands 0x03A0 to the component). Invariant: the kernel's install
   state is the one truth for both menus; shasha keeps only the last
   catalog it read.
+- **The Linux section** (ROADMAP SH step 1, part 11; `shasha::linux`,
+  host tests there and in `menu.rs`): after the catalog's tiles, a
+  "Linux" heading (`LinuxTitle`) and a grid (`Linux`) of the entries of
+  GalaDesktopAction ACTION_LINUX_LIST the search shows (the button's
+  name holds it). A distribution's tile is a column as a catalog
+  tile's: its button `Linux<name>` (the name's letters and digits; the
+  button named with the distribution's name), a Text `Linux<name>State`
+  ("Not installed" beside an accent badge, "Downloading N%",
+  "Importing", "The install failed.", "The install stopped without a
+  word.", "Installed") and, while an install was asked for, its bar
+  `Linux<name>Bar`. An installed distribution's tile is followed by its
+  terminal's (`LinuxTerminal<name>`, "Terminal (<name>)") and its
+  applications' (`LinuxApp<name>_<index>`, "<application> (<name>)", as
+  WSL names its shortcuts), buttons as the programs' tiles. A click
+  asks for ACTION_LINUX with the distribution's name
+  (`LinuxEntry::click`): LINUX_INSTALL with the suggestion's index on
+  one not installed, failed or gone quiet (the menu stays open and
+  reads the section at once), nothing on one under way or on one not
+  installed that gala does not suggest, LINUX_DESKTOP on an installed
+  one, LINUX_TERMINAL and LINUX_APP with the application's index on
+  the others (the menu closes). The section is read when the menu opens
+  and whenever the shell's window gets WM_GALA_CATALOG with wparam 1
+  (Progman passes the wparam on with WM_APP_CATALOG). Limits: no
+  dismiss cross, collapse or hide (the kernel menu's choices; LinuxList
+  leaves out the suggestions the user dismissed there), no icons.
 - **When shasha ends** (its process, or its bar removed) the taskbar's
   bar is gone and the desktop places its own again on the same strip
   (`taskbar_back`), so a session is never without a taskbar. A screen
@@ -8562,7 +8589,17 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   the catalog` for each state change (a bar that moves is posted
   without a line) or `... not told of the catalog: <status>`, and
   `desktop: start menu: <name>'s installer (pid <p>) ended before it
-  was watched`,
+  was watched` (a package's or a distribution's), the Linux section's
+  `shasha: linux: <label>: <install|desktop|terminal|application>
+  asked: pid <p>` (or `... refused: status <s>`, or `shasha: linux:
+  <label>: <busy|not suggested>: the click does nothing`), `shasha:
+  linux: <name> <state>` for each distribution whose state changed and
+  `shasha: linux: <name> lists <label>` for each terminal or application
+  that came (all of them on the first read), `shasha: the Linux section
+  is not read: status <s>`, `shasha: the Linux section's change is not
+  passed to the start menu: error <e>`, the kernel's `desktop: the
+  shell's window <hwnd> told of the Linux section` for each state change
+  (a bar that moves is posted without a line),
   `shasha: the Windows key is not the start menu's: RegisterHotKey
   error <e>`, and the start's `desktop: started ...shasha.exe (pid
   <p>)`.
@@ -8996,19 +9033,33 @@ CLI-first.
     winget id, state 0 not installed, 1 installed, 2 resolving, 3
     downloading, 4 installing, 5 failed, 6 gone quiet; the bar's
     percent and gala's exit code; an installed program is installed
-    whatever its install last said: `action::catalog_state`).
+    whatever its install last said: `action::catalog_state`), LinuxList
+    (the start menu's Linux section, LINUX_ENTRY bytes each: kind 0 a
+    distribution, 1 its terminal, 2 one of its applications; state 0
+    not installed, 1 installed, 2 downloading, 3 importing, 4 failed, 5
+    gone quiet; the bar's percent; the index Linux takes, a
+    distribution's suggestion or LINUX_NOT_SUGGESTED, an application's
+    index; the distribution's name, 32 UTF-16 units, and the label, 48:
+    `linux::entries` as the kernel menu lists them, with the choices
+    not yet saved, each installed one followed by its terminal and its
+    applications; read-only, so a shell may read it on each change).
   - Install with a catalog entry's id marks its tile resolving before
     `gala install` starts (`desktop::begin_install`) and has the
     desktop watch the installer's pid (`install_started`), as a click on
     the kernel menu's tile does; an installer that ended before it was
     watched is told as gone at once (`installer_registered`), so a tile
     never waits for a word that will not come. Any other id just
-    installs.
+    installs. Linux's install does the same for the distribution's tile
+    (`desktop::begin_linux_install`, `linux_install_started`;
+    `action::linux_installer_registered`).
   - Each change of a catalog tile (an install asked for, its progress,
     its end, gone quiet, a listing that finds it installed) posts
     WM_GALA_CATALOG (0x03A0) to the shell's window as the system, after
-    the desktop's lock (`desktop::tell_catalog`); a user-mode shell
-    reads Catalog again.
+    the desktop's lock (`desktop::tell_catalog`, wparam 0); a user-mode
+    shell reads Catalog again. Each change of the Linux section (an
+    install asked for, its progress or state, its end, a dismissal, the
+    distributions listed again) posts it with wparam 1
+    (`desktop::tell_linux`) and the shell reads LinuxList again.
   - Activate, Minimize, Maximize, Restore, Close, Snap, Move.
   - Wallpaper (the picture is decoded and scaled outside the desktop's
     lock, then swapped in and the screen redrawn; "drawn" is the drawn

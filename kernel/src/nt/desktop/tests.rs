@@ -1913,3 +1913,72 @@ fn the_shells_tile_install_is_watched_and_every_change_tells_the_shell() {
     assert_eq!(d.install_of(zip), None);
     assert_eq!(d.take_catalog_changed(), CatalogChange::State);
 }
+
+/// A user-mode shell's Linux tile asks for an install (GalaDesktopAction's
+/// Linux, LINUX_INSTALL): it is downloading before its installer starts,
+/// so that the installer is watched and its end without a word turns the
+/// tile quiet; every change is one the shell's window is to hear of,
+/// a moving bar as a bar alone.
+#[test]
+fn the_shells_linux_install_is_watched_and_every_change_tells_the_shell() {
+    let mut d = Desktop::new();
+    let ubuntu = linux::Name::new(b"Ubuntu").unwrap();
+    d.set_linux(linux::Listing::default());
+    assert_eq!(d.take_linux_changed(), CatalogChange::State, "the tiles listed");
+    d.set_linux(linux::Listing::default());
+    assert_eq!(d.take_linux_changed(), CatalogChange::None, "the same tiles again");
+    d.begin_linux_install(ubuntu);
+    assert_eq!(d.linux_install_of(ubuntu), Some(linux::Progress::Downloading(0)));
+    assert_eq!(d.take_linux_changed(), CatalogChange::State);
+    assert_eq!(d.take_linux_changed(), CatalogChange::None, "taken once");
+    assert_eq!(d.take_catalog_changed(), CatalogChange::None, "the catalog is not told");
+    assert!(d.linux_install_started(ubuntu, Some(7)));
+    assert_eq!(d.take_linux_changed(), CatalogChange::None, "a pid watched changes no tile");
+    d.linux_progress(ubuntu, Some(linux::Progress::Downloading(10)));
+    assert_eq!(d.take_linux_changed(), CatalogChange::Bar);
+    d.linux_progress(ubuntu, Some(linux::Progress::Importing));
+    assert_eq!(d.take_linux_changed(), CatalogChange::State);
+    d.linux_progress(ubuntu, Some(linux::Progress::Failed));
+    assert_eq!(d.linux_install_of(ubuntu), Some(linux::Progress::Failed));
+    assert_eq!(d.take_linux_changed(), CatalogChange::State);
+    // An installer that ends after its last word changes nothing more.
+    d.installers_gone(&[7]);
+    assert_eq!(d.take_linux_changed(), CatalogChange::None);
+    // Again, and this time it ends without a word.
+    d.begin_linux_install(ubuntu);
+    assert!(d.linux_install_started(ubuntu, Some(8)));
+    d.linux_progress(ubuntu, Some(linux::Progress::Downloading(50)));
+    assert_eq!(d.take_linux_changed(), CatalogChange::State);
+    d.installers_gone(&[8]);
+    assert_eq!(d.linux_install_of(ubuntu), Some(linux::Progress::Lost(40)));
+    assert_eq!(d.take_linux_changed(), CatalogChange::State);
+    // One that never started is quiet at once.
+    d.begin_linux_install(ubuntu);
+    let _ = d.take_linux_changed();
+    assert!(d.linux_install_started(ubuntu, None));
+    assert_eq!(d.linux_install_of(ubuntu), Some(linux::Progress::Lost(0)));
+    assert_eq!(d.take_linux_changed(), CatalogChange::State);
+    // A listing that finds it registered ends what is left of it.
+    d.begin_linux_install(ubuntu);
+    let _ = d.take_linux_changed();
+    let listing =
+        linux::Listing { installed: vec![installed("Ubuntu", &[])], ..Default::default() };
+    d.set_linux(listing);
+    assert_eq!(d.linux_install_of(ubuntu), None);
+    assert_eq!(d.take_linux_changed(), CatalogChange::State);
+}
+
+/// The section's choices waiting to be saved are the ones its tiles are
+/// listed with, not the registry's older ones.
+#[test]
+fn the_shells_linux_tiles_use_the_choices_not_yet_saved() {
+    let mut d = Desktop::new();
+    let read = linux::Prefs { dismissed: 0b01, ..Default::default() };
+    assert_eq!(d.linux_prefs(read), read);
+    let mut d2 = menu_with_linux(linux::Listing::default());
+    let (x, y) = centre(d2.linux_dismiss_rect(1));
+    click(&mut d2, x, y);
+    assert_eq!(d2.linux_prefs(read).dismissed, 0b10);
+    d.set_linux(linux::Listing::default());
+    assert_eq!(d.linux_prefs(read), read);
+}
