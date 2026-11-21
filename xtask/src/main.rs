@@ -16502,7 +16502,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // Progman is the shell's window, kept at the bottom, showing the
         // wallpaper; a click on it activates it, a click on window two
         // brings that back; SPI_SETDESKWALLPAPER changes the picture
-        // shasha shows; shasha ended, the desktop's taskbar is back.
+        // shasha shows; shasha ended, the taskbar's strip stays reserved
+        // (the kernel draws no taskbar of its own).
         // Installed: Command Prompt and Task Manager.
         name: "shasha",
         cmdline: "qemu_exit wallpaper=night events=window agent=off shell=shasha run=shasha_test.exe",
@@ -16541,7 +16542,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "told of the wallpaper",
             "shasha: the wallpaper is C:\\Windows\\Web\\Wallpaper\\dunes.qoi (1280 x 800)",
             "shasha_test: wallpaper set",
-            "desktop: the taskbar's bar is gone: the desktop's taskbar is back",
+            "desktop: the taskbar's bar is gone: no shell draws a taskbar; its strip stays reserved",
             "shasha_test: the taskbar after shasha [0,752,1280,800]",
             "shasha_test: ok",
             "exited with status 0x00000000",
@@ -16671,8 +16672,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // q35,i8042=off`: NO_I8042_SCENARIOS), as a laptop whose keyboard
         // and mouse are USB alone: the input thread must say so and stop
         // (and not spin on a status port that always reports a byte
-        // waiting), and the desktop must keep its clock, which is a
-        // thread of its own and not the input thread's passenger.
+        // waiting), and the desktop must keep its display watch, which
+        // is a thread of its own and not the input thread's passenger.
         // tray_test is the desktop program here because it needs no
         // input: on a Test presenter (no shell, so no notification area)
         // it makes its icons and ends by itself.
@@ -16682,7 +16683,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "input: the PS/2 controller (ports 0x60 and 0x64) never answered",
             "tray_test: tray skipped (no notification area",
-            "desktop: clock: ",
+            "desktop: display watch: ",
             "tray_test: ok",
             "exited with status 0x00000000",
         ],
@@ -31594,23 +31595,18 @@ mod constants {
     }
 }
 
-/// The desktop's text: Selawik (Microsoft's open-source stand-in for
-/// Segoe UI, fonts/selawik) rasterized here, on the host, so the kernel
-/// only copies coverage (no font engine in the kernel). One file per face
-/// and size in kernel/assets/ui-<size>-<weight>.glyphs:
+/// The desktop's text (the window captions): Selawik (Microsoft's
+/// open-source stand-in for Segoe UI, fonts/selawik) rasterized here, on
+/// the host, so the kernel only copies coverage (no font engine in the
+/// kernel). One file per face and size in
+/// kernel/assets/ui-<size>-<weight>.glyphs:
 /// "GLY1", size, ascent, descent (i16 each, pixels), then for each
 /// character 0x20..=0xFF: advance (i16, 1/16 pixel), x and y of the
 /// bitmap's top-left from the pen at the baseline (i16, y down), width
 /// and height (u16), its offset into the coverage bytes (u32); then the
 /// coverage bytes.
 fn bake_fonts() -> Result {
-    let faces: &[(u32, &str, &str)] = &[
-        (12, "regular", "selawk.ttf"),
-        (12, "semibold", "selawksb.ttf"),
-        (14, "semibold", "selawksb.ttf"),
-        (20, "semibold", "selawksb.ttf"),
-        (28, "semilight", "selawksl.ttf"),
-    ];
+    let faces: &[(u32, &str, &str)] = &[(12, "regular", "selawk.ttf")];
     for &(size, weight, file) in faces {
         let ttf = fs::read(root().join("fonts/selawik").join(file))
             .map_err(|e| format!("{file}: {e}"))?;
@@ -31648,12 +31644,12 @@ fn bake_fonts() -> Result {
     Ok(())
 }
 
-/// The desktop's pictures from SVG (kernel/assets/*.svg), rendered here
-/// with resvg so the kernel only blends coverage: each to square alpha
-/// masks (the picture centred, `size` x `size` bytes) in
+/// The boot splash's pictures from SVG (kernel/assets/*.svg), rendered
+/// here with resvg so the kernel only blends coverage: each to square
+/// alpha masks (the picture centred, `size` x `size` bytes) in
 /// kernel/assets/<name>-<size>.alpha; the kernel colours them.
 fn bake_icons() -> Result {
-    let icons: &[(&str, &[u32])] = &[("fortress", &[24, 96, 160])];
+    let icons: &[(&str, &[u32])] = &[("fortress", &[160])];
     for &(name, sizes) in icons {
         let svg = fs::read(root().join(format!("kernel/assets/{name}.svg")))
             .map_err(|e| format!("{name}.svg: {e}"))?;
@@ -31696,35 +31692,34 @@ fn bake_icons() -> Result {
             eprintln!("xtask: {} ({} bytes)", path.display(), out.len());
         }
     }
-    // The wordmark (قلعة, "qal'a"): cropped to its letters, 112 pixels
-    // wide (the wallpaper's mark) and 220 (the boot splash), as
+    // The wordmark (قلعة, "qal'a"): cropped to its letters, 220 pixels
+    // wide (the boot splash), as
     // "<width u16><height u16>" then the alpha bytes.
     let svg = fs::read(root().join("kernel/assets/wordmark.svg"))
         .map_err(|e| format!("wordmark.svg: {e}"))?;
     let tree = resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default())
         .map_err(|e| e.to_string())?;
     let bbox = tree.root().abs_bounding_box();
-    for (width, file) in [(112u32, "wordmark.alpha"), (220, "wordmark-220.alpha")] {
-        let scale = width as f32 / bbox.width();
-        let height = (bbox.height() * scale).ceil() as u32;
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or("pixmap")?;
-        let transform = resvg::tiny_skia::Transform::from_row(
-            scale,
-            0.0,
-            0.0,
-            scale,
-            -bbox.x() * scale,
-            -bbox.y() * scale,
-        );
-        resvg::render(&tree, transform, &mut pixmap.as_mut());
-        let mut out = Vec::new();
-        out.extend_from_slice(&(width as u16).to_le_bytes());
-        out.extend_from_slice(&(height as u16).to_le_bytes());
-        out.extend(pixmap.pixels().iter().map(|p| p.alpha()));
-        let path = root().join("kernel/assets").join(file);
-        fs::write(&path, &out).map_err(|e| format!("{path:?}: {e}"))?;
-        eprintln!("xtask: {} ({width} x {height})", path.display());
-    }
+    let (width, file) = (220u32, "wordmark-220.alpha");
+    let scale = width as f32 / bbox.width();
+    let height = (bbox.height() * scale).ceil() as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or("pixmap")?;
+    let transform = resvg::tiny_skia::Transform::from_row(
+        scale,
+        0.0,
+        0.0,
+        scale,
+        -bbox.x() * scale,
+        -bbox.y() * scale,
+    );
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let mut out = Vec::new();
+    out.extend_from_slice(&(width as u16).to_le_bytes());
+    out.extend_from_slice(&(height as u16).to_le_bytes());
+    out.extend(pixmap.pixels().iter().map(|p| p.alpha()));
+    let path = root().join("kernel/assets").join(file);
+    fs::write(&path, &out).map_err(|e| format!("{path:?}: {e}"))?;
+    eprintln!("xtask: {} ({width} x {height})", path.display());
     Ok(())
 }
 

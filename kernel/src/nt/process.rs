@@ -1875,7 +1875,7 @@ pub fn expand_environment<'b>(text: &str, buf: &'b mut [u8]) -> Option<&'b str> 
 /// console handles, under primary token `token` (None: the boot user's,
 /// shasha's start menu; GalaDesktopAction's Start passes a copy of the
 /// caller's, as CreateProcess would), in console session `console` (a
-/// console window's, `nt::action::start_from_menu`; None: none); the
+/// console window's, `nt::action::start_in_window`; None: none); the
 /// process.
 pub fn launch(
     path: &'static str,

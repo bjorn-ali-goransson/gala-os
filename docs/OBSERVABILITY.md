@@ -133,8 +133,8 @@ port. Lines that tools and agents rely on:
   move|delete|rename|new folder|terminal in ...`, `explorer: changed
   <dir>: <n> items (+added) (-removed)` (a change its folder watch saw), `explorer: properties ...` (a
   Linux file's permissions, uid and gid), `explorer: cannot watch ...`,
-  `explorer: closed`; with `desktop: Win+E: File Explorer` when Win+E
-  started it. What the namespace or the program cannot do is in the
+  `explorer: closed`; with `shasha: Win+E: start File Explorer (<path>):
+  pid <p>` when Win+E started it. What the namespace or the program cannot do is in the
   ledger (`shell32.dll!IShellFolder::<method>`,
   `shell32.dll!IShellItem::BindToHandler`,
   `shell32.dll!ShellExecute(no association)`, `explorer.exe!<what>`);

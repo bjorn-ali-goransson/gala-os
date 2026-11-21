@@ -736,9 +736,10 @@ pub fn start_agent() {
 /// not started (without System32's DLLs it does not load).
 pub const SHASHA: &str = "C:\\Windows\\System32\\shasha.exe";
 
-/// Starts the user-mode shell with the session (the default; `shell=
-/// desktop` leaves it out), when it is installed; else the desktop keeps
-/// its own taskbar and says why.
+/// Starts the user-mode shell with the session (the default; `shell=`
+/// with another name leaves it out), when it is installed; else the
+/// screen shows the desktop with no shell, and says why
+/// (`desktop::no_shell`).
 pub fn start_shell() {
     // A shell the previous kernel handed over goes on (not a second one,
     // which the shell window would refuse).
@@ -753,37 +754,14 @@ pub fn start_shell() {
         Ok(_) => {
             let _ = start_path(SHASHA, "", None);
         }
-        Err(e) => crate::info!(
-            "desktop: no user-mode shell: {SHASHA} not opened ({e:?}): the desktop's taskbar stays"
-        ),
+        Err(e) => {
+            crate::info!("desktop: no user-mode shell: {SHASHA} not opened ({e:?})");
+            desktop::no_shell("shasha.exe is not installed");
+        }
     }
 }
 
-/// What a start menu tile does (`menu_request`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MenuRequest {
-    /// Start the program at its path with this index (it exists).
-    Start(usize),
-    /// Install its package: `gala install <id>`.
-    Install(&'static str),
-    /// Nothing: one of gala's own programs whose file is gone.
-    Missing,
-}
-
-/// What a click on `program`'s tile does, `exists` saying whether a path
-/// exists: start the program where it is, else install its package.
-pub fn menu_request(
-    program: &desktop::Program,
-    exists: &mut impl FnMut(&str) -> bool,
-) -> MenuRequest {
-    match (program.find(exists, &mut [0; 260]), program.package) {
-        (Some((i, _)), _) => MenuRequest::Start(i),
-        (None, Some(id)) => MenuRequest::Install(id),
-        (None, None) => MenuRequest::Missing,
-    }
-}
-
-/// Where gala's own programs are that the start menu runs: gala.exe for
+/// Where gala's own programs are that the shell's actions run: gala.exe for
 /// `gala install`, conhost.exe for console windows (System32 as kernel32's
 /// CreatePseudoConsole looks there, else the boot modules' C:\gala).
 const GALA_EXE: &[&str] = &["C:\\gala\\gala.exe"];
@@ -791,7 +769,7 @@ const CONHOST_EXE: &[&str] = &["%SystemRoot%\\System32\\conhost.exe", "C:\\gala\
 
 /// The first of `paths` that exists (expanded; interned).
 fn first_existing(paths: &'static [&'static str]) -> Option<&'static str> {
-    let p = desktop::Program { name: "", paths, colors: (0, 0), package: None };
+    let p = desktop::Program { name: "", paths, package: None };
     let mut buf = [0; 260];
     let (_, path) = p.find(&mut |path| super::process::program_exists(path), &mut buf)?;
     super::process::intern(path).ok()
@@ -859,84 +837,39 @@ fn installer_registered(
     }
 }
 
-/// A desktop's start menu asked for `program` (the mouse or keys on the
-/// console, or injected input): started as the boot user, whose session
-/// is the console's at boot; a catalog entry not installed yet runs
-/// `gala install <id>` instead. A console program gets a console window
-/// (`start_in_window`). Logged, with a `window` event `start menu`.
-/// Another session's start menu starts nothing yet: a session has no
-/// user of its own until B4's session manager (ROADMAP RS), so a program
-/// started for it would land in session 1.
-pub fn start_from_menu(session: u32, launch: desktop::Launch) {
-    let program = match launch {
-        desktop::Launch::Program(p) => p,
-        desktop::Launch::Linux(r) => {
-            if session == super::session::CONSOLE {
-                start_linux(session, r);
-            } else {
-                crate::warn!(
-                    "desktop: session {session}'s start menu asked for {r:?}: not started (a session other than {} has no user to start it as yet)",
-                    super::session::CONSOLE
-                );
-                super::ledger::record("start menu", "session without a user", session.into());
-            }
-            return;
-        }
-    };
+/// A system key on a desktop asked for `program` (Ctrl+Shift+Esc: the
+/// Task Manager), from the console's keys or injected input: started as
+/// the boot user, whose session is the console's at boot, in a console
+/// window when it is a console program (`start_in_window`). Logged, with
+/// a `window` event `system key`. Another session's key starts nothing
+/// yet: a session has no user of its own until B4's session manager
+/// (ROADMAP RS), so a program started for it would land in session 1.
+pub fn start_for_system_key(session: u32, program: &'static desktop::Program) {
     if session != super::session::CONSOLE {
         crate::warn!(
-            "desktop: session {session}'s start menu asked for {}: not started (a session other than {} has no user to start it as yet)",
+            "desktop: session {session}'s system key asked for {}: not started (a session other than {} has no user to start it as yet)",
             program.name,
             super::session::CONSOLE
         );
-        super::ledger::record("start menu", "session without a user", session.into());
-        desktop::install_started(session, program, None);
+        super::ledger::record("system key", "session without a user", session.into());
         return;
     }
-    // Existence again, now: an install may have finished since the menu
-    // was drawn.
-    let request = menu_request(program, &mut |path| super::process::program_exists(path));
-    let (op, target, started) = match request {
-        MenuRequest::Start(i) => {
-            let mut buf = [0u8; 260];
-            let raw = program.paths.get(i).copied().unwrap_or("");
-            let path = super::process::expand_environment(raw, &mut buf)
-                .and_then(|p| super::process::intern(p).ok());
-            let Some(path) = path else {
-                crate::warn!("desktop: start menu: no memory to start {}", program.name);
-                desktop::install_started(session, program, None);
-                return;
-            };
-            crate::info!("desktop: start menu starts {}: {path}", program.name);
-            ("start", path, start_in_window(path, "", None))
+    let mut buf = [0u8; 260];
+    let path = program
+        .find(&mut |path| super::process::program_exists(path), &mut buf)
+        .and_then(|(_, p)| super::process::intern(p).ok());
+    let (target, started) = match path {
+        Some(path) => {
+            crate::info!("desktop: system key starts {}: {path}", program.name);
+            (path, start_in_window(path, "", None))
         }
-        MenuRequest::Install(id) => {
-            let Some(gala) = first_existing(GALA_EXE) else {
-                crate::warn!(
-                    "desktop: start menu cannot install {} ({id}): no gala.exe at {}",
-                    program.name,
-                    GALA_EXE[0]
-                );
-                desktop::install_started(session, program, None);
-                return;
-            };
-            crate::info!(
-                "desktop: start menu: {} is not installed: {gala} install {id} (no window)",
-                program.name
-            );
-            // No console window: the install says where it is through
-            // ACTION_INSTALL_PROGRESS and the tile draws it, as a Linux
-            // distribution's install does. Its output is still in the
-            // log (a process without a console writes there).
-            ("install", id, start_install(id, None))
-        }
-        MenuRequest::Missing => {
+        None => {
             crate::warn!(
-                "desktop: start menu: {} is not on this machine (none of {:?} exists)",
+                "desktop: system key: {} is not on this machine (none of {:?} exists)",
                 program.name,
                 program.paths
             );
-            ("missing", "", Err(NtStatus::OBJECT_NAME_NOT_FOUND))
+            ("", Err(NtStatus::OBJECT_NAME_NOT_FOUND))
         }
     };
     let (pid, status) = match &started {
@@ -945,20 +878,13 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
     };
     crate::events::emit(
         crate::events::Category::Window,
-        "start menu",
+        "system key",
         format_args!(
-            r#""op":"{op}","session":{session},"name":{},"target":{},"pid":{pid},"status":{status}"#,
+            r#""session":{session},"name":{},"target":{},"pid":{pid},"status":{status}"#,
             crate::events::Str(program.name),
             crate::events::Str(target)
         ),
     );
-    // The tile hears what became of the install it asked for: a pid to
-    // wait for a word from, or nothing to wait for at all (a program
-    // that is not on this machine and has no package, `MenuRequest`'s
-    // Missing, ends here too).
-    if op != "start" {
-        installer_registered(session, program, started.as_ref().ok());
-    }
 }
 
 /// wsl.exe, where Windows has it.
@@ -1048,55 +974,12 @@ fn install_progress_noted(id: &str, state: i32, percent: i32, exit: i32) {
     );
 }
 
-/// What the start menu's Linux section asked for, from the boot user's
-/// menu (`launch_linux` as the boot user), with a `window` event `start
-/// menu` (op `linux install`, `linux desktop`, `linux terminal`, `linux
-/// app`); an install's tile hears what became of it.
-pub fn start_linux(session: u32, r: desktop::linux::Request) {
-    use desktop::linux::Request;
-    let name = match r {
-        Request::Install(n, _)
-        | Request::Desktop(n)
-        | Request::Terminal(n)
-        | Request::App(n, _) => n,
-    };
-    let op = match r {
-        Request::Install(..) => "linux install",
-        Request::Desktop(_) => "linux desktop",
-        Request::Terminal(_) => "linux terminal",
-        Request::App(..) => "linux app",
-    };
-    let target = match r {
-        Request::App(_, app) => app.name,
-        _ => desktop::linux::Text::cut(op),
-    };
-    let started = launch_linux(r, None);
-    let (pid, status) = match &started {
-        Ok(s) => (s.pid, 0),
-        Err(e) => (0, e.0),
-    };
-    crate::events::emit(
-        crate::events::Category::Window,
-        "start menu",
-        format_args!(
-            r#""op":"{op}","session":{session},"name":{},"target":{},"pid":{pid},"status":{status}"#,
-            crate::events::Str(name.as_str()),
-            crate::events::Str(target.as_str())
-        ),
-    );
-    // As a package's install does, the tile hears what became of it.
-    if matches!(r, Request::Install(..)) {
-        linux_installer_registered(session, name, started.as_ref().ok());
-    }
-}
-
 /// GalaDesktopAction's Linux for the caller's desktop `desk`: an install
 /// of a distribution makes its tile downloading before `gala
 /// linux-install` starts (`desktop::begin_linux_install`), and the
 /// installer's pid is watched so that one ending without a word leaves
 /// the tile quiet instead of waiting for ever
-/// (`linux_installer_registered`), as the kernel menu's tile does
-/// (`start_linux`). Without a shell it just starts.
+/// (`linux_installer_registered`). Without a shell it just starts.
 fn linux_for_shell(
     r: desktop::linux::Request,
     token: Option<super::object::ObjectRef>,
@@ -1367,21 +1250,6 @@ mod tests {
             b.extend_from_slice(&u.to_le_bytes());
         }
         b
-    }
-
-    #[test]
-    fn a_start_menu_tile_starts_its_program_or_installs_its_package() {
-        let find = |name: &str| desktop::PROGRAMS.iter().find(|p| p.name == name).unwrap();
-        let none = &mut |_: &str| false;
-        // Not installed: `gala install <id>`; gala's own program: nothing.
-        assert_eq!(menu_request(find("7-Zip"), none), MenuRequest::Install("7zip.7zip"));
-        assert_eq!(menu_request(find("Python"), none), MenuRequest::Install("Python.Python.3.13"));
-        assert_eq!(menu_request(find("Command Prompt"), none), MenuRequest::Missing);
-        // Installed: the path that exists.
-        let python = "C:\\Program Files\\Python313\\python.exe";
-        assert_eq!(menu_request(find("Python"), &mut |p| p == python), MenuRequest::Start(1));
-        let cmd = "C:\\gala\\cmd.exe";
-        assert_eq!(menu_request(find("Command Prompt"), &mut |p| p == cmd), MenuRequest::Start(1));
     }
 
     /// A catalog tile's state: an installed program is installed

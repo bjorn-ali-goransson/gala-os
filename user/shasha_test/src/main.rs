@@ -42,8 +42,8 @@
 //!   succeeds and SPI_GETDESKWALLPAPER reads it back (shasha, told
 //!   with WM_SETTINGCHANGE, shows it: the scenario's expected line);
 //! - shasha ended (TerminateProcess): its windows are gone, there is no
-//!   shell window, and the desktop's own taskbar holds the strip again
-//!   (ABM_GETTASKBARPOS the same strip, the work area unchanged).
+//!   shell window, and the desktop holds the taskbar's strip again,
+//!   reserved and drawn by nothing (ABM_GETTASKBARPOS the same strip, the work area unchanged).
 //!
 //! Assumed and not pinned: that shasha.exe is gala's own, so its height
 //! and the ids of its elements are gala's choice.
@@ -186,7 +186,7 @@ const SW_SHOW: i32 = 5;
 const WM_CLOSE: u32 = 0x0010;
 const PROCESS_TERMINATE: u32 = 0x0001;
 const SYNCHRONIZE: u32 = 0x0010_0000;
-/// The taskbar's height (shasha's HEIGHT, the desktop's TASKBAR).
+/// The taskbar's height (shasha's HEIGHT, the desktop's TASKBAR strip).
 const HEIGHT: i32 = 48;
 /// How long a step may take: the scenario's clicks come once this test
 /// has printed what the step waits for.
@@ -676,8 +676,8 @@ fn run() -> Result<(), u32> {
         c.ok(pump(STEP_MS, || named(DUNES)), 0)?;
         say(b"wallpaper set");
 
-        // shasha ended: no shell window, the desktop's taskbar holds the
-        // strip again.
+        // shasha ended: no shell window, and the desktop holds the
+        // taskbar's strip again (reserved, drawn by nothing).
         let mut pid = 0u32;
         GetWindowThreadProcessId(bar, &mut pid);
         c.ok(pid != 0, 0)?;
@@ -685,7 +685,7 @@ fn run() -> Result<(), u32> {
         c.ok(h != 0, 0)?;
         c.ok(TerminateProcess(h, 1) != 0, 0)?;
         // Ended (signaled): everything it held is let go, its bar too,
-        // so the strip seen next is the desktop's own taskbar's.
+        // so the strip seen next is the desktop's reservation.
         c.eq(WaitForSingleObject(h, 10_000).into(), 0)?;
         CloseHandle(h);
         let gone = pump(STEP_MS, || {

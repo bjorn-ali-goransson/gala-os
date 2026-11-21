@@ -10,9 +10,9 @@
 //! The keyboard and the mouse are found separately (`ps2::Devices`) and
 //! each is reported, because a machine may have one, the other, both or
 //! neither: this thread polls for as long as either answered. Nothing
-//! else rides on it -- the desktop's clock is its own thread
-//! (`nt::desktop::start_clock`), so a machine with no PS/2 mouse still
-//! has a taskbar whose minute changes.
+//! else rides on it -- the desktop's display watch is its own thread
+//! (`nt::desktop::start_display_watch`), so a machine with no PS/2 mouse
+//! still follows a display change.
 
 mod virtio;
 
@@ -223,7 +223,7 @@ fn key(
     }
     mouse.flush(deliver);
     if let Some((session, program)) = crate::nt::desktop::key_event(vk, scan, extended, down) {
-        crate::nt::action::start_from_menu(session, program);
+        crate::nt::action::start_for_system_key(session, program);
     }
 }
 
@@ -312,11 +312,9 @@ impl Report {
     }
 }
 
-/// Hands mouse input to the desktop; starts what its start menu chose.
+/// Hands mouse input to the desktop.
 fn deliver(dx: i64, dy: i64, buttons: u8) {
-    if let Some((session, program)) = crate::nt::desktop::pointer_event(dx, dy, buttons) {
-        crate::nt::action::start_from_menu(session, program);
-    }
+    crate::nt::desktop::pointer_event(dx, dy, buttons);
 }
 
 /// Mouse packets turned into the desktop's pointer events while the input

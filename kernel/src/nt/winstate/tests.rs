@@ -70,12 +70,10 @@ fn windows_keep_their_place_order_focus_and_last_pixels() {
     assert_ne!(w.look, look);
     // A size no window may have.
     assert_eq!(s.place(a, 1, 0, 0, 10, 10).err(), Some(NtStatus::INVALID_PARAMETER));
-    // A title and an icon: the taskbar's listing changed.
-    s.listing_changed = false;
+    // A title and an icon.
     s.set_title(a, 1, &title("A2")).unwrap();
-    assert!(s.listing_changed);
+    assert_eq!(s.window(a).unwrap().title, title("A2"));
     s.set_icon(a, 1, &[0xff00_ff00; 4], 2).unwrap();
-    assert_eq!(s.window(a).unwrap().icon.len(), ICON * ICON);
     assert_eq!(s.window(a).unwrap().small_icon.len(), SMALL_ICON * SMALL_ICON);
     // Destroyed: the next one down becomes active.
     s.destroy(b, 2).unwrap();

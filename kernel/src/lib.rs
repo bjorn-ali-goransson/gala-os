@@ -440,15 +440,18 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     }
     // The user-mode shell (ARCHITECTURE "The user-mode shell"): shasha.exe
     // starts with the session (the default, or `shell=shasha`), before the
-    // agent panel (whose strip goes above the taskbar it takes);
-    // `shell=desktop` leaves it out and the desktop draws its own taskbar.
+    // agent panel (whose strip goes above the taskbar it takes). The
+    // kernel draws no shell of its own: without shasha the screen shows
+    // the desktop's colour and the windows (`nt::desktop::no_shell`).
     match cmdline.value("shell") {
-        Some("desktop") => info!("desktop: no user-mode shell: shell=desktop"),
         None | Some("shasha") if nt::desktop::is_bare() => {
             info!("desktop: no user-mode shell: the desktop is bare (no screen and no presenter=)");
         }
         None | Some("shasha") => nt::action::start_shell(),
-        Some(other) => warn!("desktop: shell={other} is not a shell (shasha, desktop)"),
+        Some(other) => {
+            warn!("desktop: shell={other} is not a shell (shasha)");
+            nt::desktop::no_shell("shell= names no shell");
+        }
     }
     // The agent panel (ARCHITECTURE "The agent panel"): started with the
     // session where the desktop has a shell (not bare) and agent.exe is
@@ -608,7 +611,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     display::log_stats();
     #[cfg(not(feature = "hosted"))]
     input::log_stats();
-    nt::desktop::log_clock_stats();
+    nt::desktop::log_display_stats();
     info!("nt: {}", nt::stats::Summary);
     if nt::persist::has_area() {
         info!("persist: {}", nt::persist::Summary);

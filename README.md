@@ -140,8 +140,9 @@ test programs in `user/*_test`:
   and overlapped sockets, select and AFD polls, AcceptEx and ConnectEx,
   I/O completion ports; a loopback device and a virtio-net network card.
 - **Windows on the screen**: user32 and gdi32 windows, controls, rich
-  edit and common dialogs, painted by gala's compositor (*shasha*) with a
-  taskbar, start menu, PS/2 mouse and keyboard, UI Automation
+  edit and common dialogs, painted by gala's compositor, with *shasha*
+  (`shasha.exe`, a user-mode program) as the taskbar, start menu and
+  wallpaper, PS/2 mouse and keyboard, UI Automation
   (UIAutomationCore) and WinEvents. Everything the desktop does can also
   be done with the `gala` command (CLI parity); `profile=server` keeps the
   desktop off. Screens: the bootloader's framebuffer or a virtio-gpu (2D).
@@ -458,7 +459,7 @@ flowchart TB
     subgraph kernel["gala kernel (Rust)"]
         nt["NT layer (kernel/src/nt)<br/>system calls · objects and handles · processes, threads, jobs<br/>virtual memory and sections · files and pipes · waits and timers<br/>registry · AFD sockets · consoles and ConPTY"]
         sec["security<br/>tokens · descriptors · access checks<br/>LSA logons · sessions · UIPI"]
-        shasha["shasha compositor (feature)<br/>windows · taskbar · start menu<br/>GalaDesktopAction (= the gala CLI)"]
+        shasha["compositor (nt::desktop)<br/>windows · frames · app bars<br/>GalaDesktopAction (= the gala CLI)"]
         seam["platform seam (nt::platform)"]
         core["kernel core<br/>x86_64 and SMP · paging and TLB · XSAVE<br/>frames and heap · scheduler · one clock"]
         fs["ramfs (C:)<br/>+ disk log (persist)"]

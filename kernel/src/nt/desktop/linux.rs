@@ -1,18 +1,18 @@
 //! The start menu's "Linux distributions" section (ROADMAP LD step 7;
-//! ARCHITECTURE "Start menu"): the distributions gala suggests and those
-//! installed through the WSL facade, each a tile. A suggestion not
-//! installed installs on a click (its rootfs fetched and imported with
-//! `wsl --import` by `gala linux-install`, its progress on the tile); an
-//! installed one starts its desktop (LD step 6's session); its context
-//! menu opens a terminal (`wsl -d <name>`) or starts one of its
-//! applications (its `.desktop` files). The section can be collapsed or
-//! hidden and each suggestion dismissed: the user's choices (`Prefs`)
-//! are kept in their registry hive.
+//! ARCHITECTURE "Start menu"), which shasha draws from GalaDesktopAction's
+//! LinuxList: the distributions gala suggests and those installed through
+//! the WSL facade, each a tile. A suggestion not installed installs on a
+//! click (its rootfs fetched and imported with `wsl --import` by `gala
+//! linux-install`, its progress on the tile); an installed one starts its
+//! desktop (LD step 6's session); its context menu opens a terminal (`wsl
+//! -d <name>`) or starts one of its applications (its `.desktop` files).
+//! A suggestion the user dismissed (`Prefs`, kept in their registry hive)
+//! is not listed.
 //!
 //! This module is the model: what the section lists (`Listing`, read by
 //! the desktop's caller outside its lock: the registry and the
 //! distributions' files), the choices, an install's progress, the
-//! context menu, and the parsing of `.desktop` files. gala's UI says
+//! requests (`Request`), and the parsing of `.desktop` files. gala's UI says
 //! "Linux", never "WSL" (ARCHITECTURE "The WSL facade", Naming).
 
 use crate::mm::heap::TryVec;
@@ -20,11 +20,10 @@ use alloc::vec::Vec;
 
 /// A distribution gala suggests: its name (as `wsl --import` registers
 /// it), the URL of its rootfs tarball as the distribution publishes it
-/// for WSL, and its tile's colours.
+/// for WSL.
 pub struct Suggestion {
     pub name: &'static str,
     pub url: &'static str,
-    pub colors: (u32, u32),
 }
 
 /// The suggestions, in the order the section shows them. The boot option
@@ -35,13 +34,11 @@ pub const SUGGESTIONS: &[Suggestion] = &[
     Suggestion {
         name: "Ubuntu",
         url: "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
-        colors: (0x00_f0_7a_4a, 0x00_c8_46_1e),
     },
     // Alpine's mini root file system (what its WSL builds start from).
     Suggestion {
         name: "Alpine",
         url: "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz",
-        colors: (0x00_3d_8f_d6, 0x00_0d_59_a3),
     },
 ];
 
@@ -126,24 +123,15 @@ impl Distro {
         Distro { name, installed, suggestion, apps: [None; MAX_APPS] }
     }
 
-    pub fn colors(&self) -> (u32, u32) {
-        self.suggestion
-            .and_then(|i| SUGGESTIONS.get(i))
-            .map_or((0x00_6a_6a_6a, 0x00_3a_3a_3a), |s| s.colors)
-    }
-
     pub fn apps(&self) -> impl Iterator<Item = &App> {
         self.apps.iter().flatten()
     }
 }
 
 /// The user's choices, kept in their hive (`HKCU\Software\gala\StartMenu`:
-/// LinuxCollapsed and LinuxHidden as REG_DWORD, LinuxDismissed as
-/// REG_MULTI_SZ of the dismissed suggestions' names).
+/// LinuxDismissed, a REG_MULTI_SZ of the dismissed suggestions' names).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Prefs {
-    pub collapsed: bool,
-    pub hidden: bool,
     /// Bit i: SUGGESTIONS[i] dismissed.
     pub dismissed: u32,
 }
@@ -174,21 +162,6 @@ impl Prefs {
             }
         }
         bits
-    }
-
-    /// LinuxDismissed as a REG_MULTI_SZ (UTF-16 little-endian, each name
-    /// NUL-terminated, then a NUL).
-    pub fn write_dismissed(&self) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
-        for (i, s) in SUGGESTIONS.iter().enumerate() {
-            if self.is_dismissed(i) {
-                for u in s.name.encode_utf16().chain(Some(0)) {
-                    out.try_extend_from_slice(&u.to_le_bytes()).ok()?;
-                }
-            }
-        }
-        out.try_extend_from_slice(&[0, 0]).ok()?;
-        Some(out)
     }
 }
 
@@ -271,7 +244,7 @@ impl Progress {
 }
 
 /// What the start menu asks the system to do for a distribution
-/// (`nt::action::start_linux`). An application's variant is the largest
+/// (GalaDesktopAction's Linux, `nt::action`). An application's variant is the largest
 /// (a few hundred bytes): one request at a time is made and handed on.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,40 +257,6 @@ pub enum Request {
     Terminal(Name),
     /// One of its applications.
     App(Name, App),
-}
-
-/// A context menu's item.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Item {
-    Terminal,
-    App(usize),
-    /// Show the hidden section again (the menu's own context menu).
-    ShowSection,
-}
-
-/// A context menu open in the start menu: for a distribution (its tile
-/// index) or for the menu itself (None), at (x, y) in the menu, its
-/// items.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Context {
-    pub distro: Option<usize>,
-    pub x: i64,
-    pub y: i64,
-    pub items: [Option<Item>; MAX_APPS + 1],
-}
-
-/// A context menu's size: items this tall, this wide.
-pub const ITEM_H: i64 = 32;
-pub const CONTEXT_W: i64 = 220;
-
-impl Context {
-    pub fn count(&self) -> usize {
-        self.items.iter().flatten().count()
-    }
-
-    pub fn height(&self) -> i64 {
-        8 + self.count() as i64 * ITEM_H
-    }
 }
 
 /// `line`'s value for `key` in a `.desktop` file (`Key=value`, spaces
@@ -530,16 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn dismissed_names_go_to_the_registry_and_back() {
-        let p = Prefs { collapsed: false, hidden: false, dismissed: 0b10 };
-        let data = p.write_dismissed().unwrap();
-        let text: Vec<u16> =
-            data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        assert_eq!(String::from_utf16(&text).unwrap(), "Alpine\0\0");
-        assert_eq!(Prefs::read_dismissed(&data), 0b10);
+    fn dismissed_names_come_from_the_registry() {
+        let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+        assert_eq!(Prefs::read_dismissed(&utf16("Alpine\0\0")), 0b10);
+        assert_eq!(Prefs::read_dismissed(&utf16("Ubuntu\0Alpine\0\0")), 0b11);
+        assert_eq!(Prefs::read_dismissed(&utf16("Other\0\0")), 0);
+        assert_eq!(Prefs::read_dismissed(&[0, 0]), 0);
         assert_eq!(Prefs::read_dismissed(&[]), 0);
-        let empty = Prefs::default().write_dismissed().unwrap();
-        assert_eq!(empty, [0, 0]);
     }
 
     #[test]

@@ -63,50 +63,43 @@ fn click(d: &mut Desktop, x: i64, y: i64) {
     go(d, x, y, 0);
 }
 
+/// The kernel draws no shell: with no shell running, the taskbar's strip
+/// is reserved (maximized windows leave room for the taskbar a shell will
+/// put there) yet shows the desktop's colour; the Windows key, alone or
+/// with a letter, and clicks there start nothing and open nothing.
 #[test]
-fn the_start_button_opens_and_closes_the_start_menu() {
-    let (mut d, _) = desktop_with_window();
-    let tile = Entry { program: 0, installed: true };
-    d.set_programs(&[tile]);
-    let start = d.start_rect();
-    let inside = (d.menu_rect().x + 20, d.menu_rect().y + d.menu_rect().h - 20);
-    let before = d.pixel(inside.0, inside.1);
-    // The pointer starts in the middle (its tip is drawn there).
-    assert_eq!(d.pointer, (512, 384));
-    let (sx, sy) = (start.x + 10, start.y + 10);
-    go(&mut d, sx, sy, 0);
-    go(&mut d, sx, sy, 1);
-    assert!(d.menu_open());
-    assert_ne!(d.pixel(inside.0, inside.1), before);
-    // Holding the button is not another click.
-    go(&mut d, sx + 1, sy, 1);
-    assert!(d.menu_open());
-    go(&mut d, sx + 1, sy, 0);
-    // A click elsewhere closes it, and does nothing else.
-    click(&mut d, 1000, 100);
-    assert!(!d.menu_open());
-    assert_eq!(d.pixel(inside.0, inside.1), before);
-    // Its tile starts the program once, which becomes recent.
-    click(&mut d, sx, sy);
-    let item = d.menu_item_rect(0);
-    click(&mut d, item.x + 20, item.y + 10);
-    assert!(!d.menu_open());
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(PROGRAMS[0].name));
-    assert!(d.take_launch().is_none());
-    assert_eq!(d.recent[0], 0);
-    // The Windows key opens it; typing filters; Escape closes.
-    d.key(0x5b, 0x5b, true, true);
-    assert!(!d.menu_open());
-    d.key(0x5b, 0x5b, true, false);
-    assert!(d.menu_open());
-    for k in b"PROMP" {
-        d.key(*k, 0, false, true);
+fn the_kernel_draws_no_taskbar_or_start_menu() {
+    let (mut d, a) = desktop_with_window();
+    let strip = Rect { x: 0, y: 768 - i64::from(TASKBAR), w: 1024, h: i64::from(TASKBAR) };
+    assert_eq!(d.appbars.taskbar(), Some((appbar::ABE_BOTTOM, strip)));
+    assert_eq!(d.appbars.taskbar_window(), Some(appbar::TASKBAR_WINDOW));
+    assert_eq!(d.s.work().h, strip.y);
+    for x in [0, 10, 512, 1000] {
+        assert_eq!(d.pixel(x, strip.y + strip.h / 2), DESKTOP_COLOR);
     }
-    assert_eq!(d.listed(), [tile]);
-    d.key(b'Q', 0, false, true);
-    assert!(d.listed().is_empty());
-    d.key(0x1b, 1, false, true);
-    assert!(!d.menu_open());
+    assert_eq!(d.pixel(5, 5), DESKTOP_COLOR, "no wallpaper either");
+    assert_eq!(d.hit(10, strip.y + 10), Hit::Nothing);
+    d.s.input.clear();
+    let _ = sent(&mut d);
+    // The Windows key alone: no program sees it, nothing starts.
+    d.key(0x5b, 0x5b, true, true);
+    d.key(0x5b, 0x5b, true, false);
+    assert!(d.take_launch().is_none());
+    assert!(sent(&mut d).is_empty());
+    // Win+E: no File Explorer of the kernel's (Win+E is the shell's hot
+    // key); the E goes to the active window, as an unregistered Win+key
+    // does.
+    d.key(0x5b, 0x5b, true, true);
+    d.key(b'E', 0x12, false, true);
+    d.key(b'E', 0x12, false, false);
+    d.key(0x5b, 0x5b, true, false);
+    assert!(d.take_launch().is_none());
+    assert_eq!(d.hot_candidate(0x5b, false), None, "the key was used with E");
+    assert!(sent(&mut d).iter().any(|m| m.0 == a && m.1 == WM_KEYDOWN && m.2 == u64::from(b'E')));
+    // Clicks on the strip and on the desktop start nothing.
+    click(&mut d, 10, strip.y + 10);
+    click(&mut d, 900, 50);
+    assert!(d.take_launch().is_none());
 }
 
 /// Whether a path exists, for the listing: these do.
@@ -155,23 +148,22 @@ fn the_start_menu_lists_default_programs_and_the_catalog() {
     assert_eq!(listed.len(), 9);
     assert!(listed.iter().all(|&(_, installed)| installed), "{listed:?}");
     assert_eq!(listed[1], ("Hello window", true));
-    // Every tile fits the grid.
+    // Every entry fits the list.
     assert!(PROGRAMS.len() <= MAX_TILES);
 }
 
 #[test]
 fn the_listing_has_one_tile_per_name_and_finds_the_first_existing_path() {
     const TABLE: &[Program] = &[
-        Program { name: "Tool", paths: &["C:\\a\\tool.exe"], colors: (0, 0), package: None },
-        Program { name: "Tool", paths: &["C:\\b\\tool.exe"], colors: (0, 0), package: None },
-        Program { name: "Gone", paths: &["C:\\gone.exe"], colors: (0, 0), package: None },
+        Program { name: "Tool", paths: &["C:\\a\\tool.exe"], package: None },
+        Program { name: "Tool", paths: &["C:\\b\\tool.exe"], package: None },
+        Program { name: "Gone", paths: &["C:\\gone.exe"], package: None },
         Program {
             name: "App",
             paths: &["%LOCALAPPDATA%\\App\\app.exe", "%ProgramFiles%\\App\\app.exe"],
-            colors: (0, 0),
             package: Some("Vendor.App"),
         },
-        Program { name: "App", paths: &["C:\\app.exe"], colors: (0, 0), package: None },
+        Program { name: "App", paths: &["C:\\app.exe"], package: None },
     ];
     // The first "Tool" is missing, the second is there: one tile, the
     // second's. "Gone" (no package) is not listed; "App" once, not
@@ -187,130 +179,29 @@ fn the_listing_has_one_tile_per_name_and_finds_the_first_existing_path() {
     assert_eq!(found, Some((1, "C:\\Program Files\\App\\app.exe")));
 }
 
-#[test]
-fn a_tile_not_installed_shows_a_download_badge_and_a_click_asks_for_it() {
-    let (mut d, _) = desktop_with_window();
-    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
-    d.set_programs(&[
-        Entry { program: 0, installed: true },
-        Entry { program: office, installed: false },
-    ]);
-    let start = d.start_rect();
-    click(&mut d, start.x + 10, start.y + 10);
-    assert!(d.menu_open());
-    // The badge: the accent over the icon's bottom-right corner, on the
-    // second tile only.
-    let badge = |d: &Desktop, k: usize| {
-        let r = d.menu_item_rect(k);
-        let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
-        d.pixel(ix + 23, iy + 28)
-    };
-    assert_eq!(badge(&d, 1), ACCENT);
-    assert_ne!(badge(&d, 0), ACCENT);
-    // Its name on two lines: something drawn on the second.
-    let r = d.menu_item_rect(1);
-    let dark = |c: u32| (c & 0xff) < 0x80 && (c >> 8 & 0xff) < 0x80 && (c >> 16 & 0xff) < 0x80;
-    let second = (r.x..r.x + r.w).any(|x| (r.y + 63..r.y + 78).any(|y| dark(d.pixel(x, y))));
-    assert!(second);
-    // A click hands the program to the caller, which installs it; the
-    // menu stays open, the tile showing where the install is
-    // (a_package_tile_installs_with_a_bar_on_the_tile).
-    click(&mut d, r.x + 20, r.y + 10);
-    assert!(d.menu_open());
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
-}
-
-#[test]
-fn a_package_tile_installs_with_a_bar_on_the_tile() {
-    let (mut d, _) = desktop_with_window();
-    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
-    d.set_programs(&[
-        Entry { program: 0, installed: true },
-        Entry { program: office, installed: false },
-    ]);
-    let start = d.start_rect();
-    click(&mut d, start.x + 10, start.y + 10);
-    let r = d.menu_item_rect(1);
-    // A click on a tile that is not installed asks for its install and
-    // keeps the menu open: the tile shows where the install is, as a
-    // distribution's does, instead of a console window.
-    click(&mut d, r.x + 20, r.y + 10);
-    assert!(d.menu_open());
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
-    let (bx, by) = (r.x + 13, r.y + 69);
-    assert_eq!(d.pixel(bx, by), ACCENT);
-    // A second click while it installs asks for nothing.
-    click(&mut d, r.x + 20, r.y + 10);
-    assert!(d.take_launch().is_none());
-    // What the install reports moves the bar: half the download is 40%
-    // of the bar (the download is its middle three fifths), so its right
-    // half is still the track's grey.
-    d.install_progress(office, Some(pkg::Progress::Downloading(50)));
-    assert_eq!(d.pixel(bx + 20, by), ACCENT);
-    assert_ne!(d.pixel(bx + 50, by), ACCENT);
-    // A failure turns the bar red, and a click tries again.
-    d.install_progress(office, Some(pkg::Progress::Failed(4)));
-    assert_eq!(d.pixel(bx, by), CLOSE_HOVER);
-    assert_eq!(d.pixel(bx + 50, by), CLOSE_HOVER);
-    click(&mut d, r.x + 20, r.y + 10);
-    assert!(d.menu_open());
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
-    // Installed: the list again and the install's last word (state 3),
-    // as `install_progress` has it from gala; the bar goes with the
-    // badge, and a click starts the program (the menu closes).
-    d.set_programs(&[
-        Entry { program: 0, installed: true },
-        Entry { program: office, installed: true },
-    ]);
-    d.install_progress(office, None);
-    assert!(d.installs.is_empty());
-    assert_ne!(d.pixel(bx, by), ACCENT);
-    assert_ne!(d.pixel(bx + 50, by), ACCENT);
-    click(&mut d, r.x + 20, r.y + 10);
-    assert!(!d.menu_open());
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
-}
-
 /// A tile whose install went quiet: its `gala install` ended without
 /// saying how it went (killed, or it faulted before it could report),
 /// so no word is coming. The watch is on the installer's process, not
 /// on a silence: an install may say nothing for half an hour (Office's
 /// does), and `process_ended` is the word that it never will.
 #[test]
-fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() {
-    let (mut d, _) = desktop_with_window();
+fn an_installer_gone_without_a_word_leaves_the_install_lost_and_says_so() {
+    let mut d = Desktop::new();
     let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
-    d.set_programs(&[
-        Entry { program: 0, installed: true },
-        Entry { program: office, installed: false },
-    ]);
-    let start = d.start_rect();
-    click(&mut d, start.x + 10, start.y + 10);
-    let r = d.menu_item_rect(1);
-    click(&mut d, r.x + 20, r.y + 10);
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
-    // The installer's pid, as `start_from_menu` reports it, and half a
-    // download.
-    d.install_started(office, Some(7));
+    d.set_programs(&[Entry { program: office, installed: false }]);
+    d.begin_install(office);
+    // The installer's pid, as `nt::action::install_for_shell` reports
+    // it, and half a download.
+    assert!(d.install_started(office, Some(7)));
     d.install_progress(office, Some(pkg::Progress::Downloading(50)));
-    let (bx, by) = (r.x + 13, r.y + 69);
-    let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
-    let icon = d.pixel(ix + 4, iy + 4);
-    assert_eq!(d.pixel(bx, by), ACCENT);
     // Another process ending is not this install's.
     d.installers_gone(&[8]);
-    assert_eq!(d.pixel(bx, by), ACCENT);
+    assert_eq!(d.install_of(office), Some(pkg::Progress::Downloading(50)));
     assert!(d.told.is_empty());
-    // Its own: the bar stays where it got to, in grey, the icon turns
-    // grey under a question mark, and it is told (logged) as any install
-    // that ends is.
+    // Its own: the install is lost where it got to (the bar's 40%), and
+    // it is told (logged) as any install that ends is.
     d.installers_gone(&[7]);
-    assert_eq!(d.pixel(bx, by), TEXT_DIM);
-    assert_ne!(d.pixel(bx + 50, by), TEXT_DIM, "the bar says how far it got");
-    assert_ne!(d.pixel(ix + 4, iy + 4), icon, "the icon is grey");
-    let (qx, qy) = (ix + 20, iy + 20);
-    assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff, "the question mark");
-    assert_eq!(d.pixel(qx + 8, qy + 2), TEXT_DIM, "its badge");
+    assert_eq!(d.install_of(office), Some(pkg::Progress::Lost(40)));
     let said = d.told.last().cloned();
     assert_eq!(
         said,
@@ -324,26 +215,21 @@ fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() 
     // Told once, however often the word comes.
     d.installers_gone(&[7]);
     assert_eq!(d.told.len(), 1, "told twice");
-    // A click tries again, as it does on a tile whose install failed.
-    click(&mut d, r.x + 20, r.y + 10);
-    assert!(d.menu_open());
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
-    assert_eq!(d.pixel(bx, by), ACCENT);
-    // An installer that never started leaves the tile the same way:
-    // there is no word to wait for either, and it says so.
+    // Tried again: resolving from the beginning.
+    d.begin_install(office);
+    assert_eq!(d.install_of(office), Some(pkg::Progress::Resolving));
+    // An installer that never started leaves it the same way: there is
+    // no word to wait for either (the bar where resolving has it), and
+    // it says so.
     d.install_started(office, None);
-    assert_eq!(d.pixel(bx, by), TEXT_DIM);
-    assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff);
+    assert_eq!(d.install_of(office), Some(pkg::Progress::Lost(5)));
     assert_eq!(
         d.told.last().map(|(_, text)| text.clone()),
         Some(title("The install never started. A click tries again."))
     );
     // Installed after all (the install got that far before its
-    // installer died): the listing draws the tile installed and says so.
-    d.set_programs(&[
-        Entry { program: 0, installed: true },
-        Entry { program: office, installed: true },
-    ]);
+    // installer died): the listing ends it and says so.
+    d.set_programs(&[Entry { program: office, installed: true }]);
     assert!(d.installs.is_empty());
     assert_eq!(
         d.told.last().map(|(_, text)| text.clone()),
@@ -352,23 +238,17 @@ fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() 
 }
 
 /// A distribution's install is watched the same way: one watch list for
-/// both (`installers`), one badge, one notification.
+/// both (`installers`), one notification.
 #[test]
 fn a_distributions_installer_gone_without_a_word_is_told_the_same_way() {
-    let mut d = menu_with_linux(linux::Listing::default());
-    let tile = d.linux_tile_rect(0);
-    click(&mut d, tile.x + 20, tile.y + 20);
+    let mut d = Desktop::new();
+    d.set_linux(&linux::Listing::default());
     let ubuntu = linux::Name::new(b"Ubuntu").unwrap();
-    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Install(..)))));
-    d.linux_install_started(ubuntu, Some(11));
+    d.begin_linux_install(ubuntu);
+    assert!(d.linux_install_started(ubuntu, Some(11)));
     d.linux_progress(ubuntu, Some(linux::Progress::Downloading(50)));
-    let (bx, by) = (tile.x + 13, tile.y + 69);
-    assert_eq!(d.pixel(bx, by), ACCENT);
     d.installers_gone(&[11]);
-    assert_eq!(d.pixel(bx, by), TEXT_DIM);
-    let (ix, iy) = (tile.x + (tile.w - 32) / 2, tile.y + 10);
-    let (qx, qy) = (ix + 20, iy + 20);
-    assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff, "the question mark");
+    assert_eq!(d.linux_install_of(ubuntu), Some(linux::Progress::Lost(40)));
     let said = d.told.last().cloned();
     assert_eq!(
         said,
@@ -379,60 +259,65 @@ fn a_distributions_installer_gone_without_a_word_is_told_the_same_way() {
             )
         ))
     );
-    // A click tries again: the tile stops being quiet at once, and its
-    // bar starts over where `wsl --import` starts, at nothing
-    // downloaded, so there is nothing to fill it with until the bytes
-    // come in.
-    click(&mut d, tile.x + 20, tile.y + 20);
-    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Install(..)))));
-    assert_ne!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff, "the question mark is gone");
-    assert_ne!(d.pixel(bx, by), TEXT_DIM, "and the grey bar with it");
-    d.linux_progress(ubuntu, Some(linux::Progress::Downloading(50)));
-    assert_eq!(d.pixel(bx, by), ACCENT);
+    // Tried again: it stops being quiet at once and starts over where
+    // `wsl --import` starts, at nothing downloaded.
+    d.begin_linux_install(ubuntu);
+    assert_eq!(d.linux_install_of(ubuntu), Some(linux::Progress::Downloading(0)));
+    // A failure is told without a reason (`wsl --import` gives no code to
+    // say why).
+    d.linux_progress(ubuntu, Some(linux::Progress::Failed));
+    assert_eq!(d.told.last().cloned(), Some((title("Ubuntu"), title("The install failed."))));
+    // Registered: its progress goes, and it is told.
+    let mut listing = linux::Listing::default();
+    listing.installed.push(installed("Ubuntu", &[("XTerm", "xterm")]));
+    d.begin_linux_install(ubuntu);
+    d.set_linux(&listing);
+    assert!(d.progress.is_empty());
+    assert!(d.linux_tiles()[0].installed);
+    assert_eq!(
+        d.told.last().map(|(_, text)| text.clone()),
+        Some(title("Installed. Its tile starts it now."))
+    );
 }
 
 /// The watch holds the installs that are still waiting for a word and
-/// no others: a pid is known only once `start_from_menu` has reported
-/// it, and it is forgotten with the install it belongs to (every
-/// process that ends is asked about, so a stale pid would be a tile
-/// turned grey for a stranger's process).
+/// no others: a pid is known only once `nt::action::install_for_shell`
+/// has reported it, and it is forgotten with the install it belongs to
+/// (every process that ends is asked about, so a stale pid would be a
+/// tile turned grey for a stranger's process).
 #[test]
 fn the_watch_holds_only_the_installs_still_waiting_for_a_word() {
-    let (mut d, _) = desktop_with_window();
+    let mut d = Desktop::new();
     let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
-    let listed =
-        |installed| [Entry { program: 0, installed: true }, Entry { program: office, installed }];
+    let listed = |installed| [Entry { program: office, installed }];
     d.set_programs(&listed(false));
-    let start = d.start_rect();
-    click(&mut d, start.x + 10, start.y + 10);
-    let r = d.menu_item_rect(1);
     let watched = |d: &Desktop| d.installers.iter().map(|&(_, pid)| pid).collect::<Vec<u64>>();
-    // Clicked, but `start_from_menu` has not run yet: no pid to watch.
-    click(&mut d, r.x + 20, r.y + 10);
+    // Asked for, but its installer is not started yet: no pid to watch.
+    d.begin_install(office);
     assert!(watched(&d).is_empty());
     d.install_started(office, Some(7));
     assert_eq!(watched(&d), [7]);
-    // An install that ended waits for nothing: a failure, a tile gone
-    // quiet, the install's own last word, the listing that draws it
+    // An install that ended waits for nothing: a failure, an install gone
+    // quiet, the install's own last word, the listing that finds it
     // installed.
     d.install_progress(office, Some(pkg::Progress::Failed(4)));
     assert!(watched(&d).is_empty());
-    click(&mut d, r.x + 20, r.y + 10);
+    d.begin_install(office);
     d.install_started(office, Some(8));
     d.installers_gone(&[8]);
     assert!(watched(&d).is_empty());
-    click(&mut d, r.x + 20, r.y + 10);
+    d.begin_install(office);
     d.install_started(office, Some(9));
     d.install_progress(office, None);
     assert!(watched(&d).is_empty());
-    click(&mut d, r.x + 20, r.y + 10);
+    d.begin_install(office);
     d.install_started(office, Some(10));
     assert_eq!(watched(&d), [10]);
     d.set_programs(&listed(true));
     assert!(watched(&d).is_empty());
 }
 
-/// An install that ends is told (the log: the kernel's taskbar has no
+/// An install that ends is told (the log: the kernel draws no
 /// notification area): the program's name and whether it worked, once.
 #[test]
 fn an_install_that_ends_is_told() {
@@ -457,7 +342,7 @@ fn an_install_that_ends_is_told() {
     // The same failure reported again does not tell it twice.
     d.install_progress(office, Some(pkg::Progress::Failed(2)));
     assert_eq!(d.told.len(), 1, "told twice");
-    // A click tries again and it works: the listing that draws the tile
+    // Tried again and it works: the listing that finds the program
     // installed is what tells it, and the install's own last word then
     // has nothing to add.
     d.install_progress(office, Some(pkg::Progress::Resolving));
@@ -477,18 +362,6 @@ fn an_install_that_ends_is_told() {
         d.told.last().map(|(_, text)| text.clone()),
         Some(title("Installed. Its tile starts it now."))
     );
-}
-
-#[test]
-fn enter_in_the_start_menu_starts_the_first_tile_at_once() {
-    let (mut d, _) = desktop_with_window();
-    d.set_programs(&[Entry { program: 0, installed: true }]);
-    d.key(0x5b, 0x5b, true, true);
-    d.key(0x5b, 0x5b, true, false);
-    assert!(d.menu_open());
-    d.key(0x0d, 0x1c, false, true);
-    assert!(!d.menu_open());
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Command Prompt"));
 }
 
 #[test]
@@ -529,8 +402,9 @@ fn the_caption_drags_and_its_buttons_minimize_and_close() {
     };
     assert_eq!(out[0].window, a);
     assert_eq!(got(&out[..n]), [(GALA_WM_MINIMIZED, 1, 0), (GALA_WM_ACTIVE, 0, 0)]);
-    let (_, button) = d.tasks()[0];
-    click(&mut d, button.x + 10, button.y + 10);
+    // Its taskbar button (shasha's) restores it: GalaDesktopAction's
+    // Restore.
+    d.act(a, Action::Restore).unwrap();
     assert!(!d.s.window(a).unwrap().minimized);
     assert_eq!(d.s.active, Some(a));
     let n = d.take_input(7, &mut out);
@@ -546,7 +420,9 @@ fn a_right_click_on_the_caption_goes_to_the_program_for_its_window_menu() {
     // On window a's caption: it comes forward and is active, and its
     // program gets WM_NCRBUTTONDOWN/UP with HTCAPTION and the screen
     // point (its DefWindowProc shows the window menu there).
-    right_click(&mut d, 350, 110);
+    for buttons in [0, 2, 0] {
+        go(&mut d, 350, 110, buttons);
+    }
     assert_eq!(d.s.active, Some(a));
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 8];
     let n = d.take_input(7, &mut out);
@@ -568,7 +444,7 @@ fn a_program_minimizes_and_restores_its_window() {
     assert!(d.s.window(a).unwrap().minimized);
     assert_eq!(d.hit(600, 300), Hit::Nothing);
     assert_ne!(d.s.active, Some(a));
-    assert_eq!(d.tasks().len(), 1);
+    assert_eq!(d.list().len(), 1);
     let sent: Vec<_> = d.s.input.iter().map(|e| (e.window, e.message, e.wparam)).collect();
     assert_eq!(sent, [(a, GALA_WM_ACTIVE, 0)]);
     // Another process may not.
@@ -594,16 +470,6 @@ fn clicks_in_a_client_area_go_to_its_program() {
 }
 
 #[test]
-fn the_clock_shows_utc_time_and_date() {
-    // 2026-11-01 18:52 UTC: minutes since 1601.
-    let days = 134_774 + 20_758; // 1601 -> 1970 -> 2026-11-01
-    let (time, tn, date, dn) = clock((days * 24 * 60 + 18 * 60 + 52) as u64);
-    assert_eq!((&time[..tn], &date[..dn]), (&b"6:52 PM"[..], &b"11/1/2026"[..]));
-    let (time, tn, _, _) = clock((days * 24 * 60 + 52) as u64);
-    assert_eq!(&time[..tn], b"12:52 AM");
-}
-
-#[test]
 fn place_resizes_keeping_the_client_pixels_and_set_title_renames() {
     let (mut d, a) = desktop_with_window();
     let red = [0x00ff_0000u32; 4];
@@ -620,34 +486,6 @@ fn place_resizes_keeping_the_client_pixels_and_set_title_renames() {
 }
 
 #[test]
-fn qoi_pictures_decode_and_cover_the_screen() {
-    // 2 x 2: red (RGB chunk), red (RUN 1), green (RGB), red (INDEX of
-    // red: (255 * 3 + 255 * 11) % 64 = 50), then the end marker.
-    let mut data = Vec::new();
-    data.extend_from_slice(b"qoif");
-    data.extend_from_slice(&2u32.to_be_bytes());
-    data.extend_from_slice(&2u32.to_be_bytes());
-    data.extend_from_slice(&[3, 0, 0xfe, 255, 0, 0, 0xc0, 0xfe, 0, 255, 0, 50]);
-    data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
-    let p = paint::decode_qoi(&data).unwrap();
-    assert_eq!((p.w, p.h), (2, 2));
-    assert_eq!(p.pixels, [0xff0000, 0xff0000, 0x00ff00, 0xff0000]);
-    // DIFF (+1, -2, 0 from green) and LUMA (dg +10, dr - dg = 0,
-    // db - dg = -8 from that).
-    let mut more = data[..14].to_vec();
-    more.extend_from_slice(&[0xfe, 0, 255, 0, 0x40 | 3 << 4 | 2, 0x80 | 42, 0x80, 0xc0]);
-    more.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
-    let q = paint::decode_qoi(&more).unwrap();
-    assert_eq!(q.pixels, [0x00ff00, 0x01fd00, 0x0b0702, 0x0b0702]);
-    // Truncated: no picture.
-    assert!(paint::decode_qoi(&data[..16]).is_none());
-    // A 2 x 2 picture covers a 4 x 2 screen: scaled by 2, centred, the
-    // overflow rows cropped.
-    let w = Wallpaper::new(4, 2, Some(&p)).unwrap();
-    assert_eq!(w.pixel(0, 0) & 0xffffff, 0xff0000);
-}
-
-#[test]
 fn a_frameless_window_is_all_client_area_yet_an_application_window() {
     // A program that draws its own frame (Chromium's WM_NCCALCSIZE).
     let (mut d, a) = desktop_with_window();
@@ -661,7 +499,7 @@ fn a_frameless_window_is_all_client_area_yet_an_application_window() {
     // taskbar.
     assert_eq!(d.pixel(400, 120), 0x0000_00ff);
     assert_eq!(d.s.active, Some(f));
-    assert_eq!(d.tasks().len(), 2);
+    assert_eq!(d.list().len(), 2);
     // A click on its top row is the program's, in its coordinates.
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
     d.take_input(7, &mut out);
@@ -757,7 +595,7 @@ fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
     assert_eq!(d.pixel(320, 150), 0x0000_ff00);
     // Not active, not on the taskbar.
     assert_eq!(d.s.active, Some(a));
-    assert_eq!(d.tasks().len(), 1);
+    assert_eq!(d.list().len(), 1);
     // Raising the frame keeps the popup above it.
     let (ox, oy) = d.s.window(a).unwrap().client_origin();
     click(&mut d, ox + 5, oy + 200);
@@ -786,15 +624,16 @@ fn the_capture_gets_the_mouse_everywhere() {
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
     d.take_input(7, &mut out);
     // A click on the desktop, left of and above the popup: to the popup,
-    // with negative coordinates; nothing else happens (no start menu).
-    let start = d.start_rect();
+    // with negative coordinates; nothing else happens.
     click(&mut d, 300, 140);
     let n = d.take_input(7, &mut out);
     let msgs: Vec<(u32, u32)> = out[..n].iter().map(|e| (e.window, e.message)).collect();
     assert_eq!(msgs, [(p, WM_MOUSEMOVE), (p, WM_LBUTTONDOWN), (p, WM_LBUTTONUP)]);
     assert_eq!(out[1].lparam, u64::from((-10i16) as u16) << 16 | u64::from((-20i16) as u16));
-    click(&mut d, start.x + 5, start.y + 5);
-    assert!(!d.menu_open());
+    click(&mut d, 10, 768 - 10);
+    let n = d.take_input(7, &mut out);
+    assert!(out[..n].iter().all(|e| e.window == p), "the taskbar's strip too goes to the capture");
+    assert!(d.take_launch().is_none());
     // Released: the frame's caption works again.
     d.capture(0, 7).unwrap();
     let (ox, oy) = d.s.window(a).unwrap().client_origin();
@@ -808,7 +647,7 @@ fn the_capture_gets_the_mouse_everywhere() {
 }
 
 #[test]
-fn icons_scale_by_area_and_show_on_the_taskbar_button() {
+fn icons_scale_by_area_and_show_on_the_caption() {
     // A 48 x 48 icon, left half opaque red, right half transparent: the
     // 24 x 24 result keeps the halves, colours unchanged at the edges.
     let mut src = [0u32; 48 * 48];
@@ -817,29 +656,27 @@ fn icons_scale_by_area_and_show_on_the_taskbar_button() {
             *p = 0xffff_0000;
         }
     }
-    let out = scale_icon(&src, 48).unwrap();
-    assert_eq!(out.len(), ICON * ICON);
+    let out = scale_icon(&src, 48, 24).unwrap();
+    assert_eq!(out.len(), 24 * 24);
     assert_eq!(out[0], 0xffff_0000);
     assert_eq!(out[11], 0xffff_0000);
     assert_eq!(out[12], 0);
     // A 32 x 32 one: 4 source pixels for 3 (mixed coverage averaged).
     let opaque = [0xff00_80ffu32; 32 * 32];
-    assert!(scale_icon(&opaque, 32).unwrap().iter().all(|&p| p == 0xff00_80ff));
-    assert!(scale_icon(&opaque, 64).is_none());
+    assert!(scale_icon(&opaque, 32, 24).unwrap().iter().all(|&p| p == 0xff00_80ff));
+    assert!(scale_icon(&opaque, 64, 24).is_none());
 
+    // At the caption's left, 16 x 16, before the title.
     let (mut d, a) = desktop_with_window();
-    let (_, r) = d.tasks()[0];
-    let (ix, iy) = (r.x + 10 + 12, r.y + 8 + 12);
-    let tile = d.pixel(ix, iy);
+    let caption = d.s.window(a).unwrap().caption_rect();
+    let (ix, iy) = (caption.x + 12 + 8, caption.y + i64::from(CAPTION) / 2);
+    let without = d.pixel(ix, iy);
     let green = [0xff00_c000u32; 32 * 32];
     d.set_icon(a, 7, &green, 32).unwrap();
     assert_eq!(d.pixel(ix, iy), 0x0000_c000);
-    // And at the caption's left, 16 x 16, before the title.
-    let caption = d.s.window(a).unwrap().caption_rect();
-    assert_eq!(d.pixel(caption.x + 12 + 8, caption.y + i64::from(CAPTION) / 2), 0x0000_c000);
     assert_eq!(d.set_icon(a, 8, &green, 32).err(), Some(NtStatus::INVALID_HANDLE));
     d.set_icon(a, 7, &[], 0).unwrap();
-    assert_eq!(d.pixel(ix, iy), tile);
+    assert_eq!(d.pixel(ix, iy), without);
 }
 
 #[test]
@@ -853,9 +690,13 @@ fn the_windows_key_with_arrows_snaps_the_active_window() {
         d.key(0x5b, 0x5b, true, false);
     };
     // Win+Left: a request to fill the left half of the work area; no
-    // start menu, no keys for the program.
-    snap(&mut d, 0x25);
-    assert!(!d.menu_open());
+    // keys for the program, and the Windows key's release is no hot key
+    // (it was used).
+    d.key(0x5b, 0x5b, true, true);
+    d.key(0x25, 0, true, true);
+    d.key(0x25, 0, true, false);
+    assert_eq!(d.hot_candidate(0x5b, false), None);
+    d.key(0x5b, 0x5b, true, false);
     let work_h = 768 - u64::from(TASKBAR);
     let placed: Vec<_> =
         d.s.input.iter().map(|e| (e.window, e.message, e.wparam, e.lparam)).collect();
@@ -1237,9 +1078,7 @@ fn the_console_moves_between_desktops_keeping_their_windows() {
 
 /// A Test presenter's injected input (GalaSession's SESSION_INPUT): a
 /// click reaches the window under it as the mouse's would (the right
-/// button here: a left press also looks for the start menu's programs in
-/// the file system, which host tests lack; presenter_test clicks left), a
-/// key the active window, the wheel the window under the pointer; a
+/// button here; presenter_test clicks left), a key the active window, the wheel the window under the pointer; a
 /// desktop no Test frame shows takes none.
 #[test]
 fn injected_input_reaches_a_desktop_a_test_frame_shows() {
@@ -1293,9 +1132,9 @@ fn injected_input_reaches_a_desktop_a_test_frame_shows() {
 
 /// A bare desktop (nothing can show it: the server profile, no screen and
 /// no `presenter=`) is the window state alone:
-/// windows are made, shown, placed, retitled and painted, the clock runs,
-/// and nothing is laid out or drawn for them (no wallpaper, taskbar or
-/// caption), so a machine nothing shows pays for no composition.
+/// windows are made, shown, placed, retitled and painted, and nothing is
+/// laid out or drawn for them (no caption, no taskbar strip reserved), so
+/// a machine nothing shows pays for no composition.
 #[test]
 fn a_bare_desktop_keeps_windows_and_draws_nothing() {
     let mut d = Desktop::new();
@@ -1306,14 +1145,13 @@ fn a_bare_desktop_keeps_windows_and_draws_nothing() {
     d.show(a, 1, true).unwrap();
     d.place(a, 1, 20, 30, 300, 100).unwrap();
     d.set_title(a, 1, &title("There")).unwrap();
-    d.set_minute(12_345);
     let red = [0x00ff_0000u32; 4];
     d.present(a, Rect { x: 0, y: 0, w: 2, h: 2 }, &red, 2).unwrap();
     let w = d.s.window(a).unwrap();
     assert_eq!((w.x, w.y, w.w, w.h), (20, 30, 300, 100));
     assert!(w.client.first().is_some_and(|p| p & 0x00ff_ffff == 0x00ff_0000));
     assert!(w.chrome.caption.is_none());
-    assert!(d.wallpaper.is_none() && d.taskbar.is_none());
+    assert!(d.appbars.taskbar().is_none());
     assert_eq!(d.list().len(), 1);
     assert_eq!(d.presenter.kind(), Kind::None);
     // Its program's own move loop finds no button down (no pointer moves
@@ -1429,18 +1267,6 @@ fn a_press_outside_a_popup_grab_s_owner_ends_it_and_goes_nowhere() {
     assert_eq!(d.take_input(7, &mut out), 0);
 }
 
-/// The start menu open on a desktop with one window, listing the Command
-/// Prompt and `listing`'s Linux section.
-fn menu_with_linux(listing: linux::Listing) -> Desktop {
-    let (mut d, _) = desktop_with_window();
-    d.set_programs(&[Entry { program: 0, installed: true }]);
-    d.set_linux(listing);
-    let start = d.start_rect();
-    click(&mut d, start.x + 10, start.y + 10);
-    assert!(d.menu_open());
-    d
-}
-
 fn installed(name: &str, apps: &[(&str, &str)]) -> linux::Distro {
     let mut d = linux::Distro::new(linux::Name::new(name.as_bytes()).unwrap(), true);
     for (i, (n, e)) in apps.iter().enumerate() {
@@ -1450,154 +1276,6 @@ fn installed(name: &str, apps: &[(&str, &str)]) -> linux::Distro {
         });
     }
     d
-}
-
-fn centre(r: Rect) -> (i64, i64) {
-    (r.x + r.w / 2, r.y + r.h / 2)
-}
-
-fn right_click(d: &mut Desktop, x: i64, y: i64) {
-    go(d, x, y, 0);
-    go(d, x, y, 2);
-    go(d, x, y, 0);
-}
-
-#[test]
-fn the_linux_section_collapses_hides_and_dismisses_its_suggestions() {
-    let mut d = menu_with_linux(linux::Listing::default());
-    // Two suggestions, not installed: dimmed, each with a download badge
-    // and a dismiss button; the heading below the pinned row.
-    let names: Vec<&str> = d.linux_tiles().iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["Ubuntu", "Alpine"]);
-    let heading = d.linux_heading_rect();
-    assert!(heading.y > d.menu_item_rect(0).y + TILE_H - 4);
-    let tile = d.linux_tile_rect(0);
-    let (ix, iy) = (tile.x + (tile.w - 32) / 2, tile.y + 10);
-    assert_eq!(d.pixel(ix + 23, iy + 28), ACCENT);
-    // The heading collapses the tiles away, and back.
-    let (hx, hy) = (heading.x + 40, heading.y + 10);
-    click(&mut d, hx, hy);
-    assert!(d.linux.prefs.collapsed);
-    assert_eq!(d.hit(ix + 5, iy + 5), Hit::Menu);
-    assert_eq!(d.take_prefs(), Some(linux::Prefs { collapsed: true, ..Default::default() }));
-    click(&mut d, hx, hy);
-    assert!(!d.linux.prefs.collapsed);
-    assert_eq!(d.hit(ix + 5, iy + 5), Hit::LinuxEntry(0));
-    // Alpine's dismiss button: it is not suggested again; the menu stays.
-    let (x, y) = centre(d.linux_dismiss_rect(1));
-    click(&mut d, x, y);
-    assert!(d.menu_open());
-    let names: Vec<&str> = d.linux_tiles().iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["Ubuntu"]);
-    assert_eq!(d.take_prefs().map(|p| p.dismissed), Some(0b10));
-    // A listing read while the choices wait to be saved keeps them.
-    d.prefs_changed = true;
-    d.set_linux(linux::Listing::default());
-    assert_eq!(d.linux.prefs.dismissed, 0b10);
-    d.take_prefs();
-    // "Hide": the section goes; the menu's context menu brings it back.
-    let (x, y) = centre(d.linux_hide_rect());
-    click(&mut d, x, y);
-    assert!(d.linux.prefs.hidden);
-    assert_eq!(d.take_prefs().map(|p| p.hidden), Some(true));
-    let (bx, by) = (d.menu_rect().x + 300, d.menu_rect().y + 400);
-    assert_eq!(d.hit(bx, by), Hit::Menu);
-    right_click(&mut d, bx, by);
-    let c = d.context.unwrap();
-    assert_eq!(c.items[0], Some(linux::Item::ShowSection));
-    let r = d.context_rect().unwrap();
-    click(&mut d, r.x + 20, r.y + 10);
-    assert!(!d.linux.prefs.hidden && d.context.is_none() && d.menu_open());
-    assert_eq!(d.take_prefs().map(|p| (p.hidden, p.dismissed)), Some((false, 0b10)));
-}
-
-#[test]
-fn a_suggestion_installs_with_progress_and_then_starts_its_desktop() {
-    let mut d = menu_with_linux(linux::Listing::default());
-    let tile = d.linux_tile_rect(0);
-    click(&mut d, tile.x + 20, tile.y + 20);
-    // The menu stays open, the tile shows its progress.
-    assert!(d.menu_open());
-    let ubuntu = linux::Name::new(b"Ubuntu").unwrap();
-    match d.take_launch() {
-        Some(Launch::Linux(linux::Request::Install(n, 0))) => assert_eq!(n, ubuntu),
-        _ => panic!("no install"),
-    }
-    // A second click while it installs asks for nothing.
-    click(&mut d, tile.x + 20, tile.y + 20);
-    assert!(d.take_launch().is_none());
-    d.linux_progress(ubuntu, Some(linux::Progress::Downloading(50)));
-    let (bx, by) = (tile.x + 13, tile.y + 69);
-    assert_eq!(d.pixel(bx, by), ACCENT);
-    d.linux_progress(ubuntu, Some(linux::Progress::Failed));
-    assert_eq!(d.pixel(bx, by), CLOSE_HOVER);
-    // An install that ends is told above the notification area, as a
-    // package's is (`an_install_that_ends_is_told_above_the_notification_area`);
-    // `wsl --import` gives no code to say why, so it is not said.
-    let said = d.told.last().cloned();
-    assert_eq!(said, Some((title("Ubuntu"), title("The install failed."))));
-    // A failed install may be tried again.
-    click(&mut d, tile.x + 20, tile.y + 20);
-    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Install(..)))));
-    // Registered: its progress goes, it is drawn in full colour.
-    let mut listing = linux::Listing::default();
-    listing.installed.push(installed("Ubuntu", &[("XTerm", "xterm")]));
-    d.set_linux(listing);
-    assert!(d.progress.is_empty());
-    assert_eq!(
-        d.told.last().map(|(_, text)| text.clone()),
-        Some(title("Installed. Its tile starts it now."))
-    );
-    assert_ne!(d.pixel(bx, by), ACCENT);
-    assert!(d.linux_tiles()[0].installed);
-    // A click starts its desktop; the menu closes.
-    click(&mut d, tile.x + 20, tile.y + 20);
-    assert!(!d.menu_open());
-    assert!(
-        matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Desktop(n))) if n == ubuntu)
-    );
-}
-
-#[test]
-fn an_installed_distributions_context_menu_opens_a_terminal_or_an_application() {
-    let mut listing = linux::Listing::default();
-    listing.installed.push(installed("Ubuntu", &[("XTerm", "xterm"), ("Editor", "ed -s")]));
-    let mut d = menu_with_linux(listing);
-    let tile = d.linux_tile_rect(0);
-    // A suggestion's tile has no context menu; an installed one has.
-    let second = d.linux_tile_rect(1);
-    right_click(&mut d, second.x + 20, second.y + 20);
-    assert!(d.context.is_none());
-    right_click(&mut d, tile.x + 20, tile.y + 20);
-    let c = d.context.unwrap();
-    assert_eq!(
-        c.items[..4],
-        [Some(linux::Item::Terminal), Some(linux::Item::App(0)), Some(linux::Item::App(1)), None]
-    );
-    let r = d.context_rect().unwrap();
-    assert!(d.menu_rect().contains(r.x, r.y) && d.menu_rect().contains(r.x + r.w, r.y + r.h));
-    // A click beside it closes it and does nothing else.
-    let m = d.menu_rect();
-    click(&mut d, m.x + 300, m.y + 30);
-    assert!(d.context.is_none() && d.menu_open() && d.take_launch().is_none());
-    // The second application.
-    right_click(&mut d, tile.x + 20, tile.y + 20);
-    let r = d.context_rect().unwrap();
-    click(&mut d, r.x + 20, r.y + 4 + 2 * linux::ITEM_H + 10);
-    assert!(!d.menu_open());
-    match d.take_launch() {
-        Some(Launch::Linux(linux::Request::App(n, app))) => {
-            assert_eq!((n.as_str(), app.exec.as_str()), ("Ubuntu", "ed -s"));
-        }
-        _ => panic!("no application"),
-    }
-    // "Open terminal".
-    let start = d.start_rect();
-    click(&mut d, start.x + 10, start.y + 10);
-    right_click(&mut d, tile.x + 20, tile.y + 20);
-    let r = d.context_rect().unwrap();
-    click(&mut d, r.x + 20, r.y + 14);
-    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Terminal(_)))));
 }
 
 #[test]
@@ -1617,34 +1295,11 @@ fn ctrl_shift_esc_starts_task_manager_and_no_program_sees_the_esc() {
     d.key(0x1b, 1, false, false);
     d.key(0x10, 0x2a, false, false);
     d.key(0x11, 0x1d, false, false);
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(TASK_MANAGER));
+    assert_eq!(d.take_launch().map(|p| p.name), Some(TASK_MANAGER));
     assert!(!sent(&mut d).iter().any(|m| m.1 == WM_KEYDOWN && m.2 == 0x1b));
     // Once only, and not again with the modifiers released.
     d.key(0x1b, 1, false, true);
     assert!(d.take_launch().is_none());
-}
-
-#[test]
-fn the_taskbars_context_menu_starts_task_manager() {
-    let (mut d, _) = desktop_with_window();
-    // A right click on the taskbar's free space (left of the centred
-    // buttons) opens the menu above it; a press elsewhere closes it.
-    let bar_y = 768 - i64::from(TASKBAR) / 2;
-    right_click(&mut d, 100, bar_y);
-    let r = d.bar_menu_rect().expect("the taskbar's menu is open");
-    assert!(r.y + r.h <= 768 - i64::from(TASKBAR));
-    click(&mut d, 600, 300);
-    assert!(d.bar_menu_rect().is_none());
-    assert!(d.take_launch().is_none());
-    // Its item: Task Manager; the menu closes.
-    right_click(&mut d, 100, bar_y);
-    let r = d.bar_menu_rect().expect("open again");
-    let (x, y) = centre(Rect { x: r.x + 4, y: r.y + 4, w: r.w - 8, h: BAR_MENU_ITEM });
-    go(&mut d, x, y, 0);
-    assert!(d.render_card().is_some());
-    click(&mut d, x, y);
-    assert!(d.bar_menu_rect().is_none());
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(TASK_MANAGER));
 }
 
 #[test]
@@ -1663,37 +1318,6 @@ fn task_manager_is_listed_where_windows_has_it() {
             ("7-Zip", false)
         ]
     );
-}
-
-#[test]
-fn win_e_starts_file_explorer() {
-    let (mut d, _) = desktop_with_window();
-    d.key(0x5b, 0x5b, true, true);
-    d.key(b'E', 0x12, false, true);
-    d.key(b'E', 0x12, false, false);
-    d.key(0x5b, 0x5b, true, false);
-    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(FILE_EXPLORER));
-    // The Windows key used with E opens no start menu, and no window saw
-    // the E.
-    assert!(!d.menu_open());
-    assert!(!sent(&mut d).iter().any(|m| m.1 == WM_KEYDOWN && m.2 == u64::from(b'E')));
-    // E alone is the window's.
-    d.key(b'E', 0x12, false, true);
-    assert!(d.take_launch().is_none());
-}
-
-#[test]
-fn a_tile_initial_from_the_title_or_else_the_program() {
-    let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
-    let (gimp, program) = (w("[in] (imported)-1.0 - GIMP"), w("gimp-3.2"));
-    assert_eq!(tile_initial(&gimp, &program), ('G', &program[..]));
-    let notes = w("Notes");
-    assert_eq!(tile_initial(&notes, &program), ('N', &notes[..]));
-    let svg = w("in.svg - Inkscape");
-    assert_eq!(tile_initial(&svg, &program), ('I', &svg[..]));
-    let star = w("*untitled");
-    assert_eq!(tile_initial(&star, &[]), ('*', &star[..]));
-    assert_eq!(tile_initial(&[], &[]), ('?', &[][..]));
 }
 
 #[test]
@@ -1757,7 +1381,7 @@ fn a_clicked_popup_takes_the_activation_only_for_its_press() {
 
 /// A hot key (RegisterHotKey) takes its key's down from the active
 /// window; its up still goes there. The shell's Win+E and Windows key
-/// take the desktop's own place (no File Explorer, no start menu).
+/// are hot keys like any other.
 #[test]
 fn a_hot_key_takes_its_keys_from_the_desktop_and_the_active_window() {
     use crate::nt::window::{HotKey, MOD_ALT, MOD_CONTROL, MOD_WIN, Windows};
@@ -1808,7 +1432,33 @@ fn a_hot_key_takes_its_keys_from_the_desktop_and_the_active_window() {
     assert_eq!(d.hot_candidate(0x5b, false), Some((MOD_WIN, 0x5b, false)));
     d.hot_key_taken(0x5b, false);
     d.key(0x5b, 0x5b, true, false);
-    assert!(!d.menu_open());
+    assert!(d.take_launch().is_none());
+}
+
+/// The shell takes the taskbar's strip (ABM_GALA_TASKBAR) and draws its
+/// bar there; when it ends the strip stays reserved (window 0's again,
+/// which nothing draws), so maximized windows keep leaving room for the
+/// taskbar the next shell puts there.
+#[test]
+fn the_shell_takes_the_taskbar_and_its_strip_stays_reserved_when_it_ends() {
+    let (mut d, _) = desktop_with_window();
+    let (_, strip) = d.appbars.taskbar().unwrap();
+    // The shell (pid 9, window 0x30) takes the bar: the same strip.
+    let none = Rect { x: 0, y: 0, w: 0, h: 0 };
+    let got = d.appbar_op(9, appbar::ABM_GALA_TASKBAR, 0x30, 0x8043, 0, none).unwrap();
+    assert_eq!(got, (true, appbar::ABE_BOTTOM, strip));
+    assert_eq!(d.appbars.taskbar_window(), Some(0x30));
+    assert_eq!(d.s.work().h, strip.y);
+    // A program cannot take it from the shell by asking.
+    let got = d.appbar_op(4, appbar::ABM_REMOVE, appbar::TASKBAR_WINDOW, 0, 0, none).unwrap();
+    assert!(!got.0);
+    // The shell ends: window 0 holds the same strip again, and the screen
+    // shows the desktop's colour there.
+    d.destroy_owned(9);
+    assert_eq!(d.appbars.taskbar_window(), Some(appbar::TASKBAR_WINDOW));
+    assert_eq!(d.appbars.taskbar(), Some((appbar::ABE_BOTTOM, strip)));
+    assert_eq!(d.s.work().h, strip.y);
+    assert_eq!(d.pixel(10, strip.y + 10), DESKTOP_COLOR);
 }
 
 #[test]
@@ -1830,35 +1480,25 @@ fn a_windows_placement_is_its_owners_alone_and_follows_its_state() {
     assert!(!d.placement(a, 7).unwrap().visible);
 }
 
+/// A wallpaper is checked by its QOI header alone (shasha decodes it).
 #[test]
-fn the_shell_takes_the_taskbar_and_the_desktops_comes_back_when_it_ends() {
-    let (mut d, _) = desktop_with_window();
-    let strip = d.taskbar_rect();
-    let start = d.start_rect();
-    let (sx, sy) = (start.x + 10, start.y + 10);
-    assert_eq!(d.hit(sx, sy), Hit::Start);
-    let drawn = d.pixel(sx, strip.y + 1);
-    // The shell (pid 9, window 0x30) takes the bar: the same strip, and
-    // the desktop neither draws the taskbar nor answers clicks on it.
-    let none = Rect { x: 0, y: 0, w: 0, h: 0 };
-    let got = d.appbar_op(9, appbar::ABM_GALA_TASKBAR, 0x30, 0x8043, 0, none).unwrap();
-    assert_eq!(got, (true, appbar::ABE_BOTTOM, strip));
-    assert!(!d.own_taskbar());
-    assert_ne!(d.hit(sx, sy), Hit::Start);
-    assert_ne!(d.pixel(sx, strip.y + 1), drawn);
-    assert_eq!(d.s.work().h, strip.y);
-    // A program cannot take it from the shell by asking.
-    let got = d.appbar_op(4, appbar::ABM_REMOVE, appbar::TASKBAR_WINDOW, 0, 0, none).unwrap();
-    assert!(!got.0);
-    // The toggle a shell's start button sends.
-    d.open_menu();
-    assert!(d.menu_open());
-    // The shell ends: the desktop's own taskbar is back, on the same strip.
-    d.destroy_owned(9);
-    assert!(d.own_taskbar());
-    assert_eq!(d.appbars.taskbar(), Some((appbar::ABE_BOTTOM, strip)));
-    assert_eq!(d.hit(sx, sy), Hit::Start);
-    assert_eq!(d.s.work().h, strip.y);
+fn a_wallpaper_is_checked_by_its_qoi_header() {
+    let mut head = Vec::new();
+    head.extend_from_slice(b"qoif");
+    head.extend_from_slice(&1920u32.to_be_bytes());
+    head.extend_from_slice(&1080u32.to_be_bytes());
+    head.extend_from_slice(&[3, 0]);
+    assert_eq!(qoi_header(&head), Some((1920, 1080)));
+    assert_eq!(qoi_header(&head[..13]), None, "short");
+    let mut png = head.clone();
+    png[..4].copy_from_slice(b"\x89PNG");
+    assert_eq!(qoi_header(&png), None, "another kind of file");
+    let mut empty = head.clone();
+    empty[4..8].copy_from_slice(&0u32.to_be_bytes());
+    assert_eq!(qoi_header(&empty), None, "no pixels");
+    let mut channels = head.clone();
+    channels[12] = 2;
+    assert_eq!(qoi_header(&channels), None, "two channels");
 }
 
 #[test]
@@ -1923,9 +1563,9 @@ fn the_shells_tile_install_is_watched_and_every_change_tells_the_shell() {
 fn the_shells_linux_install_is_watched_and_every_change_tells_the_shell() {
     let mut d = Desktop::new();
     let ubuntu = linux::Name::new(b"Ubuntu").unwrap();
-    d.set_linux(linux::Listing::default());
+    d.set_linux(&linux::Listing::default());
     assert_eq!(d.take_linux_changed(), CatalogChange::State, "the tiles listed");
-    d.set_linux(linux::Listing::default());
+    d.set_linux(&linux::Listing::default());
     assert_eq!(d.take_linux_changed(), CatalogChange::None, "the same tiles again");
     d.begin_linux_install(ubuntu);
     assert_eq!(d.linux_install_of(ubuntu), Some(linux::Progress::Downloading(0)));
@@ -1963,22 +1603,7 @@ fn the_shells_linux_install_is_watched_and_every_change_tells_the_shell() {
     let _ = d.take_linux_changed();
     let listing =
         linux::Listing { installed: vec![installed("Ubuntu", &[])], ..Default::default() };
-    d.set_linux(listing);
+    d.set_linux(&listing);
     assert_eq!(d.linux_install_of(ubuntu), None);
     assert_eq!(d.take_linux_changed(), CatalogChange::State);
-}
-
-/// The section's choices waiting to be saved are the ones its tiles are
-/// listed with, not the registry's older ones.
-#[test]
-fn the_shells_linux_tiles_use_the_choices_not_yet_saved() {
-    let mut d = Desktop::new();
-    let read = linux::Prefs { dismissed: 0b01, ..Default::default() };
-    assert_eq!(d.linux_prefs(read), read);
-    let mut d2 = menu_with_linux(linux::Listing::default());
-    let (x, y) = centre(d2.linux_dismiss_rect(1));
-    click(&mut d2, x, y);
-    assert_eq!(d2.linux_prefs(read).dismissed, 0b10);
-    d.set_linux(linux::Listing::default());
-    assert_eq!(d.linux_prefs(read), read);
 }

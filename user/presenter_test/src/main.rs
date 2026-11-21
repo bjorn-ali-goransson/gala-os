@@ -7,8 +7,10 @@
 //! gala's spec (ARCHITECTURE), not Windows': on Windows the call is an
 //! unknown system service and the test reports itself skipped (exit 0).
 //!
-//! gala starts it as SYSTEM in session 0 (`as=system`; `wallpaper=night`,
-//! so the colours below are known). It checks:
+//! gala starts it as SYSTEM in session 0 (`as=system`). Session 2 has no
+//! shell (shasha runs in the console's session), so around its window is
+//! the desktop's colour, as Windows shows a session with no Explorer. It
+//! checks:
 //!
 //! - Session 2 does not exist yet: GalaSession's query is
 //!   STATUS_NOT_FOUND.
@@ -24,7 +26,8 @@
 //!   with a window; reading a frame is STATUS_INVALID_DEVICE_STATE.
 //! - A Test presenter attached: the frame is 1280 x 800 and shows the
 //!   window as the console would (the client red from (101, 133), the
-//!   active caption's colour, the night wallpaper's corner, the taskbar).
+//!   active caption's colour; the desktop's colour in the corner and on
+//!   the taskbar's strip, which nothing draws there).
 //! - The child paints green: the frame shows it (damage reaches the
 //!   presenter), with more flushes than before.
 //! - Detached (presenter none): a frame read fails again; the child paints
@@ -254,6 +257,11 @@ const WM_LBUTTONUP: u32 = 0x0202;
 const QS_ALLINPUT: u32 = 0x04ff;
 const SW_SHOW: i32 = 5;
 const PM_REMOVE: u32 = 1;
+/// What a desktop with no shell shows around its windows (the kernel's
+/// `nt::desktop::DESKTOP_COLOR`).
+const DESKTOP_COLOR: u32 = 0x3a6ea5;
+/// The taskbar's light grey, which no session without a shell may show.
+const TASKBAR_COLOR: u32 = 0xe0e7f3;
 const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 /// KUSER_SHARED_DATA.ActiveConsoleId.
@@ -812,8 +820,11 @@ fn run() -> Result<bool, u32> {
     c.eq(red.into(), PAINTS[0].1.into())?;
     c.ok(first_flushes >= 1, first_flushes)?;
     c.eq(pixel(&c, 300, 110)?.0.into(), CAPTION_ACTIVE.into())?;
-    c.ok(near_in(&c, [4, 4, 12, 12], 0x060e2b)?, 0)?; // the night wallpaper
-    c.ok(near_in(&c, [880, 780, 40, 12], 0xe0e7f3)?, 0)?; // the taskbar
+    // No shell in session 2: the desktop's colour (the kernel's
+    // DESKTOP_COLOR) in the corner and on the taskbar's strip alike.
+    c.ok(near_in(&c, [4, 4, 12, 12], DESKTOP_COLOR)?, 0)?;
+    c.ok(!near_in(&c, [880, 780, 40, 12], TASKBAR_COLOR)?, 0)?;
+    c.ok(near_in(&c, [880, 780, 40, 12], DESKTOP_COLOR)?, 0)?;
     out(b"presenter_test: frame shows the window\r\n");
 
     // A repaint reaches the frame.

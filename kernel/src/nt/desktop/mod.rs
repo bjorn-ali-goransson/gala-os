@@ -1,30 +1,38 @@
-//! The desktop of shasha, gala's graphical shell: top-level windows of
-//! Win32 programs, composited on the screen, with the shell's taskbar and
-//! start menu and the mouse.
+//! The desktop: the top-level windows of Win32 programs (and of Linux
+//! clients, through the Wayland server), composited on the screen with
+//! the mouse pointer. The shell is a program: shasha (user/shasha) draws
+//! the taskbar, the start menu and the wallpaper in windows of its own
+//! (ARCHITECTURE "The user-mode shell"); the kernel draws none of them.
 //!
 //! The kernel keeps each window's frame (rounded corners, a shaded caption
 //! with the title and minimize/close buttons, drawn here) and a copy of its
 //! client area, which the program's user32/gdi32 draw in their own memory
 //! and present (`present`). Every pixel is composed in layers: the
-//! wallpaper, the windows bottom to top (each with a soft shadow), the
-//! taskbar (translucent), the start menu (with its shadow) and the pointer.
-//! Changes collect damage rectangles which `with`/`pointer_event`/`tick`
-//! compose and hand to the desktop's presenter (`present`: the screen, a
-//! frame in memory, or nothing; the windows and their pixels are kept
-//! either way). The window state itself (windows, Z order, focus,
-//! capture, client pixels, input for programs) is `nt::winstate`'s, which
-//! a bare desktop is alone; this module is the compositor on top.
+//! desktop's colour (DESKTOP_COLOR: all a session without a shell shows
+//! behind its windows; shasha's desktop window covers it), the windows
+//! bottom to top (each with a soft shadow) and the pointer. Changes
+//! collect damage rectangles which `with`/`pointer_event`/the display
+//! watch compose and hand to the desktop's presenter (`present`: the
+//! screen, a frame in memory, or nothing; the windows and their pixels
+//! are kept either way). The window state itself (windows, Z order,
+//! focus, capture, client pixels, input for programs) is
+//! `nt::winstate`'s, which a bare desktop is alone; this module is the
+//! compositor on top.
 //!
 //! The mouse: a click raises and activates a window, its caption drags
 //! it, the caption buttons minimize it or ask it to close (WM_CLOSE to the
-//! program), the taskbar's buttons restore, activate or minimize windows,
-//! the start button opens the start menu, whose items start programs.
-//! Clicks and moves in a client area become input for its program.
+//! program). Clicks and moves in a client area become input for its
+//! program. The keys the system keeps for itself: Ctrl+Shift+Esc (Task
+//! Manager) and Win+arrows (Snap); the Windows key alone is a hot key
+//! (shasha's start menu registers it).
 //!
 //! What the shell does to windows is a named [`Action`] (`act`): the
-//! taskbar, the caption buttons and the Snap keys call it, and so does
-//! GalaDesktopAction (`nt::action`, the `gala` command): everything shasha
-//! does with the mouse can be done from a terminal.
+//! caption buttons and the Snap keys call it, and so does
+//! GalaDesktopAction (`nt::action`: shasha's taskbar, the `gala`
+//! command). The desktop also keeps what shasha's start menu shows of the
+//! installs it asked for (the catalog's packages, the Linux
+//! distributions): where each is, watched until its installer's last word,
+//! with WM_GALA_CATALOG to the shell's window when one changes.
 //! Design: docs/ARCHITECTURE.md, "Windows on the screen", "Server and
 //! desktop workloads" and "Presenters (B3a)".
 
@@ -41,18 +49,18 @@ use super::status::NtStatus;
 /// named actions use them).
 pub use super::winstate::{
     Action, BORDER, CAPTION, GALA_WM_ACTIVE, GALA_WM_MINIMIZED, GALA_WM_MOUSEACTIVATE,
-    GALA_WM_PLACE, GALA_WM_POINTER_LEFT, HTCAPTION, ICON, InputEvent, LISTED_ACTIVE,
-    LISTED_MAXIMIZED, LISTED_MINIMIZED, LISTED_SNAPPED, LISTED_TITLE, Listed, Listener, Rect,
-    SC_CLOSE, SC_MAXIMIZE, SC_RESTORE, SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR,
-    WHEEL_DELTA, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_MOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, scale_icon, scale_icon_to,
+    GALA_WM_PLACE, GALA_WM_POINTER_LEFT, HTCAPTION, InputEvent, LISTED_ACTIVE, LISTED_MAXIMIZED,
+    LISTED_MINIMIZED, LISTED_SNAPPED, LISTED_TITLE, Listed, Listener, Rect, SC_CLOSE, SC_MAXIMIZE,
+    SC_RESTORE, SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR, WHEEL_DELTA, WM_CLOSE,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE,
+    WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, scale_icon,
 };
 use super::winstate::{CAPTION_BUTTON, Shadow, State, VK_MENU, Window};
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
-use paint::{Canvas, Font, Picture, Wallpaper, blend, over, round_coverage2, shadow_alpha};
+use paint::{Canvas, Font, blend, round_coverage2, shadow_alpha};
 pub use present::{DEFAULT_SIZE, Frame, Kind, MAX_SIDE as MAX_FRAME_SIDE, Presenter};
 
 /// Corner radii of a window (Windows 11's 8 pixels): above and below.
@@ -63,7 +71,8 @@ const SHADOW_REACH: i64 = 26;
 const SHADOW_DROP: i64 = 6;
 const SHADOW_ACTIVE: i64 = 80;
 const SHADOW_INACTIVE: i64 = 45;
-/// Without a known screen (host tests of the windows alone).
+/// What shows behind the windows: the whole screen of a session no shell
+/// draws on (shasha's desktop window covers it with the wallpaper).
 pub const DESKTOP_COLOR: u32 = 0x00_3a_6e_a5;
 
 /// The light theme, after Windows 11's: the caption takes the window's
@@ -78,38 +87,6 @@ const TITLE_ACTIVE: u32 = 0x00_1b_1b_1b;
 const TITLE_INACTIVE: u32 = 0x00_8a_8a_8a;
 const BUTTON_HOVER: u32 = 0x00_df_e3_e9;
 const CLOSE_HOVER: u32 = 0x00_c4_2b_1c;
-/// Windows' default accent (blue): the active app's indicator.
-const ACCENT: u32 = 0x00_00_5f_b8;
-const TEXT: u32 = 0x00_1b_1b_1b;
-const TEXT_DIM: u32 = 0x00_5d_5d_5d;
-
-/// The taskbar (TASKBAR rows at the bottom of the screen): translucent
-/// light; the start button and the windows' buttons centred, the clock at
-/// the right.
-const TASKBAR_COLOR: u32 = 0x00_ee_f1_f6;
-const TASKBAR_ALPHA: u32 = 236;
-const TASKBAR_LINE: u32 = 0x00_d7_dc_e3;
-/// A taskbar button (the start button too) and the gap between them.
-const TASK_BUTTON: i64 = 44;
-const TASK_GAP: i64 = 4;
-
-/// The start menu: centred above the taskbar.
-pub const MENU_W: u32 = 600;
-pub const MENU_H: u32 = 640;
-/// The pinned programs' grid.
-const GRID_X: i64 = 32;
-const GRID_Y: i64 = 116;
-const TILE_W: i64 = 89;
-const TILE_H: i64 = 84;
-const GRID_COLUMNS: usize = 6;
-const MENU_COLOR: u32 = 0x00_f2_f4_f8;
-const MENU_BORDER: u32 = 0x00_d2_d6_dd;
-
-/// The start button (where Windows has its logo) and the user's picture:
-/// Gala's fortress (paint::FORTRESS24), in a blue like Windows' logo.
-const LOGO_TOP: u32 = 0x00_2e_9b_f0;
-const LOGO_BOTTOM: u32 = 0x00_00_67_c0;
-
 /// The mouse pointer: '#' outline, '.' fill, ' ' transparent.
 const CURSOR: [&[u8; 12]; 19] = [
     b"#           ",
@@ -141,8 +118,6 @@ pub struct Program {
     /// the boot user's environment variables
     /// (`process::expand_environment`). The first that exists is started.
     pub paths: &'static [&'static str],
-    /// The icon's gradient.
-    pub colors: (u32, u32),
     /// The winget package that installs it (`gala install <id>`); None
     /// for gala's own programs, listed only when present.
     pub package: Option<&'static str>,
@@ -162,49 +137,29 @@ pub const PROGRAMS: &[Program] = &[
     Program {
         name: "Command Prompt",
         paths: &["%SystemRoot%\\System32\\cmd.exe", "C:\\gala\\cmd.exe"],
-        colors: (0x00_4a_4a_4a, 0x00_1e_1e_1e),
         package: None,
     },
     // gala's test window (gui_test), when the image has it.
     Program {
         name: "Hello window",
         paths: &["C:\\gui_test.exe", "C:\\gala\\gui_test.exe"],
-        colors: (0x00_5b_9b_ff, 0x00_2f_5f_d8),
         package: None,
     },
     // gala's wsl.exe (user/wsl) as the "Linux" tile (gala's UI says
     // Linux, never WSL: ARCHITECTURE "The WSL facade"): the default
     // distribution's login shell in a console window (ROADMAP CT).
-    Program {
-        name: "Linux",
-        paths: &["%SystemRoot%\\System32\\wsl.exe"],
-        colors: (0x00_f0_a0_30, 0x00_c0_60_10),
-        package: None,
-    },
+    Program { name: "Linux", paths: &["%SystemRoot%\\System32\\wsl.exe"], package: None },
     // gala's taskmgr.exe (user/taskmgr: ROADMAP TM), where Windows has
-    // its Task Manager; also Ctrl+Shift+Esc and the taskbar's context
-    // menu (`TASK_MANAGER`).
-    Program {
-        name: TASK_MANAGER,
-        paths: &["%SystemRoot%\\System32\\Taskmgr.exe"],
-        colors: (0x00_3b_9a_e1, 0x00_17_5c_b0),
-        package: None,
-    },
+    // its Task Manager; also Ctrl+Shift+Esc (`TASK_MANAGER`).
+    Program { name: TASK_MANAGER, paths: &["%SystemRoot%\\System32\\Taskmgr.exe"], package: None },
     // gala's explorer.exe (user/explorer: ROADMAP EX), where Windows has
-    // it; also Win+E (`FILE_EXPLORER`). The shell itself (the taskbar,
-    // the start menu) stays the desktop's.
-    Program {
-        name: FILE_EXPLORER,
-        paths: &["%SystemRoot%\\explorer.exe"],
-        colors: (0x00_f8_c8_4a, 0x00_e0_9b_1a),
-        package: None,
-    },
+    // it (Win+E is shasha's hot key).
+    Program { name: "File Explorer", paths: &["%SystemRoot%\\explorer.exe"], package: None },
     // The Office Deployment Tool's setup.exe (machine scope): Click-to-Run
     // puts Word under root\Office16 (ROADMAP OF).
     Program {
         name: "Microsoft Office",
         paths: &["%ProgramFiles%\\Microsoft Office\\root\\Office16\\WINWORD.EXE"],
-        colors: (0x00_e8_6a_3a, 0x00_b7_47_2a),
         package: Some("Microsoft.Office"),
     },
     // FileZilla's NSIS installer's default directory, and the portable
@@ -216,14 +171,12 @@ pub const PROGRAMS: &[Program] = &[
             "%ProgramFiles%\\FileZilla FTP Client\\filezilla.exe",
             "C:\\filezilla\\filezilla.exe",
         ],
-        colors: (0x00_e0_4f_3f, 0x00_a3_2a_20),
         package: Some("TimKosse.FileZilla.Client"),
     },
     // The .NET SDK's bundle (burn, machine scope).
     Program {
         name: ".NET",
         paths: &["%ProgramFiles%\\dotnet\\dotnet.exe"],
-        colors: (0x00_8a_5c_f5, 0x00_51_2b_d4),
         package: Some("Microsoft.DotNet.SDK.9"),
     },
     // python.org's installer (burn): DefaultJustForMeTargetDir for the
@@ -234,7 +187,6 @@ pub const PROGRAMS: &[Program] = &[
             "%LOCALAPPDATA%\\Programs\\Python\\Python313\\python.exe",
             "%ProgramFiles%\\Python313\\python.exe",
         ],
-        colors: (0x00_3c_7d_c0, 0x00_f5_c5_18),
         package: Some("Python.Python.3.13"),
     },
     // Chromium's mini_installer: per user under %LOCALAPPDATA%, with
@@ -245,7 +197,6 @@ pub const PROGRAMS: &[Program] = &[
             "%LOCALAPPDATA%\\Chromium\\Application\\chrome.exe",
             "%ProgramFiles%\\Chromium\\Application\\chrome.exe",
         ],
-        colors: (0x00_5f_a8_f5, 0x00_1a_5f_c8),
         package: Some("Hibbiki.Chromium"),
     },
     // Git for Windows' Inno Setup installer: {autopf}\Git, which is
@@ -256,7 +207,6 @@ pub const PROGRAMS: &[Program] = &[
             "%LOCALAPPDATA%\\Programs\\Git\\git-bash.exe",
             "%ProgramFiles%\\Git\\git-bash.exe",
         ],
-        colors: (0x00_f0_6a_3f, 0x00_c8_3a_1e),
         package: Some("Git.Git"),
     },
     // 7-Zip's installer (machine scope; the manifest's
@@ -264,13 +214,11 @@ pub const PROGRAMS: &[Program] = &[
     Program {
         name: "7-Zip",
         paths: &["%ProgramFiles%\\7-Zip\\7zFM.exe"],
-        colors: (0x00_3a_3a_3a, 0x00_10_10_10),
         package: Some("7zip.7zip"),
     },
 ];
 
-/// The Task Manager's entry in PROGRAMS (Ctrl+Shift+Esc and the
-/// taskbar's context menu start it as the start menu's tile does).
+/// The Task Manager's entry in PROGRAMS (Ctrl+Shift+Esc starts it).
 pub const TASK_MANAGER: &str = "Task Manager";
 
 /// Its index in PROGRAMS.
@@ -278,43 +226,9 @@ fn task_manager() -> Option<usize> {
     PROGRAMS.iter().position(|p| p.name == TASK_MANAGER)
 }
 
-/// File Explorer's entry in PROGRAMS (Win+E starts it as the tile does).
-pub const FILE_EXPLORER: &str = "File Explorer";
-
-fn file_explorer() -> Option<usize> {
-    PROGRAMS.iter().position(|p| p.name == FILE_EXPLORER)
-}
-
-/// The taskbar's context menu: its width and its one item's height.
-const BAR_MENU_W: i64 = 220;
-const BAR_MENU_ITEM: i64 = 36;
-
-/// A tile whose install went quiet is drawn in this grey instead of
-/// the program's own colours (`pkg::Progress::Lost`).
-const QUIET_TOP: u32 = 0x00_9a_a0_a6;
-const QUIET_BOTTOM: u32 = 0x00_6e_74_7a;
-
-/// How many tiles the start menu's grid holds (four rows).
-pub const MAX_TILES: usize = GRID_COLUMNS * 4;
-
-/// What the start menu asks to be started (`take_launch`): a program
-/// of PROGRAMS, or something for a Linux distribution.
-#[allow(clippy::large_enum_variant)] // one at a time, handed on at once
-#[derive(Clone, Copy)]
-pub enum Launch {
-    Program(&'static Program),
-    Linux(linux::Request),
-}
-
-impl Launch {
-    /// The program, for a program's launch.
-    pub fn program(self) -> Option<&'static Program> {
-        match self {
-            Launch::Program(p) => Some(p),
-            Launch::Linux(_) => None,
-        }
-    }
-}
+/// How many entries the program list holds (`list_programs`): more
+/// than PROGRAMS has.
+pub const MAX_TILES: usize = 24;
 
 /// Whose install an installer is running (`Desktop::installers`): a
 /// catalog package's tile, or a Linux distribution's.
@@ -381,14 +295,6 @@ impl Quiet {
         }
     }
 }
-
-/// The "Linux distributions" section's rows: its heading, then a row of
-/// tiles (TILE_H) when expanded.
-const LINUX_HEADING: i64 = 28;
-/// The pinned grid's rows while the section shows (it sits below them).
-const PINNED_ROWS_WITH_LINUX: usize = 2;
-/// A suggestion's dismiss button (top right of its tile).
-const DISMISS: i64 = 18;
 
 /// A start menu tile: a program (an index into its table) and whether it
 /// is installed (one of its paths exists).
@@ -497,44 +403,10 @@ fn note_buttons(pressed: u8, released: u8, x: i64, y: i64, to: core::fmt::Argume
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Hit {
     Nothing,
-    Start,
-    Taskbar,
-    Task(u32),
-    Menu,
-    MenuItem(usize),
-    /// The "Linux distributions" heading (collapses and expands).
-    LinuxHeading,
-    /// Its "Hide" button.
-    LinuxHide,
-    /// A distribution's tile, and a suggestion's dismiss button.
-    LinuxEntry(usize),
-    LinuxDismiss(usize),
-    /// An item of the start menu's context menu.
-    ContextItem(usize),
-    /// The taskbar's context menu's item ("Task Manager"), and the rest
-    /// of that menu.
-    BarMenuItem,
-    BarMenu,
     Caption(u32),
     Button(u32, CaptionButton),
     Client(u32),
     Frame(u32),
-}
-
-impl Hit {
-    /// A part of the open start menu.
-    fn in_menu(self) -> bool {
-        matches!(
-            self,
-            Hit::Menu
-                | Hit::MenuItem(_)
-                | Hit::LinuxHeading
-                | Hit::LinuxHide
-                | Hit::LinuxEntry(_)
-                | Hit::LinuxDismiss(_)
-                | Hit::ContextItem(_)
-        )
-    }
 }
 
 /// The compositor's own per-window data (`Window::chrome`): its caption
@@ -667,11 +539,11 @@ impl Window<Chrome> {
     }
 }
 
-/// A session's desktop as shasha shows it: the window state
-/// (`nt::winstate`: windows, Z order, focus, capture, client pixels,
-/// input for programs) and, on top of it, the compositor's own: the
-/// presenter, the wallpaper, the taskbar, the start menu, the pointer and
-/// what the mouse and keys are doing.
+/// A session's desktop: the window state (`nt::winstate`: windows, Z
+/// order, focus, capture, client pixels, input for programs) and, on top
+/// of it, the compositor's own: the presenter, the pointer, what the
+/// mouse and keys are doing, the app bars and the installs shasha's start
+/// menu asked for.
 pub struct Desktop {
     /// The window state (laid out at `s.screen` once live; the desktop
     /// keeps its windows and their pixels from then on, whether or not a
@@ -682,17 +554,8 @@ pub struct Desktop {
     /// Why nothing can ever show it, on a machine where nothing shows
     /// desktops (`bare`: the server profile, no screen and no
     /// `presenter=`): then it is the window state alone, as the server
-    /// kernel's (no wallpaper, captions, taskbar or input), shown by none.
+    /// kernel's (no captions or input), shown by none.
     bare: Option<&'static str>,
-    wallpaper: Option<Wallpaper>,
-    /// The taskbar's pixels (screen width x TASKBAR, ARGB).
-    taskbar: Option<Canvas>,
-    taskbar_dirty: bool,
-    /// The start menu's pixels while it is open (ARGB) and the tiles it
-    /// lists (PROGRAMS indices, installed or not).
-    menu: Option<Canvas>,
-    menu_dirty: bool,
-    programs: Vec<Entry>,
     /// The mouse pointer's hot spot and the buttons held (bit 0 left,
     /// bit 1 right).
     pointer: (i64, i64),
@@ -712,9 +575,8 @@ pub struct Desktop {
     /// A resize by a program's own border (sent as GALA_WM_PLACE when the
     /// button goes up).
     resize: Option<Resize>,
-    /// The minute the clock shows.
-    minute: u64,
-    /// A program the start menu asked to start (index into PROGRAMS).
+    /// A program a system key asked to start (Ctrl+Shift+Esc: Task
+    /// Manager; an index into PROGRAMS).
     launch: Option<usize>,
     /// The installs a tile asked for (`gala install <id>`, no window),
     /// each a PROGRAMS index and where its install is.
@@ -740,31 +602,16 @@ pub struct Desktop {
     /// `tell_linux`): an install began, moved on, ended or went quiet,
     /// or the tiles listed changed.
     linux_changed: CatalogChange,
-    /// What the "Linux distributions" section lists (registered
-    /// distributions and the user's choices), its tiles, the installs
-    /// under way, the context menu open in the start menu, what it asked
-    /// for, and whether the choices changed since they were saved.
-    linux: linux::Listing,
+    /// The "Linux distributions" section's tiles as last listed (to tell
+    /// shasha's window when they change) and the installs under way.
     linux_tiles: Vec<linux::Distro>,
     progress: Vec<(linux::Name, linux::Progress)>,
-    context: Option<linux::Context>,
-    linux_launch: Option<linux::Request>,
-    prefs_changed: bool,
-    /// What was typed in the start menu (ASCII, filters the programs).
-    search: [u8; 32],
-    search_len: usize,
-    /// The programs started from the menu, most recent first (PROGRAMS
-    /// indices; usize::MAX: none).
-    recent: [usize; 4],
     /// Alt is held (WM_SYSKEYDOWN); Ctrl and Shift (Ctrl+Shift+Esc).
     alt: bool,
     ctrl: bool,
     shift: bool,
-    /// The taskbar's context menu is open, at this x (a right click on
-    /// the taskbar's free space): "Task Manager", drawn as the card.
-    bar_menu: Option<i64>,
     /// The Windows key is held, and whether a key went with it (then its
-    /// release doesn't open the start menu).
+    /// release is no hot key).
     win_key: bool,
     win_used: bool,
     /// The key whose down a hot key took and that is still held: its
@@ -773,9 +620,6 @@ pub struct Desktop {
     /// The app bars (SHAppBarMessage): the strips they take from the
     /// work area (`s.reserved`).
     appbars: appbar::AppBars,
-    /// The card above the taskbar (its context menu) and where it is.
-    card: Option<(Rect, Canvas)>,
-    card_dirty: bool,
     /// What `announce` told (the unit tests read it).
     #[cfg(test)]
     told: Vec<(Vec<u16>, Vec<u16>)>,
@@ -787,8 +631,6 @@ impl Default for Desktop {
     }
 }
 
-const EMPTY_PREFS: linux::Prefs = linux::Prefs { collapsed: false, hidden: false, dismissed: 0 };
-
 /// What the compositor draws outside a window: its soft shadow.
 const SHADOW: Shadow = Shadow { reach: SHADOW_REACH, drop: SHADOW_DROP };
 
@@ -798,12 +640,6 @@ impl Desktop {
             s: State::new(SHADOW),
             presenter: Presenter::None,
             bare: None,
-            wallpaper: None,
-            taskbar: None,
-            taskbar_dirty: true,
-            menu: None,
-            menu_dirty: false,
-            programs: Vec::new(),
             pointer: (0, 0),
             buttons: 0,
             swallowed: 0,
@@ -812,9 +648,7 @@ impl Desktop {
             pressed: Hit::Nothing,
             drag: None,
             resize: None,
-            minute: 0,
             launch: None,
-            linux: linux::Listing { installed: Vec::new(), prefs: EMPTY_PREFS },
             linux_tiles: Vec::new(),
             installs: Vec::new(),
             installers: Vec::new(),
@@ -822,43 +656,34 @@ impl Desktop {
             catalog_changed: CatalogChange::None,
             linux_changed: CatalogChange::None,
             progress: Vec::new(),
-            context: None,
-            linux_launch: None,
-            prefs_changed: false,
-            search: [0; 32],
-            search_len: 0,
-            recent: [usize::MAX; 4],
             alt: false,
             ctrl: false,
             shift: false,
-            bar_menu: None,
             win_key: false,
             win_used: false,
             held_hot: None,
             appbars: appbar::AppBars::new(),
-            card: None,
-            card_dirty: false,
             #[cfg(test)]
             told: Vec::new(),
         }
     }
 
-    /// The screen is w x h: lays out the wallpaper and the taskbar and
-    /// puts the pointer in the middle.
+    /// The screen is w x h: reserves the taskbar's strip and puts the
+    /// pointer in the middle.
     pub fn set_screen(&mut self, w: u32, h: u32) -> Result<(), NtStatus> {
         let (w, h) = (i64::from(w), i64::from(h));
-        let wallpaper = Wallpaper::new(w, h, PICTURE.lock().as_ref());
-        self.wallpaper = Some(wallpaper.ok_or(NtStatus::NO_MEMORY)?);
         self.s.screen = (w, h);
         self.pointer = (w / 2, h / 2);
-        self.taskbar_dirty = true;
         self.place_taskbar();
         self.refresh();
         Ok(())
     }
 
     /// The taskbar's strip, TASKBAR rows at the bottom of the screen,
-    /// reserved as an app bar (the work area is what the bars leave).
+    /// reserved as an app bar (the work area is what the bars leave):
+    /// the shell's bar's once it took it (ABM_GALA_TASKBAR), else window
+    /// 0's, which nothing draws, so that maximized windows leave room for
+    /// the taskbar a shell will put there.
     fn place_taskbar(&mut self) {
         let (w, h) = self.s.screen;
         let tb = i64::from(TASKBAR);
@@ -911,18 +736,11 @@ impl Desktop {
     /// The console leaves this desktop (a console switch): buttons still
     /// held go up where the pointer is (a drag or resize ends, the window
     /// under it gets its WM_LBUTTONUP), the Alt and Windows keys count as
-    /// released, an open start menu closes. The areas to redraw.
+    /// released. The areas to redraw.
     pub fn leave_console(&mut self) -> Vec<Rect> {
-        let mut damage = if self.buttons != 0 { self.pointer(0, 0, 0) } else { Vec::new() };
+        let damage = if self.buttons != 0 { self.pointer(0, 0, 0) } else { Vec::new() };
         (self.alt, self.win_key, self.win_used) = (false, false, false);
         self.held_hot = None;
-        if self.menu.is_some() {
-            self.close_menu();
-            self.refresh();
-            for r in core::mem::take(&mut self.s.damage) {
-                let _ = damage.try_push(r);
-            }
-        }
         damage
     }
 
@@ -1035,7 +853,7 @@ impl Desktop {
         Ok(r)
     }
 
-    /// A window's icon, shown on its taskbar button and caption.
+    /// A window's icon, shown on its caption.
     pub fn set_icon(
         &mut self,
         id: u32,
@@ -1112,14 +930,12 @@ impl Desktop {
                     #[cfg(not(test))]
                     crate::info!(
                         "desktop: the taskbar's bar is window {hwnd:#x} of pid {owner} (the \
-                         shell's) at {},{} {}x{}: the desktop no longer draws it",
+                         shell's) at {},{} {}x{}",
                         r.x,
                         r.y,
                         r.w,
                         r.h
                     );
-                    self.close_menu();
-                    self.taskbar_dirty = true;
                     self.s.add_damage(r);
                     self.refresh();
                     (true, e, r)
@@ -1214,7 +1030,6 @@ impl Desktop {
         let work = self.s.work();
         #[cfg(not(test))]
         self.log_work(work);
-        self.card_dirty = true;
         for id in self.s.visible_windows() {
             if self.s.window(id).is_some_and(|w| w.maximized && !w.minimized) {
                 #[cfg(not(test))]
@@ -1280,18 +1095,14 @@ impl Desktop {
     }
 
     /// Does `action` to window `id` (`State::act`: the one path for the
-    /// taskbar, the caption buttons, the Snap keys and
-    /// GalaDesktopAction), then draws what changed.
+    /// caption buttons, the Snap keys and GalaDesktopAction), then draws
+    /// what changed.
     pub fn act(&mut self, id: u32, action: Action) -> Result<(), NtStatus> {
         self.s.act(id, action)?;
         self.refresh();
         Ok(())
     }
 
-    /// A key went down or up: virtual key `vk`, `scan` code, `extended`
-    /// (E0-prefixed). The shell's keys (the Windows key, Snap, the start
-    /// menu's search) are the shell's; the others go to the active window
-    /// (`State::key_to_active`).
     /// The hot key (modifiers, key, repeat) key `vk` going `down` (or up)
     /// would be, if any (`window::Windows::hot_key` says whether a process
     /// holds it): a key other than a modifier going down with the
@@ -1323,8 +1134,8 @@ impl Desktop {
     }
 
     /// A hot key took key `vk`'s down (or the Windows key's release): the
-    /// Windows key's release then opens no start menu, and its repeats
-    /// are known as such until it goes up.
+    /// Windows key's release is then no hot key of its own, and the key's
+    /// repeats are known as such until it goes up.
     pub fn hot_key_taken(&mut self, vk: u8, down: bool) {
         if self.win_key {
             self.win_used = true;
@@ -1334,6 +1145,10 @@ impl Desktop {
         }
     }
 
+    /// A key went down or up: virtual key `vk`, `scan` code, `extended`
+    /// (E0-prefixed). The system's keys (Ctrl+Shift+Esc, the Windows key,
+    /// Win+arrows) are the desktop's; the others go to the active window
+    /// (`State::key_to_active`).
     pub fn key(&mut self, vk: u8, scan: u8, extended: bool, down: bool) {
         if !down && self.held_hot == Some(vk) {
             self.held_hot = None;
@@ -1352,41 +1167,25 @@ impl Desktop {
         // (`window::system_key`).
         if vk == 0x1b && self.ctrl && self.shift {
             if down {
-                self.close_menu();
-                self.bar_menu = None;
-                self.card_dirty = true;
                 self.launch = task_manager();
-                self.refresh();
             }
             return;
         }
-        // The Windows key, pressed and released alone, opens and closes
-        // the start menu; with the arrows it snaps the active window.
+        // The Windows key is the system's: no program sees it. Alone, its
+        // release is a hot key (`hot_candidate`: shasha's start menu);
+        // with the arrows it snaps the active window.
         if vk == 0x5b || vk == 0x5c {
             if down {
                 (self.win_key, self.win_used) = (true, false);
-            } else if core::mem::take(&mut self.win_key) && !self.win_used {
-                if self.menu.is_some() {
-                    self.close_menu();
-                } else {
-                    self.open_menu();
-                }
-                self.refresh();
+            } else {
+                self.win_key = false;
             }
             return;
         }
-        // Win+E: File Explorer (no program sees the E).
-        if self.win_key && vk == b'E' {
+        if self.win_key && down {
             self.win_used = true;
-            if down {
-                self.close_menu();
-                self.launch = file_explorer();
-                self.refresh();
-            }
-            return;
         }
         if self.win_key && (0x25..=0x28).contains(&vk) {
-            self.win_used = true;
             let to = match vk {
                 0x25 => SnapTo::Left,
                 0x26 => SnapTo::Up,
@@ -1395,29 +1194,6 @@ impl Desktop {
             };
             if down && let Some(id) = self.s.active {
                 let _ = self.act(id, Action::Snap(to));
-            }
-            return;
-        }
-        // With the menu open, typing searches its programs: Enter starts
-        // the first, Escape closes it, Backspace deletes.
-        if self.menu.is_some() {
-            if down {
-                match vk {
-                    0x1b => self.close_menu(),
-                    0x0d => self.tile_click(0),
-                    0x08 => self.search_len = self.search_len.saturating_sub(1),
-                    b'A'..=b'Z' | b'0'..=b'9' | b' ' if self.search_len < self.search.len() => {
-                        self.search[self.search_len] = vk.to_ascii_lowercase();
-                        self.search_len += 1;
-                    }
-                    0xbd if self.search_len < self.search.len() => {
-                        self.search[self.search_len] = b'-';
-                        self.search_len += 1;
-                    }
-                    _ => {}
-                }
-                self.menu_dirty = true;
-                self.refresh();
             }
             return;
         }
@@ -1448,173 +1224,30 @@ impl Desktop {
         self.s.take_wakes()
     }
 
-    // ---- The shell's layout --------------------------------------------
-
-    /// Whether the desktop draws the taskbar and answers clicks on it:
-    /// not once the session's shell took its bar (ARCHITECTURE "The
-    /// user-mode shell"), whose window is then there.
-    fn own_taskbar(&self) -> bool {
-        self.appbars.taskbar_window().is_none_or(|w| w == appbar::TASKBAR_WINDOW)
-    }
+    // ---- The taskbar's strip -------------------------------------------
 
     /// The shell's taskbar is gone (its bar removed, its process ended):
-    /// the desktop's own is placed again, so a session never stays
-    /// without one.
+    /// its strip is reserved for window 0 again (`place_taskbar`), so the
+    /// work area keeps room for the next shell's taskbar. Nothing is drawn
+    /// there: without a shell the screen is the desktop's colour and the
+    /// windows.
     fn taskbar_back(&mut self) {
-        if self.appbars.taskbar_window().is_some() || self.wallpaper.is_none() {
+        if self.appbars.taskbar_window().is_some() || self.s.screen.0 == 0 || self.bare.is_some() {
             return;
         }
         #[cfg(not(test))]
-        crate::info!("desktop: the taskbar's bar is gone: the desktop's taskbar is back");
-        self.taskbar_dirty = true;
+        crate::info!(
+            "desktop: the taskbar's bar is gone: no shell draws a taskbar; its strip stays reserved"
+        );
         self.place_taskbar();
-    }
-
-    /// The taskbar: the screen's bottom rows, the whole width (the app
-    /// bars on the sides end above it).
-    fn taskbar_rect(&self) -> Rect {
-        if let Some((_, r)) = self.appbars.taskbar() {
-            return r;
-        }
-        let h = i64::from(TASKBAR);
-        Rect { x: 0, y: self.s.screen.1 - h, w: self.s.screen.0, h }
-    }
-
-    /// The centred group of taskbar buttons: the start button and one per
-    /// window the programs show; its left edge.
-    fn group_x(&self, windows: usize) -> i64 {
-        let n = 1 + windows as i64;
-        (self.s.screen.0 - (n * TASK_BUTTON + (n - 1) * TASK_GAP)) / 2
-    }
-
-    /// The start button (the first of the centred group).
-    fn start_rect(&self) -> Rect {
-        let top = self.s.screen.1 - i64::from(TASKBAR) + 4;
-        Rect { x: self.group_x(self.s.visible_windows().len()), y: top, w: TASK_BUTTON, h: 40 }
-    }
-
-    /// The taskbar's window buttons (in the order the windows were made)
-    /// and their rectangles, after the start button.
-    fn tasks(&self) -> Vec<(u32, Rect)> {
-        let ids = self.s.visible_windows();
-        let x0 = self.group_x(ids.len()) + TASK_BUTTON + TASK_GAP;
-        let top = self.s.screen.1 - i64::from(TASKBAR) + 4;
-        let mut out = Vec::new();
-        for (i, id) in ids.into_iter().enumerate() {
-            let _ = out.try_push((
-                id,
-                Rect { x: x0 + i as i64 * (TASK_BUTTON + TASK_GAP), y: top, w: TASK_BUTTON, h: 40 },
-            ));
-        }
-        out
-    }
-
-    /// Where a card above the taskbar goes: centred over `over`, kept on
-    /// the screen.
-    fn card_rect(&self, w: i64, h: i64, over: Rect) -> Rect {
-        let bottom = self.s.screen.1 - i64::from(TASKBAR) - 12;
-        let right = self.taskbar_rect().w;
-        let x = (over.x + over.w / 2 - w / 2).clamp(8, (right - w - 8).max(8));
-        Rect { x, y: bottom - h, w, h }
-    }
-
-    fn menu_rect(&self) -> Rect {
-        let w = i64::from(MENU_W).min(self.s.screen.0 - 24);
-        let h = i64::from(MENU_H).min(self.s.screen.1 - i64::from(TASKBAR) - 24);
-        Rect {
-            x: (self.s.screen.0 - w) / 2,
-            y: self.s.screen.1 - i64::from(TASKBAR) - 12 - h,
-            w,
-            h,
-        }
-    }
-
-    fn menu_bounds(&self) -> Rect {
-        let r = self.menu_rect();
-        Rect {
-            x: r.x - SHADOW_REACH,
-            y: r.y - SHADOW_REACH,
-            w: r.w + 2 * SHADOW_REACH,
-            h: r.h + 2 * SHADOW_REACH + SHADOW_DROP,
-        }
-    }
-
-    /// A pinned program's tile in the grid.
-    fn menu_item_rect(&self, i: usize) -> Rect {
-        let m = self.menu_rect();
-        let (col, row) = ((i % GRID_COLUMNS) as i64, (i / GRID_COLUMNS) as i64);
-        Rect {
-            x: m.x + GRID_X + col * TILE_W,
-            y: m.y + GRID_Y + row * TILE_H,
-            w: TILE_W - 4,
-            h: TILE_H - 4,
-        }
-    }
-
-    /// Whether the "Linux distributions" section shows (not hidden; not
-    /// while searching: the search lists programs only).
-    fn linux_shown(&self) -> bool {
-        !self.linux.prefs.hidden && self.search_len == 0
-    }
-
-    /// The pinned grid's rows: as many as its tiles take, at most two
-    /// while the Linux section shows below them, else as many as fit.
-    fn pinned_rows(&self) -> usize {
-        let n = self.listed().len().max(1);
-        let rows = n.div_ceil(GRID_COLUMNS);
-        if self.linux_shown() { rows.min(PINNED_ROWS_WITH_LINUX) } else { rows }
-    }
-
-    /// The Linux section's heading (the whole row: a click on its left
-    /// collapses or expands, "Hide" at its right).
-    fn linux_heading_rect(&self) -> Rect {
-        let m = self.menu_rect();
-        let y = m.y + GRID_Y + self.pinned_rows() as i64 * TILE_H + 4;
-        Rect { x: m.x + GRID_X, y, w: m.w - 2 * GRID_X, h: LINUX_HEADING - 4 }
-    }
-
-    /// Its "Hide" button, at the heading's right.
-    fn linux_hide_rect(&self) -> Rect {
-        let h = self.linux_heading_rect();
-        Rect { x: h.x + h.w - 56, y: h.y, w: 56, h: h.h }
-    }
-
-    /// Distribution tile `k` (one row below the heading).
-    fn linux_tile_rect(&self, k: usize) -> Rect {
-        let h = self.linux_heading_rect();
-        Rect { x: h.x + k as i64 * TILE_W, y: h.y + LINUX_HEADING, w: TILE_W - 4, h: TILE_H - 4 }
-    }
-
-    /// A suggestion's dismiss button on tile `k`.
-    fn linux_dismiss_rect(&self, k: usize) -> Rect {
-        let r = self.linux_tile_rect(k);
-        Rect { x: r.x + r.w - DISMISS, y: r.y, w: DISMISS, h: DISMISS }
-    }
-
-    /// The taskbar's context menu's rectangle, when it is open: above
-    /// the taskbar at the click.
-    fn bar_menu_rect(&self) -> Option<Rect> {
-        let x = self.bar_menu?;
-        let at = Rect { x, y: self.s.screen.1 - i64::from(TASKBAR), w: 0, h: 0 };
-        Some(self.card_rect(BAR_MENU_W, BAR_MENU_ITEM + 8, at))
-    }
-
-    /// The open context menu's rectangle on the screen.
-    fn context_rect(&self) -> Option<Rect> {
-        let c = self.context.as_ref()?;
-        let m = self.menu_rect();
-        Some(Rect { x: m.x + c.x, y: m.y + c.y, w: linux::CONTEXT_W, h: c.height() })
     }
 
     fn cursor_rect(&self) -> Rect {
         Rect { x: self.pointer.0, y: self.pointer.1, w: 14, h: CURSOR.len() as i64 + 2 }
     }
 
-    pub fn menu_open(&self) -> bool {
-        self.menu.is_some()
-    }
-
-    /// The tiles the start menu lists (`list_programs` of PROGRAMS).
+    /// The programs on this machine now (`list_programs` of PROGRAMS):
+    /// an install whose program is there is over.
     pub fn set_programs(&mut self, programs: &[Entry]) {
         let was = self.installs.len();
         // Which of them the listing ends, before it ends them: a
@@ -1629,13 +1262,7 @@ impl Desktop {
         }
         self.installs.retain(|(p, _)| !listed(*p));
         if self.installs.len() != was {
-            self.menu_dirty = true;
             self.catalog_change(CatalogChange::State);
-        }
-        if self.programs.as_slice() != programs {
-            self.programs.clear();
-            let _ = self.programs.try_extend_from_slice(programs);
-            self.menu_dirty = true;
         }
         // This listing is what tells an install that worked, since it
         // comes before the install's own last word (`install_progress`).
@@ -1650,61 +1277,6 @@ impl Desktop {
     fn hit(&self, x: i64, y: i64) -> Hit {
         if self.s.screen.0 == 0 {
             return Hit::Nothing;
-        }
-        if let Some(r) = self.bar_menu_rect()
-            && r.contains(x, y)
-        {
-            let item = Rect { x: r.x + 4, y: r.y + 4, w: r.w - 8, h: BAR_MENU_ITEM };
-            return if item.contains(x, y) { Hit::BarMenuItem } else { Hit::BarMenu };
-        }
-        if self.menu.is_some()
-            && let Some(r) = self.context_rect()
-            && r.contains(x, y)
-        {
-            let i = (y - r.y - 4).div_euclid(linux::ITEM_H);
-            let count = self.context.map_or(0, |c| c.count()) as i64;
-            return if (0..count).contains(&i) { Hit::ContextItem(i as usize) } else { Hit::Menu };
-        }
-        if self.menu.is_some() && self.menu_rect().contains(x, y) {
-            let shown = self.pinned_rows() * GRID_COLUMNS;
-            for (k, _) in self.listed().iter().enumerate().take(shown) {
-                if self.menu_item_rect(k).contains(x, y) {
-                    return Hit::MenuItem(k);
-                }
-            }
-            if self.linux_shown() {
-                if self.linux_hide_rect().contains(x, y) {
-                    return Hit::LinuxHide;
-                }
-                if self.linux_heading_rect().contains(x, y) {
-                    return Hit::LinuxHeading;
-                }
-                if !self.linux.prefs.collapsed {
-                    for (k, d) in self.linux_tiles.iter().enumerate() {
-                        if !d.installed
-                            && d.suggestion.is_some()
-                            && self.linux_dismiss_rect(k).contains(x, y)
-                        {
-                            return Hit::LinuxDismiss(k);
-                        }
-                        if self.linux_tile_rect(k).contains(x, y) {
-                            return Hit::LinuxEntry(k);
-                        }
-                    }
-                }
-            }
-            return Hit::Menu;
-        }
-        if self.own_taskbar() && self.taskbar_rect().contains(x, y) {
-            if self.start_rect().contains(x, y) {
-                return Hit::Start;
-            }
-            for (id, r) in self.tasks() {
-                if r.contains(x, y) {
-                    return Hit::Task(id);
-                }
-            }
-            return Hit::Taskbar;
         }
         for w in self.s.windows.iter().rev().filter(|w| w.shown()) {
             let (lx, ly) = (x - i64::from(w.x), y - i64::from(w.y));
@@ -1756,8 +1328,7 @@ impl Desktop {
             self.s.add_damage(c);
         }
         // A press outside the windows of a popup grab's owner ends the
-        // grab (the owner dismisses its popups) and goes nowhere else, as
-        // a click outside the start menu closes it.
+        // grab (the owner dismisses its popups) and goes nowhere else.
         let up = self.swallowed & !buttons;
         self.swallowed &= !up;
         self.buttons &= !up;
@@ -1820,22 +1391,6 @@ impl Desktop {
         self.buttons = buttons;
         note_buttons(pressed, released, x, y, format_args!("{hit:?}"));
         let keys = u64::from(buttons & 1) | (u64::from(buttons & 2));
-        // The taskbar's context menu takes the next press: its item starts
-        // Task Manager, anywhere else only closes it.
-        if pressed != 0 && self.bar_menu.is_some() {
-            if hit == Hit::BarMenuItem && pressed & 1 != 0 {
-                self.launch = task_manager();
-            }
-            self.bar_menu = None;
-            self.card_dirty = true;
-            self.swallowed |= pressed;
-            self.refresh();
-            return core::mem::take(&mut self.s.damage);
-        }
-        if released & 2 != 0 && hit == Hit::Taskbar && self.menu.is_none() {
-            self.bar_menu = Some(x);
-            self.card_dirty = true;
-        }
         // Moves go to the window under the pointer, or to the one a button
         // went down in while it is held (capture).
         let target = match (self.pressed, hit) {
@@ -1860,9 +1415,6 @@ impl Desktop {
         }
         if released & 1 != 0 {
             self.left_up(hit, x, y, keys);
-        }
-        if released & 2 != 0 && self.menu.is_some() && hit.in_menu() {
-            self.right_click(hit, x, y);
         }
         if pressed & 2 != 0
             && let Hit::Client(id) = hit
@@ -1902,65 +1454,15 @@ impl Desktop {
         core::mem::take(&mut self.s.damage)
     }
 
+    /// What the pointer is over now (a caption button lights up:
+    /// `refresh`).
     fn set_hover(&mut self, hit: Hit) {
-        if hit == self.hover {
-            return;
-        }
-        let old = self.hover;
         self.hover = hit;
-        for h in [old, hit] {
-            match h {
-                Hit::Start | Hit::Task(_) | Hit::Taskbar => self.taskbar_dirty = true,
-                Hit::BarMenuItem | Hit::BarMenu => self.card_dirty = true,
-                Hit::MenuItem(_)
-                | Hit::Menu
-                | Hit::LinuxHeading
-                | Hit::LinuxHide
-                | Hit::LinuxEntry(_)
-                | Hit::LinuxDismiss(_)
-                | Hit::ContextItem(_) => self.menu_dirty = true,
-                _ => {}
-            }
-        }
     }
 
     fn left_down(&mut self, hit: Hit, x: i64, y: i64, keys: u64) {
         self.pressed = hit;
-        // A click outside the open menu closes it and does nothing else.
-        if self.menu.is_some() && !hit.in_menu() && hit != Hit::Start {
-            self.close_menu();
-            self.pressed = Hit::Nothing;
-            return;
-        }
-        // A click beside the open context menu closes it (and does nothing
-        // else).
-        if self.context.is_some() && !matches!(hit, Hit::ContextItem(_)) {
-            self.context = None;
-            self.menu_dirty = true;
-            self.pressed = Hit::Nothing;
-            return;
-        }
         match hit {
-            Hit::Start => {
-                if self.menu.is_some() {
-                    self.close_menu();
-                } else {
-                    self.open_menu();
-                }
-                self.taskbar_dirty = true;
-            }
-            Hit::Task(id) => {
-                // A click minimizes the active window on top, else
-                // activates (restores) it.
-                let minimized = self.s.window(id).is_some_and(|w| w.minimized);
-                let top = self.s.windows.iter().rev().find(|w| w.shown()).map(|w| w.id);
-                let action = if !minimized && self.s.active == Some(id) && top == Some(id) {
-                    Action::Minimize
-                } else {
-                    Action::Activate
-                };
-                let _ = self.act(id, action);
-            }
             Hit::Caption(id) => {
                 self.s.raise(id);
                 self.s.activate_by_press(id);
@@ -1979,14 +1481,7 @@ impl Desktop {
                 self.s.note_button(id, WM_LBUTTONDOWN, x, y, false);
                 self.s.send(id, WM_LBUTTONDOWN, keys, lp);
             }
-            Hit::Menu
-            | Hit::MenuItem(_)
-            | Hit::LinuxHeading
-            | Hit::LinuxHide
-            | Hit::LinuxEntry(_)
-            | Hit::LinuxDismiss(_)
-            | Hit::ContextItem(_) => self.menu_dirty = true,
-            Hit::Nothing | Hit::Taskbar | Hit::BarMenuItem | Hit::BarMenu => {}
+            Hit::Nothing => {}
         }
     }
 
@@ -2185,154 +1680,19 @@ impl Desktop {
             {
                 let _ = self.act(a, Action::Minimize);
             }
-            (Hit::MenuItem(a), Hit::MenuItem(b)) if a == b => self.tile_click(a),
-            (Hit::LinuxHeading, Hit::LinuxHeading) => {
-                self.linux.prefs.collapsed = !self.linux.prefs.collapsed;
-                self.prefs_changed = true;
-                self.menu_dirty = true;
-            }
-            (Hit::LinuxHide, Hit::LinuxHide) => {
-                self.linux.prefs.hidden = true;
-                self.prefs_changed = true;
-                self.menu_dirty = true;
-            }
-            (Hit::LinuxDismiss(a), Hit::LinuxDismiss(b)) if a == b => self.dismiss(a),
-            (Hit::LinuxEntry(a), Hit::LinuxEntry(b)) if a == b => self.linux_click(a),
-            (Hit::ContextItem(a), Hit::ContextItem(b)) if a == b => self.context_item(a),
             (Hit::Client(id), _) => {
                 let lp = self.s.client_lparam(id, x, y);
                 self.s.note_button(id, WM_LBUTTONUP, x, y, false);
                 self.s.send(id, WM_LBUTTONUP, keys, lp);
             }
-            (h, _) if h.in_menu() => self.menu_dirty = true,
             _ => {}
         }
-    }
-
-    /// A right click (its release) at `hit`: an installed distribution's
-    /// tile opens its context menu (a terminal, its applications); the
-    /// menu's background, while the Linux section is hidden, one that
-    /// shows it again.
-    fn right_click(&mut self, hit: Hit, x: i64, y: i64) {
-        let m = self.menu_rect();
-        let mut items = [None; linux::MAX_APPS + 1];
-        let distro = match hit {
-            Hit::LinuxEntry(k) => {
-                let Some(d) = self.linux_tiles.get(k).filter(|d| d.installed) else { return };
-                items[0] = Some(linux::Item::Terminal);
-                for (i, _) in d.apps().enumerate() {
-                    items[i + 1] = Some(linux::Item::App(i));
-                }
-                Some(k)
-            }
-            Hit::Menu | Hit::MenuItem(_) if self.linux.prefs.hidden && self.search_len == 0 => {
-                items[0] = Some(linux::Item::ShowSection);
-                None
-            }
-            _ => return,
-        };
-        let mut c = linux::Context { distro, x: 0, y: 0, items };
-        // At the pointer, kept inside the menu.
-        c.x = (x - m.x).clamp(8, (m.w - linux::CONTEXT_W - 8).max(8));
-        c.y = (y - m.y).clamp(8, (m.h - c.height() - 8).max(8));
-        self.context = Some(c);
-        self.menu_dirty = true;
-    }
-
-    /// Context menu item `i` clicked.
-    fn context_item(&mut self, i: usize) {
-        let Some(c) = self.context.take() else { return };
-        self.menu_dirty = true;
-        let Some(item) = c.items.iter().flatten().nth(i).copied() else { return };
-        let distro = c.distro.and_then(|k| self.linux_tiles.get(k)).copied();
-        match (item, distro) {
-            (linux::Item::ShowSection, _) => {
-                self.linux.prefs.hidden = false;
-                self.prefs_changed = true;
-            }
-            (linux::Item::Terminal, Some(d)) => {
-                self.linux_launch = Some(linux::Request::Terminal(d.name));
-                self.close_menu();
-            }
-            (linux::Item::App(a), Some(d)) => {
-                if let Some(app) = d.apps().nth(a) {
-                    self.linux_launch = Some(linux::Request::App(d.name, *app));
-                    self.close_menu();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Pinned tile `k` clicked: an installed program starts and the menu
-    /// closes; one that is not installed asks for its package's install
-    /// (`gala install <id>`, no window) and the menu stays, the tile
-    /// showing where the install is; one installing does nothing more,
-    /// and one whose install failed tries again.
-    fn tile_click(&mut self, k: usize) {
-        let Some(e) = self.listed().get(k).copied() else { return };
-        if e.installed {
-            self.launch = Some(e.program);
-            self.close_menu();
-            return;
-        }
-        let busy = self.installs.iter().any(|(p, s)| *p == e.program && !s.ended());
-        if busy {
-            return;
-        }
-        self.installs.retain(|(p, _)| *p != e.program);
-        if self.installs.try_push((e.program, pkg::Progress::Resolving)).is_ok() {
-            self.launch = Some(e.program);
-        }
-        self.catalog_change(CatalogChange::State);
-        self.menu_dirty = true;
-    }
-
-    /// Distribution tile `k` clicked: an installed one starts its desktop
-    /// (the menu closes); a suggestion installs (the menu stays, the
-    /// tile shows the progress); one installing does nothing more.
-    fn linux_click(&mut self, k: usize) {
-        let Some(d) = self.linux_tiles.get(k).copied() else { return };
-        if d.installed {
-            self.linux_launch = Some(linux::Request::Desktop(d.name));
-            self.close_menu();
-            return;
-        }
-        let busy = self.progress.iter().any(|(n, p)| *n == d.name && !p.ended());
-        if busy {
-            return;
-        }
-        let Some(s) = d.suggestion else { return };
-        self.progress.retain(|(n, _)| *n != d.name);
-        if self.progress.try_push((d.name, linux::Progress::Downloading(0))).is_ok() {
-            self.linux_launch = Some(linux::Request::Install(d.name, s));
-        }
-        self.linux_change(CatalogChange::State);
-        self.menu_dirty = true;
-    }
-
-    /// Suggestion tile `k`'s dismiss button clicked: it is not suggested
-    /// again (kept in the user's choices).
-    fn dismiss(&mut self, k: usize) {
-        let Some(s) = self.linux_tiles.get(k).and_then(|d| d.suggestion) else { return };
-        if s < 32 {
-            self.linux.prefs.dismissed |= 1 << s;
-        }
-        self.prefs_changed = true;
-        self.linux_tiles = linux::entries(&self.linux);
-        self.linux_change(CatalogChange::State);
-        self.menu_dirty = true;
     }
 
     /// What the Linux section lists now (read outside the lock); installs
-    /// whose distribution is registered now are over. The menu's choices
-    /// stay the desktop's while they wait to be saved.
-    pub fn set_linux(&mut self, mut listing: linux::Listing) {
-        if self.prefs_changed {
-            listing.prefs = self.linux.prefs;
-        }
-        self.linux = listing;
-        let installed = &self.linux.installed;
+    /// whose distribution is registered now are over.
+    pub fn set_linux(&mut self, listing: &linux::Listing) {
+        let installed = &listing.installed;
         // As `set_programs` does, and for the same reason: nothing is
         // allocated inside the `retain` closure.
         let listed = |n: &linux::Name| installed.iter().any(|d| d.name == *n);
@@ -2343,11 +1703,10 @@ impl Desktop {
             }
         }
         self.progress.retain(|(n, _)| !listed(n));
-        let tiles = linux::entries(&self.linux);
+        let tiles = linux::entries(listing);
         if tiles != self.linux_tiles {
             self.linux_tiles = tiles;
             self.linux_change(CatalogChange::State);
-            self.menu_dirty = true;
         }
         // As a package's listing does, this tells an install that
         // worked (before `linux_progress`'s own last word).
@@ -2361,10 +1720,9 @@ impl Desktop {
     }
 
     /// What an install that is over tells: `title` over `text`'s
-    /// pieces, in the log only. The kernel's taskbar has no notification
-    /// area (shasha's has: ARCHITECTURE "The notification area"); its
-    /// start menu, which goes with it (ROADMAP SH step 1), shows where
-    /// the tile's install is.
+    /// pieces, in the log only (the kernel draws no notification area;
+    /// shasha's start menu tile shows where the install is, told by
+    /// WM_GALA_CATALOG).
     fn announce(&mut self, title: &str, text: &[&str]) {
         #[cfg(not(test))]
         {
@@ -2386,9 +1744,9 @@ impl Desktop {
         }
     }
 
-    /// An install that is over is told there: the tile it ran on is out
-    /// of sight as soon as the menu is closed, and the notification is
-    /// where Windows says the same.
+    /// An install that is over is told: the tile it ran on is out of
+    /// sight as soon as the menu is closed, and a notification is where
+    /// Windows says the same.
     fn install_done(&mut self, name: &str) {
         self.announce(name, &["Installed. Its tile starts it now."]);
     }
@@ -2435,14 +1793,12 @@ impl Desktop {
         } else {
             CatalogChange::State
         });
-        self.menu_dirty = true;
         self.refresh();
     }
 
     /// A user-mode shell's tile asked for `program`'s install
     /// (GalaDesktopAction's Install, `nt::action::run_launch`): it is
-    /// resolving from now on, as a click on the kernel menu's tile makes
-    /// it (`tile_click`), so that the installer's pid is watched
+    /// resolving from now on, so that the installer's pid is watched
     /// (`install_started`) and a progress report finds it under way. One
     /// already under way starts again from the beginning: the new
     /// `gala install` is the one whose word counts.
@@ -2450,7 +1806,6 @@ impl Desktop {
         self.installs.retain(|(p, _)| *p != program);
         let _ = self.installs.try_push((program, pkg::Progress::Resolving));
         self.catalog_change(CatalogChange::State);
-        self.menu_dirty = true;
     }
 
     /// Where `program`'s install is, if one is under way or ended
@@ -2470,7 +1825,7 @@ impl Desktop {
     }
 
     /// What became of the `gala install` a tile asked for, as
-    /// `nt::action::start_from_menu` reports it: the pid to wait for a
+    /// `nt::action::install_for_shell` reports it: the pid to wait for a
     /// word from, or None when it never started. False when the pid is
     /// not watched (MAX_INSTALLERS, or no memory for it): the caller
     /// logs that, since a method may not.
@@ -2536,7 +1891,6 @@ impl Desktop {
             let _ = self.quieted.try_push(Quieted { who, at, why });
         }
         self.announce_quiet(who.name(), why);
-        self.menu_dirty = true;
         self.refresh();
     }
 
@@ -2585,14 +1939,12 @@ impl Desktop {
         } else {
             CatalogChange::State
         });
-        self.menu_dirty = true;
         self.refresh();
     }
 
     /// A user-mode shell's tile asked for distribution `name`'s install
     /// (GalaDesktopAction's Linux with LINUX_INSTALL): it is downloading
-    /// from nothing from now on, as a click on the kernel menu's tile
-    /// makes it (`linux_click`), so that the installer's pid is watched
+    /// from nothing from now on, so that the installer's pid is watched
     /// (`linux_install_started`) and its progress finds it under way.
     /// One already under way starts again: the new `gala linux-install`
     /// is the one whose word counts.
@@ -2600,7 +1952,6 @@ impl Desktop {
         self.progress.retain(|(n, _)| *n != name);
         let _ = self.progress.try_push((name, linux::Progress::Downloading(0)));
         self.linux_change(CatalogChange::State);
-        self.menu_dirty = true;
     }
 
     /// Where distribution `name`'s install is, if one is under way or
@@ -2608,12 +1959,6 @@ impl Desktop {
     /// section's tiles).
     pub fn linux_install_of(&self, name: linux::Name) -> Option<linux::Progress> {
         self.progress.iter().find(|(n, _)| *n == name).map(|&(_, p)| p)
-    }
-
-    /// The choices the section's tiles are listed with: the desktop's
-    /// while they wait to be saved, else `read`'s (from the registry).
-    pub fn linux_prefs(&self, read: linux::Prefs) -> linux::Prefs {
-        if self.prefs_changed { self.linux.prefs } else { read }
     }
 
     fn linux_change(&mut self, c: CatalogChange) {
@@ -2626,85 +1971,19 @@ impl Desktop {
         core::mem::replace(&mut self.linux_changed, CatalogChange::None)
     }
 
-    /// The user's choices once they changed (to be saved in the
-    /// registry, outside the lock).
-    pub fn take_prefs(&mut self) -> Option<linux::Prefs> {
-        core::mem::take(&mut self.prefs_changed).then_some(self.linux.prefs)
-    }
-
     /// The Linux section's tiles (host tests, the state dump).
     pub fn linux_tiles(&self) -> &[linux::Distro] {
         &self.linux_tiles
     }
 
-    fn close_menu(&mut self) {
-        self.search_len = 0;
-        self.context = None;
-        if self.menu.take().is_some() {
-            let b = self.menu_bounds();
-            self.s.add_damage(b);
-            self.taskbar_dirty = true;
-        }
-    }
-
-    /// What the start menu asked to start, once (a program becomes the
-    /// most recent).
-    pub fn take_launch(&mut self) -> Option<Launch> {
-        if let Some(r) = self.linux_launch.take() {
-            return Some(Launch::Linux(r));
-        }
-        let i = self.launch.take()?;
-        if let Some(at) = self.recent.iter().position(|&r| r == i) {
-            self.recent.copy_within(0..at, 1);
-        } else {
-            self.recent.copy_within(0..3, 1);
-        }
-        self.recent[0] = i;
-        PROGRAMS.get(i).map(Launch::Program)
-    }
-
-    fn open_menu(&mut self) {
-        self.search_len = 0;
-        self.context = None;
-        self.menu_dirty = true;
-        self.menu = Canvas::new(1, 1, 0); // rendered by refresh
-        let b = self.menu_bounds();
-        self.s.add_damage(b);
-        self.taskbar_dirty = true;
-    }
-
-    /// The tiles the menu shows: those matching what was typed
-    /// (case-insensitively), at most MAX_TILES.
-    fn listed(&self) -> Vec<Entry> {
-        let q = &self.search[..self.search_len];
-        let mut out = Vec::new();
-        for &p in self.programs.iter().take(MAX_TILES) {
-            let Some(prog) = PROGRAMS.get(p.program) else { continue };
-            let name = prog.name.as_bytes();
-            let matches = q.is_empty()
-                || name
-                    .windows(q.len())
-                    .any(|w| w.iter().zip(q).all(|(a, b)| a.eq_ignore_ascii_case(b)));
-            if matches {
-                let _ = out.try_push(p);
-            }
-        }
-        out
-    }
-
-    /// The clock shows `minute` (minutes since 1601, UTC).
-    pub fn set_minute(&mut self, minute: u64) {
-        if minute != self.minute {
-            self.minute = minute;
-            self.taskbar_dirty = true;
-            self.refresh();
-        }
+    /// What a system key asked to start (Ctrl+Shift+Esc), once.
+    pub fn take_launch(&mut self) -> Option<&'static Program> {
+        PROGRAMS.get(self.launch.take()?)
     }
 
     // ---- Drawing -------------------------------------------------------
 
-    /// Brings the captions, the taskbar and the menu up to date with the
-    /// state, collecting damage.
+    /// Brings the captions up to date with the state, collecting damage.
     fn refresh(&mut self) {
         if self.bare.is_some() {
             // Nothing will ever draw it.
@@ -2738,437 +2017,12 @@ impl Desktop {
         for r in changed {
             self.s.add_damage(r);
         }
-        // The taskbar's own changes (hover, the menu, the clock) and the
-        // window state's (what it lists).
-        if self.taskbar_dirty || self.s.listing_changed || self.taskbar.is_none() {
-            self.taskbar = self.render_taskbar();
-            self.taskbar_dirty = false;
-            self.s.listing_changed = false;
-            let r = self.taskbar_rect();
-            self.s.add_damage(r);
-        }
-        if self.card_dirty {
-            self.card_dirty = false;
-            if let Some((r, _)) = self.card.take() {
-                self.s.add_damage(shadow_bounds(r));
-            }
-            self.card = self.render_card();
-            if let Some((r, _)) = &self.card {
-                let b = shadow_bounds(*r);
-                self.s.add_damage(b);
-            }
-        }
-        if self.menu.is_some() && self.menu_dirty {
-            self.menu = self.render_menu();
-            self.menu_dirty = false;
-            let r = self.menu_rect();
-            self.s.add_damage(r);
-        }
     }
 
-    /// The taskbar: translucent light with a line on top; the start
-    /// button (the camel) and the windows' buttons centred, each an icon
-    /// with Windows' indicator under it (the active window: a long accent
-    /// pill on a lit button; the others: a short grey one); the clock and
-    /// date at the right.
-    fn render_taskbar(&self) -> Option<Canvas> {
-        let (w, h) = (self.taskbar_rect().w, i64::from(TASKBAR));
-        let mut c = Canvas::new(w, h, 0)?;
-        for y in 0..h {
-            let (row, a) =
-                if y == 0 { (TASKBAR_LINE, 255) } else { (TASKBAR_COLOR, TASKBAR_ALPHA) };
-            for x in 0..w {
-                c.put(x, y, row, a);
-            }
-        }
-        let top = self.s.screen.1 - h;
-        let s = self.start_rect();
-        let glow = if self.menu.is_some() {
-            170
-        } else if self.hover == Hit::Start {
-            130
-        } else {
-            0
-        };
-        if glow > 0 {
-            c.round_rect(s.x, s.y - top, s.w, s.h, 4, 0x00ff_ffff, 0x00ff_ffff, glow);
-        }
-        c.mask(
-            s.x + (s.w - 24) / 2,
-            s.y - top + 8,
-            paint::FORTRESS24,
-            24,
-            LOGO_TOP,
-            LOGO_BOTTOM,
-            255,
-        );
-        for (id, r) in self.tasks() {
-            let Some(win) = self.s.window(id) else { continue };
-            let (x, y) = (r.x, r.y - top);
-            let active = self.s.active == Some(id) && win.shown();
-            let alpha = if active {
-                190
-            } else if self.hover == Hit::Task(id) {
-                130
-            } else {
-                0
-            };
-            if alpha > 0 {
-                c.round_rect(x, y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, alpha);
-            }
-            // The window's icon, or a tile with its initial.
-            if win.icon.len() == ICON * ICON {
-                let (ix, iy) = (x + 10, y + 8);
-                for (k, &p) in win.icon.iter().enumerate() {
-                    let (px, py) = ((k % ICON) as i64, (k / ICON) as i64);
-                    c.put(ix + px, iy + py, p, p >> 24);
-                }
-                if active {
-                    c.round_rect(x + r.w / 2 - 8, y + 36, 16, 3, 1, ACCENT, ACCENT, 255);
-                } else if !win.minimized {
-                    c.round_rect(
-                        x + r.w / 2 - 3,
-                        y + 36,
-                        6,
-                        3,
-                        1,
-                        0x00_8a_8a_8a,
-                        0x00_8a_8a_8a,
-                        255,
-                    );
-                }
-                continue;
-            }
-            let (initial, from) = tile_initial(&win.title, &win.program);
-            let (c0, c1) = tile_colors(from);
-            c.round_rect(x + 10, y + 8, 24, 24, 5, c0, c1, 255);
-            let iw = Font::Ui12Semibold.measure(core::iter::once(initial));
-            c.text(
-                x + 22 - iw / 2,
-                y + 12,
-                core::iter::once(initial),
-                0x00ff_ffff,
-                Font::Ui12Semibold,
-                x + 34,
-            );
-            if active {
-                c.round_rect(x + r.w / 2 - 8, y + 36, 16, 3, 1, ACCENT, ACCENT, 255);
-            } else if !win.minimized {
-                c.round_rect(x + r.w / 2 - 3, y + 36, 6, 3, 1, 0x00_8a_8a_8a, 0x00_8a_8a_8a, 255);
-            }
-        }
-        // The clock: the time over the date, right-aligned.
-        let (time, tn, date, dn) = clock(self.minute);
-        let tw = Font::Ui12.measure(time[..tn].iter().map(|&b| b as char));
-        let dw = Font::Ui12.measure(date[..dn].iter().map(|&b| b as char));
-        let right = w - 14;
-        c.text(right - tw, 7, time[..tn].iter().map(|&b| b as char), TEXT, Font::Ui12, w);
-        c.text(right - dw, 25, date[..dn].iter().map(|&b| b as char), TEXT, Font::Ui12, w);
-        Some(c)
-    }
-
-    /// The card above the taskbar: its context menu ("Task Manager").
-    /// None: no card.
-    fn render_card(&self) -> Option<(Rect, Canvas)> {
-        if self.s.screen.0 == 0 {
-            return None;
-        }
-        if let Some(r) = self.bar_menu_rect() {
-            let mut c = Canvas::new(r.w, r.h, 0)?;
-            c.round_rect(0, 0, r.w, r.h, 8, MENU_COLOR, MENU_COLOR, 255);
-            c.round_outline(0, 0, r.w, r.h, 8, MENU_BORDER, 255);
-            if self.hover == Hit::BarMenuItem {
-                c.round_rect(4, 4, r.w - 8, BAR_MENU_ITEM, 4, 0x00_e0_e3_e8, 0x00_e0_e3_e8, 255);
-            }
-            c.text(16, 4 + 10, "Task Manager".chars(), TEXT, Font::Ui12, r.w - 16);
-            return Some((r, c));
-        }
-        None
-    }
-
-    /// The start menu, after Windows 11's: a search box at the top, the
-    /// pinned programs in a grid, the recently started ones, the user at
-    /// the bottom.
-    fn render_menu(&self) -> Option<Canvas> {
-        let m = self.menu_rect();
-        let (w, h) = (m.w, m.h);
-        let mut c = Canvas::new(w, h, 0)?;
-        c.round_rect(0, 0, w, h, 8, MENU_COLOR, MENU_COLOR, 255);
-        // The foot: a little darker, under a line.
-        let foot = h - 64;
-        for y in foot..h - 1 {
-            for x in 1..w - 1 {
-                if crate::nt::desktop::paint::round_coverage(x, y, w, h, 8) == 255 {
-                    c.put(x, y, 0x00_e7_ea_ef, 255);
-                }
-            }
-        }
-        for x in 0..w {
-            c.put(x, foot, MENU_BORDER, 255);
-        }
-        c.round_outline(0, 0, w, h, 8, MENU_BORDER, 255);
-        // The search box.
-        c.round_rect(32, 24, w - 64, 36, 18, 0x00ff_ffff, 0x00ff_ffff, 255);
-        c.round_outline(32, 24, w - 64, 36, 18, 0x00_d9_dd_e3, 255);
-        // A magnifier: a ring and a handle.
-        for a in 0..64 {
-            let (dx, dy) = (ring(a, 6), ring(a + 16, 6));
-            c.put(54 + dx, 40 + dy, TEXT_DIM, 200);
-        }
-        for t in 0..5 {
-            c.put(59 + t, 45 + t, TEXT_DIM, 230);
-        }
-        if self.search_len == 0 {
-            c.text(72, 34, "Type to search programs".chars(), TEXT_DIM, Font::Ui12, w - 48);
-        } else {
-            let end = c.text(
-                72,
-                34,
-                self.search[..self.search_len].iter().map(|&b| b as char),
-                TEXT,
-                Font::Ui12,
-                w - 48,
-            );
-            for y in 33..49 {
-                c.put(end + 1, y, TEXT, 255);
-            }
-        }
-        // Pinned programs.
-        c.text(52, 84, "Pinned".chars(), TEXT, Font::Ui14Semibold, w);
-        let listed = self.listed();
-        let shown = self.pinned_rows() * GRID_COLUMNS;
-        for (k, &e) in listed.iter().enumerate().take(shown) {
-            let Some(program) = PROGRAMS.get(e.program) else { continue };
-            let r = self.menu_item_rect(k).offset(-m.x, -m.y);
-            if r.y + r.h > foot - 120 {
-                break;
-            }
-            let lit = match (self.hover, self.pressed) {
-                (Hit::MenuItem(a), Hit::MenuItem(b)) if a == k && b == k => 210,
-                (Hit::MenuItem(a), _) if a == k => 170,
-                _ => 0,
-            };
-            if lit > 0 {
-                c.round_rect(r.x, r.y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
-            }
-            // Not installed yet: the icon dimmed, with a download badge.
-            // An install gone quiet: grey, with a question mark.
-            let installing = self.installs.iter().find(|(p, _)| *p == e.program).map(|&(_, s)| s);
-            let quiet = matches!(installing, Some(pkg::Progress::Lost(_)));
-            let alpha = if e.installed { 255 } else { 120 };
-            let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
-            let (top, bottom) = if quiet {
-                (QUIET_TOP, QUIET_BOTTOM)
-            } else {
-                (program.colors.0, program.colors.1)
-            };
-            c.round_rect(ix, iy, 32, 32, 6, top, bottom, alpha);
-            let letter = program.name.chars().find(|c| c.is_alphanumeric()).unwrap_or('?');
-            let lw = Font::Ui14Semibold.measure(core::iter::once(letter));
-            c.text(
-                ix + 16 - lw / 2,
-                iy + 7,
-                core::iter::once(letter),
-                0x00ff_ffff,
-                Font::Ui14Semibold,
-                ix + 32,
-            );
-            if !e.installed && installing.is_none() {
-                download_badge(&mut c, ix + 20, iy + 20);
-            }
-            if quiet {
-                question_badge(&mut c, ix + 20, iy + 20);
-            }
-            tile_name(&mut c, r, program.name, if installing.is_some() { 1 } else { 2 });
-            if let Some(s) = installing {
-                progress_bar(&mut c, r, s.percent(), bar_color(s));
-            }
-        }
-        if listed.is_empty() {
-            let text =
-                if self.search_len == 0 { "No programs installed" } else { "No programs match" };
-            c.text(52, GRID_Y + 10, text.chars(), TEXT_DIM, Font::Ui12, w - 32);
-        }
-        if self.linux_shown() {
-            self.render_linux(&mut c);
-        }
-        // Recently started programs.
-        let rec_y = foot - 112;
-        c.text(52, rec_y, "Recommended".chars(), TEXT, Font::Ui14Semibold, w);
-        let mut y = rec_y + 32;
-        let mut any = false;
-        for &p in self.recent.iter().filter(|&&p| p != usize::MAX).take(2) {
-            let Some(program) = PROGRAMS.get(p) else { continue };
-            any = true;
-            c.round_rect(52, y, 32, 32, 6, program.colors.0, program.colors.1, 255);
-            c.text(96, y, program.name.chars(), TEXT, Font::Ui12, w - 40);
-            c.text(96, y + 16, "Recently started".chars(), TEXT_DIM, Font::Ui12, w - 40);
-            y += 40;
-        }
-        if !any {
-            c.text(
-                52,
-                y,
-                "Programs you start will show up here.".chars(),
-                TEXT_DIM,
-                Font::Ui12,
-                w - 40,
-            );
-        }
-        // The user.
-        c.round_rect(52, foot + 16, 32, 32, 16, LOGO_TOP, LOGO_BOTTOM, 255);
-        c.mask(56, foot + 20, paint::FORTRESS24, 24, 0x00ff_ffff, 0x00ff_ffff, 255);
-        c.text(96, foot + 24, "gala".chars(), TEXT, Font::Ui12, w - 40);
-        self.render_context(&mut c);
-        Some(c)
-    }
-
-    /// How lit a part of the menu is under the pointer (pressed: more).
-    fn lit(&self, part: Hit) -> u32 {
-        match (self.hover, self.pressed) {
-            (a, b) if a == part && b == part => 210,
-            (a, _) if a == part => 170,
-            _ => 0,
-        }
-    }
-
-    /// The "Linux distributions" section: its heading (a chevron down
-    /// when expanded, right when collapsed; "Hide" at the right), then
-    /// its tiles: dimmed with a download badge and a dismiss cross while
-    /// not installed, a progress bar while installing (red when it
-    /// failed).
-    fn render_linux(&self, c: &mut Canvas) {
-        let m = self.menu_rect();
-        let hr = self.linux_heading_rect().offset(-m.x, -m.y);
-        let lit = self.lit(Hit::LinuxHeading);
-        if lit > 0 {
-            c.round_rect(hr.x, hr.y, hr.w - 60, hr.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
-        }
-        let end = c.text(
-            hr.x + 20,
-            hr.y + 2,
-            "Linux distributions".chars(),
-            TEXT,
-            Font::Ui14Semibold,
-            hr.x + hr.w,
-        );
-        let (cx, cy) = (end + 10, hr.y + 8);
-        for t in 0..5 {
-            if self.linux.prefs.collapsed {
-                c.put(cx + 2 + t, cy - 1 + t, TEXT, 255);
-                c.put(cx + 2 + t, cy + 7 - t, TEXT, 255);
-            } else {
-                c.put(cx + t, cy + 1 + t, TEXT, 255);
-                c.put(cx + 8 - t, cy + 1 + t, TEXT, 255);
-            }
-        }
-        let hide = self.linux_hide_rect().offset(-m.x, -m.y);
-        let lit = self.lit(Hit::LinuxHide);
-        if lit > 0 {
-            c.round_rect(hide.x, hide.y, hide.w, hide.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
-        }
-        let hw = Font::Ui12.measure("Hide".chars());
-        c.text(
-            hide.x + (hide.w - hw) / 2,
-            hide.y + 4,
-            "Hide".chars(),
-            TEXT_DIM,
-            Font::Ui12,
-            hide.x + hide.w,
-        );
-        if self.linux.prefs.collapsed {
-            return;
-        }
-        if self.linux_tiles.is_empty() {
-            let r = self.linux_tile_rect(0).offset(-m.x, -m.y);
-            c.text(
-                r.x + 20,
-                r.y + 10,
-                "No distributions suggested".chars(),
-                TEXT_DIM,
-                Font::Ui12,
-                m.w - 32,
-            );
-            return;
-        }
-        for (k, d) in self.linux_tiles.iter().enumerate() {
-            let r = self.linux_tile_rect(k).offset(-m.x, -m.y);
-            let lit = self.lit(Hit::LinuxEntry(k));
-            if lit > 0 {
-                c.round_rect(r.x, r.y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
-            }
-            let progress = self.progress.iter().find(|(n, _)| *n == d.name).map(|&(_, p)| p);
-            let quiet = matches!(progress, Some(linux::Progress::Lost(_)));
-            let alpha = if d.installed { 255 } else { 120 };
-            let (colors_top, colors_bottom) =
-                if quiet { (QUIET_TOP, QUIET_BOTTOM) } else { d.colors() };
-            let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
-            c.round_rect(ix, iy, 32, 32, 6, colors_top, colors_bottom, alpha);
-            let letter = d.name.as_str().chars().find(|c| c.is_alphanumeric()).unwrap_or('?');
-            let lw = Font::Ui14Semibold.measure(core::iter::once(letter));
-            c.text(
-                ix + 16 - lw / 2,
-                iy + 7,
-                core::iter::once(letter),
-                0x00ff_ffff,
-                Font::Ui14Semibold,
-                ix + 32,
-            );
-            tile_name(c, r, d.name.as_str(), if progress.is_some() { 1 } else { 2 });
-            match progress {
-                Some(p) => progress_bar(c, r, p.percent(), linux_bar_color(p)),
-                None if !d.installed => download_badge(c, ix + 20, iy + 20),
-                None => {}
-            }
-            if quiet {
-                question_badge(c, ix + 20, iy + 20);
-            }
-            if !d.installed && d.suggestion.is_some() && progress.is_none() {
-                let x = self.linux_dismiss_rect(k).offset(-m.x, -m.y);
-                let lit = self.lit(Hit::LinuxDismiss(k));
-                if lit > 0 {
-                    c.round_rect(x.x, x.y, x.w, x.h, 9, 0x00_d0_d5_dc, 0x00_d0_d5_dc, lit);
-                }
-                let (ox, oy) = (x.x + 5, x.y + 5);
-                for t in 0..8 {
-                    c.put(ox + t, oy + t, TEXT_DIM, 230);
-                    c.put(ox + 7 - t, oy + t, TEXT_DIM, 230);
-                }
-            }
-        }
-    }
-
-    /// The context menu open in the start menu: a white card with its
-    /// items (the one under the pointer lit).
-    fn render_context(&self, c: &mut Canvas) {
-        let Some(ctx) = &self.context else { return };
-        let (x, y, w, h) = (ctx.x, ctx.y, linux::CONTEXT_W, ctx.height());
-        for d in 1..4 {
-            c.round_outline(x - d, y - d + 1, w + 2 * d, h + 2 * d, 8 + d, 0, 18);
-        }
-        c.round_rect(x, y, w, h, 8, 0x00ff_ffff, 0x00ff_ffff, 255);
-        c.round_outline(x, y, w, h, 8, MENU_BORDER, 255);
-        let distro = ctx.distro.and_then(|k| self.linux_tiles.get(k));
-        for (i, item) in ctx.items.iter().flatten().enumerate() {
-            let iy = y + 4 + i as i64 * linux::ITEM_H;
-            let lit = self.lit(Hit::ContextItem(i));
-            if lit > 0 {
-                c.round_rect(x + 4, iy, w - 8, linux::ITEM_H, 4, 0x00_e6_ea_f0, 0x00_e6_ea_f0, lit);
-            }
-            let label = match item {
-                linux::Item::Terminal => "Open terminal",
-                linux::Item::ShowSection => "Show Linux distributions",
-                linux::Item::App(a) => {
-                    distro.and_then(|d| d.apps().nth(*a)).map_or("?", |app| app.name.as_str())
-                }
-            };
-            c.text(x + 16, iy + 8, label.chars(), TEXT, Font::Ui12, x + w - 12);
-        }
-    }
-
-    /// The colour of screen point (x, y), all layers composed.
+    /// The colour of screen point (x, y), all layers composed: the
+    /// desktop's colour, the windows, the pointer.
     pub fn pixel(&self, x: i64, y: i64) -> u32 {
-        let mut c = self.wallpaper.as_ref().map_or(DESKTOP_COLOR, |w| w.pixel(x, y));
+        let mut c = DESKTOP_COLOR;
         for w in self.s.windows.iter().filter(|w| w.shown()) {
             if !w.bounds(SHADOW).contains(x, y) {
                 continue;
@@ -3189,34 +2043,6 @@ impl Desktop {
         if self.s.screen.0 == 0 {
             return c;
         }
-        let t = self.taskbar_rect();
-        if self.own_taskbar()
-            && t.contains(x, y)
-            && let Some(bar) = &self.taskbar
-        {
-            c = over(c, bar.get(x - t.x, y - t.y));
-        }
-        if let Some(menu) = &self.menu
-            && self.menu_bounds().contains(x, y)
-        {
-            let m = self.menu_rect();
-            let layer = menu.get(x - m.x, y - m.y);
-            if layer >> 24 < 255 {
-                let rect = (m.x + 4, m.y + SHADOW_DROP, m.x + m.w - 4, m.y + m.h + SHADOW_DROP - 2);
-                c = blend(c, 0, shadow_alpha(x, y, rect, SHADOW_REACH, SHADOW_ACTIVE));
-            }
-            c = over(c, layer);
-        }
-        if let Some((r, card)) = &self.card
-            && shadow_bounds(*r).contains(x, y)
-        {
-            let layer = card.get(x - r.x, y - r.y);
-            if layer >> 24 < 255 {
-                let rect = (r.x + 4, r.y + SHADOW_DROP, r.x + r.w - 4, r.y + r.h + SHADOW_DROP - 2);
-                c = blend(c, 0, shadow_alpha(x, y, rect, SHADOW_REACH, SHADOW_INACTIVE));
-            }
-            c = over(c, layer);
-        }
         // The pointer, with a faint shadow.
         let (px, py) = self.pointer;
         let row = |yy: i64, xx: i64| -> u8 {
@@ -3233,52 +2059,6 @@ impl Desktop {
             }
         }
         c
-    }
-}
-
-/// A layer's rectangle with the room its shadow takes.
-fn shadow_bounds(r: Rect) -> Rect {
-    Rect {
-        x: r.x - SHADOW_REACH,
-        y: r.y - SHADOW_REACH,
-        w: r.w + 2 * SHADOW_REACH,
-        h: r.h + 2 * SHADOW_REACH + SHADOW_DROP,
-    }
-}
-
-/// A point on a circle of radius r at a 64th-of-a-turn step: its x (its y
-/// is `ring(step + 16, r)`).
-fn ring(step: i64, r: i64) -> i64 {
-    // cos by a quarter-wave table of 17 points (x1024).
-    const COS: [i64; 17] =
-        [1024, 1019, 1004, 980, 946, 903, 851, 792, 724, 650, 569, 483, 392, 297, 200, 100, 0];
-    let s = step.rem_euclid(64);
-    let v = match s {
-        0..=16 => COS[s as usize],
-        17..=32 => -COS[(32 - s) as usize],
-        33..=48 => -COS[(s - 32) as usize],
-        _ => COS[(64 - s) as usize],
-    };
-    (v * r + 512).div_euclid(1024)
-}
-
-/// A program's tile colours from its title (a stable hue).
-/// A taskbar tile's initial and the name it is from (its colours'
-/// too), capitalized: the title's first character if a letter or digit
-/// ("in.svg - Inkscape": "I"), else the program's first letter or digit ("[in] (imported)" is
-/// GIMP's title with an image open: `gimp-3.2` gives "G"), else '?'.
-pub fn tile_initial<'a>(title: &'a [u16], program: &'a [u16]) -> (char, &'a [u16]) {
-    let first = char::decode_utf16(title.iter().copied()).next().and_then(|c| c.ok());
-    if let Some(c) = first.filter(|c| c.is_alphanumeric()) {
-        return (c.to_uppercase().next().unwrap_or(c), title);
-    }
-    let named = char::decode_utf16(program.iter().copied())
-        .filter_map(|c| c.ok())
-        .find(|c| c.is_alphanumeric())
-        .and_then(|c| c.to_uppercase().next());
-    match named {
-        Some(c) => (c, program),
-        None => (first.unwrap_or('?'), title),
     }
 }
 
@@ -3305,67 +2085,6 @@ pub fn program_name(pid: u64) -> ([u16; 64], usize) {
         put(p.name.as_bytes());
     }
     (out, n)
-}
-
-fn tile_colors(title: &[u16]) -> (u32, u32) {
-    const PALETTE: [(u32, u32); 6] = [
-        (0x00_4c_9a_ff, 0x00_1f_6f_e0),
-        (0x00_2e_b8_8a, 0x00_17_8a_63),
-        (0x00_f0_8a_3c, 0x00_d0_63_1d),
-        (0x00_a8_6a_f0, 0x00_7c_3f_d6),
-        (0x00_e8_4c_6a, 0x00_c0_2a_4a),
-        (0x00_3c_b4_d8, 0x00_1c_8a_b4),
-    ];
-    let h = title.iter().fold(7u32, |a, &c| a.wrapping_mul(31).wrapping_add(u32::from(c)));
-    PALETTE[(h % PALETTE.len() as u32) as usize]
-}
-
-/// The clock as Windows shows it in the US: "10:52 PM" and "11/1/2026"
-/// (and their lengths) for `minute` (minutes since 1601-01-01 UTC). The
-/// date: the days-to-civil algorithm from Howard Hinnant's
-/// "chrono-Compatible Low-Level Date Algorithms" (public domain).
-fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
-    let hh = (minute / 60 % 24) as u8;
-    let mm = (minute % 60) as u8;
-    let z = (minute / (60 * 24)) as i64 - 134_774 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = (yoe + era * 400 + i64::from(m <= 2)).clamp(0, 9999) as u32;
-    let mut time = [0u8; 8];
-    let mut tn = 0;
-    let h12 = match hh % 12 {
-        0 => 12,
-        h => h,
-    };
-    let push = |buf: &mut [u8], n: &mut usize, b: u8| {
-        buf[*n] = b;
-        *n += 1;
-    };
-    if h12 >= 10 {
-        push(&mut time, &mut tn, b'1');
-    }
-    push(&mut time, &mut tn, b'0' + h12 % 10);
-    for b in [b':', b'0' + mm / 10, b'0' + mm % 10, b' ', if hh < 12 { b'A' } else { b'P' }, b'M'] {
-        push(&mut time, &mut tn, b);
-    }
-    let mut date = [0u8; 10];
-    let mut dn = 0;
-    for v in [m as u32, d as u32] {
-        if v >= 10 {
-            push(&mut date, &mut dn, b'0' + (v / 10) as u8);
-        }
-        push(&mut date, &mut dn, b'0' + (v % 10) as u8);
-        push(&mut date, &mut dn, b'/');
-    }
-    for div in [1000, 100, 10, 1] {
-        push(&mut date, &mut dn, b'0' + (y / div % 10) as u8);
-    }
-    (time, tn, date, dn)
 }
 
 /// One session's desktop as shasha keeps it (ROADMAP RS steps B2, B3a):
@@ -3418,9 +2137,6 @@ fn console() -> Option<crate::mm::heap::KArc<super::session::Desk>> {
     super::session::desk(super::session::active_console())
 }
 
-/// The wallpaper picture chosen at boot (`choose_wallpaper`).
-static PICTURE: IrqMutex<Option<Picture>> = IrqMutex::new(None);
-
 /// The wallpapers gala ships and their files (THIRD_PARTY.md).
 const WALLPAPERS: [(&str, &str); 4] = [
     ("dunes", "\\Windows\\Web\\Wallpaper\\dunes.qoi"),
@@ -3429,10 +2145,12 @@ const WALLPAPERS: [(&str, &str); 4] = [
     ("night", "\\Windows\\Web\\Wallpaper\\night.qoi"),
 ];
 
-/// Chooses the desktop's wallpaper at boot: `choice` (the `wallpaper=`
-/// boot option: one of WALLPAPERS, or "drawn" for the drawn light and
-/// ribbons), else one of the shipped pictures present at random. Without
-/// any, the drawn one.
+/// Chooses the boot user's wallpaper at boot, which shasha shows (it
+/// reads the "Wallpaper" value, `save_wallpaper`): `choice` (the
+/// `wallpaper=` boot option: one of WALLPAPERS, or "drawn" for none: the
+/// value is left as it is), else one of the shipped pictures present at
+/// random. Without any, none. The kernel draws no wallpaper: it checks
+/// that the file is a QOI picture (`qoi_size`) and logs its size.
 pub fn choose_wallpaper(choice: Option<&str>) {
     if choice == Some("drawn") {
         return;
@@ -3450,18 +2168,37 @@ pub fn choose_wallpaper(choice: Option<&str>) {
     }
     // Random enough: the time's low bits (100 ns units).
     let (name, path) = present[(platform::system_time() / 10 % count as u64) as usize];
-    let picture = super::file::lookup(path)
-        .and_then(super::file::read_all)
-        .ok()
-        .and_then(|data| paint::decode_qoi(&data));
-    match picture {
-        Some(p) => {
-            crate::info!("desktop: wallpaper {name} ({} x {})", p.w, p.h);
-            *PICTURE.lock() = Some(p);
+    match qoi_size(path) {
+        Ok((w, h)) => {
+            crate::info!("desktop: wallpaper {name} ({w} x {h})");
             save_wallpaper(path);
         }
-        None => crate::warn!("desktop: cannot load wallpaper {name}"),
+        Err(e) => crate::warn!("desktop: cannot use wallpaper {name} ({path}): {e:?}"),
     }
+}
+
+/// The size QOI picture `path`'s header gives (`qoi_header`):
+/// STATUS_OBJECT_NAME_NOT_FOUND for no such file,
+/// STATUS_INVALID_IMAGE_FORMAT for another kind of file. shasha decodes
+/// the picture itself.
+fn qoi_size(path: &str) -> Result<(u32, u32), NtStatus> {
+    let node = super::file::lookup(path).map_err(|_| NtStatus::OBJECT_NAME_NOT_FOUND)?;
+    let mut head = [0u8; QOI_HEADER];
+    let n = super::file::read(node, 0, &mut head).map_err(super::file::fs_status)?;
+    qoi_header(&head[..n]).ok_or(NtStatus::INVALID_IMAGE_FORMAT)
+}
+
+/// A QOI header's length: "qoif", width and height (big-endian u32),
+/// channels, colour space.
+const QOI_HEADER: usize = 14;
+
+/// The width and height a QOI header gives; None for a short one,
+/// another magic, a zero size or channels other than 3 or 4.
+fn qoi_header(head: &[u8]) -> Option<(u32, u32)> {
+    let head: &[u8; QOI_HEADER] = head.get(..QOI_HEADER)?.try_into().ok()?;
+    let be = |at: usize| u32::from_be_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
+    let (w, h) = (be(4), be(8));
+    (&head[..4] == b"qoif" && w > 0 && h > 0 && matches!(head[12], 3 | 4)).then_some((w, h))
 }
 
 /// HKCU\Control Panel\Desktop, where Windows keeps the wallpaper's path
@@ -3470,7 +2207,7 @@ pub fn choose_wallpaper(choice: Option<&str>) {
 const DESKTOP_KEY: &str = "Control Panel\\Desktop";
 
 /// Saves the wallpaper's file (`path` on the system volume, from its
-/// root; empty for the drawn one) as the boot user's "Wallpaper" value,
+/// root; empty for none) as the boot user's "Wallpaper" value,
 /// `C:` and the path; logged.
 fn save_wallpaper(path: &str) {
     use super::registry::{self, ROOT};
@@ -3640,7 +2377,6 @@ fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
     let presenter = if console { local_presenter()? } else { Presenter::None };
     let (w, h) = presenter.size().unwrap_or(DEFAULT_SIZE);
     d.set_screen(w, h)?;
-    d.set_minute(platform::system_time() / 600_000_000);
     d.s.live = true;
     let kind = presenter.kind();
     note_frame(shell.session, &presenter);
@@ -3681,9 +2417,10 @@ pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
     Some((d.s.screen.0 as u32, d.s.screen.1 as u32))
 }
 
-/// Whether shasha's shell (taskbar, start menu, the named window
-/// actions) runs on `shell`'s desktop (made live if it was not): not on a
-/// bare one (the server profile, no screen and no `presenter=`).
+/// Whether a shell can run on `shell`'s desktop (made live if it was
+/// not): shasha's taskbar and start menu, the named window actions, the
+/// app bars. Not on a bare one (the server profile, no screen and no
+/// `presenter=`).
 pub fn has_shell(shell: &Shell) -> bool {
     let mut d = shell.d.lock();
     ensure_live(shell, &mut d).is_ok() && d.bare.is_none()
@@ -3691,9 +2428,10 @@ pub fn has_shell(shell: &Shell) -> bool {
 
 /// The end of a boot that keeps running (no `qemu_exit`: a machine, not
 /// a test): the console session's desktop goes live if no program has
-/// made it so, so the screen shows the desktop, its taskbar and start
-/// menu answering the keyboard and mouse, instead of the boot splash (or,
-/// on virtio-gpu, nothing). A desktop goes live otherwise only when a
+/// made it so, so the screen shows the desktop (shasha's taskbar and
+/// wallpaper once it runs, the desktop's colour before) answering the
+/// keyboard and mouse, instead of the boot splash (or, on virtio-gpu,
+/// nothing). A desktop goes live otherwise only when a
 /// program first uses it; a boot whose programs are console programs
 /// left the splash up. Where nothing shows desktops (`bare`) it stays the
 /// window state alone, as before. Says what it did.
@@ -3962,61 +2700,27 @@ pub fn process_ended(shell: &Shell, owner: u64) {
 /// Mouse input: the pointer moved by (dx, dy) with `buttons` held (bit 0
 /// left, 1 right, 2 middle), to the desktop the console shows. Nothing
 /// before that desktop is live, nor during a console switch.
-/// Returns the session and the program its start menu asked to start, if
-/// any.
-pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<(u32, Launch)> {
-    let desk = console()?;
-    pointer_on(&desk.shell, buttons, |d| d.pointer(dx, dy, buttons))
-        .map(|p| (desk.shell.session, p))
+pub fn pointer_event(dx: i64, dy: i64, buttons: u8) {
+    if let Some(desk) = console() {
+        pointer_on(&desk.shell, |d| d.pointer(dx, dy, buttons));
+    }
 }
 
 /// Mouse input to `shell`'s desktop: `go` moves the pointer (relative,
-/// the mouse's; absolute, injected) with `buttons` held. The program its
-/// start menu asked to start, if any.
-fn pointer_on(
-    shell: &Shell,
-    buttons: u8,
-    go: impl FnOnce(&mut Desktop) -> Vec<Rect>,
-) -> Option<Launch> {
-    // Which programs exist and what the Linux section lists (outside the
-    // desktop's lock: the file system, the registry), when a press may
-    // open the menu.
-    let opens = buttons & 1 != 0 && !shell.d.lock().menu_open();
-    let (available, n) = if opens { available_programs() } else { NO_TILES };
-    let listing = if opens { Some(linux_listing()) } else { None };
+/// the mouse's; absolute, injected) with the buttons it says held.
+fn pointer_on(shell: &Shell, go: impl FnOnce(&mut Desktop) -> Vec<Rect>) {
     let mut d = shell.d.lock();
     // No pointer moves on a bare desktop.
     if !d.s.live || d.bare.is_some() {
-        return None;
+        return;
     }
-    if !d.menu_open() {
-        if opens {
-            d.set_programs(&available[..n]);
-        }
-        if let Some(listing) = listing {
-            d.set_linux(listing);
-        }
-    }
-    let bar_menu = d.bar_menu.is_some();
     let damage = go(&mut d);
     for r in damage {
         redraw(&mut d, r);
     }
-    let launch = d.take_launch();
-    if bar_menu && launch.and_then(Launch::program).is_some_and(|p| p.name == TASK_MANAGER) {
-        crate::info!("desktop: taskbar menu: {TASK_MANAGER}");
-    }
-    let prefs = d.take_prefs();
     let wakes = d.take_wakes();
-    let (catalog, linux) = (d.take_catalog_changed(), d.take_linux_changed());
     drop(d);
     signal(wakes);
-    tell_catalog(shell.session, catalog);
-    tell_linux(shell.session, linux);
-    if let Some(p) = prefs {
-        save_prefs(p);
-    }
-    launch
 }
 
 /// Input a Test presenter brings to its desktop (GalaSession's
@@ -4034,12 +2738,13 @@ pub enum Injected {
 /// Brings `input` to `shell`'s desktop as the keyboard and mouse would,
 /// when a Test presenter shows it: STATUS_INVALID_DEVICE_STATE otherwise
 /// (the console's desktop gets the PS/2 devices, one shown by nothing
-/// gets nothing). Returns the program its start menu asked to start.
+/// gets nothing). Returns the program a system key asked to start
+/// (Ctrl+Shift+Esc).
 pub fn inject(
     shell: &Shell,
     windows: &crate::nt::window::Windows,
     input: Injected,
-) -> Result<Option<Launch>, NtStatus> {
+) -> Result<Option<&'static Program>, NtStatus> {
     {
         let d = shell.d.lock();
         if !d.s.live || d.presenter.kind() != Kind::Test {
@@ -4048,7 +2753,8 @@ pub fn inject(
     }
     Ok(match input {
         Injected::Pointer { x, y, buttons } => {
-            pointer_on(shell, buttons, |d| d.pointer_at(x, y, buttons))
+            pointer_on(shell, |d| d.pointer_at(x, y, buttons));
+            None
         }
         Injected::Key { vk, scan, extended, down } => {
             key_on(shell, windows, vk, scan, extended, down)
@@ -4060,110 +2766,8 @@ pub fn inject(
     })
 }
 
-/// A tile's name under its icon, centred: on `lines` lines (2, broken
-/// at a space, when it is wider than the tile, as Windows' start menu
-/// does; 1 while a progress bar has the second line, which cuts a long
-/// name short); what still does not fit ends with "...".
-fn tile_name(c: &mut Canvas, r: Rect, name: &str, lines: usize) {
-    let room = r.w - 8;
-    let fits = |t: &str| Font::Ui12.measure(t.chars()) <= room;
-    let (first, second) = match name.find(' ') {
-        Some(space) if !fits(name) => {
-            // The longest first line that fits, else the first word.
-            let at = name.rmatch_indices(' ').map(|(i, _)| i).find(|&i| fits(&name[..i]));
-            let at = at.unwrap_or(space);
-            (&name[..at], name[at..].trim_start())
-        }
-        _ => (name, ""),
-    };
-    for &(line, y) in [(first, r.y + 48), (second, r.y + 63)].iter().take(lines) {
-        if line.is_empty() {
-            continue;
-        }
-        let w = Font::Ui12.measure(line.chars()).min(room);
-        c.text(r.x + (r.w - w) / 2, y, line.chars(), TEXT, Font::Ui12, r.x + r.w - 4);
-    }
-}
-
-/// A tile's progress bar, in the row under its name: the track, and
-/// `percent` of it filled (red when the install failed, so that a tile
-/// waiting for another click says so).
-fn progress_bar(c: &mut Canvas, r: Rect, percent: u8, color: u32) {
-    let (bx, by, bw) = (r.x + 12, r.y + 68, r.w - 24);
-    c.round_rect(bx, by, bw, 4, 2, 0x00_d0_d5_dc, 0x00_d0_d5_dc, 255);
-    let fill = bw * i64::from(percent) / 100;
-    if fill > 0 {
-        c.round_rect(bx, by, fill.max(4), 4, 2, color, color, 255);
-    }
-}
-
-/// The colour of a tile's bar: the accent while the install is going
-/// on, red when it failed, grey when it went quiet (the question-mark
-/// badge on the icon says which of the two).
-fn bar_color(s: pkg::Progress) -> u32 {
-    match s {
-        pkg::Progress::Failed(_) => CLOSE_HOVER,
-        pkg::Progress::Lost(_) => TEXT_DIM,
-        _ => ACCENT,
-    }
-}
-
-/// The same for a distribution's install.
-fn linux_bar_color(p: linux::Progress) -> u32 {
-    match p {
-        linux::Progress::Failed => CLOSE_HOVER,
-        linux::Progress::Lost(_) => TEXT_DIM,
-        _ => ACCENT,
-    }
-}
-
-/// The mark of an install that went quiet (`pkg::Progress::Lost`): a
-/// round grey badge with a white question mark, where the download
-/// badge sits, over an icon drawn grey. Drawn by hand: no font is read
-/// at this size.
-fn question_badge(c: &mut Canvas, x: i64, y: i64) {
-    c.round_rect(x - 1, y - 1, 18, 18, 9, MENU_COLOR, MENU_COLOR, 255);
-    c.round_rect(x, y, 16, 16, 8, TEXT_DIM, TEXT_DIM, 255);
-    let white = 0x00ff_ffff;
-    // The hook over the stem, then the dot under it.
-    for i in 5..11 {
-        c.put(x + i, y + 4, white, 255);
-    }
-    for j in 5..7 {
-        c.put(x + 9, y + j, white, 255);
-        c.put(x + 10, y + j, white, 255);
-    }
-    c.put(x + 8, y + 7, white, 255);
-    c.put(x + 9, y + 7, white, 255);
-    for j in 8..10 {
-        c.put(x + 7, y + j, white, 255);
-        c.put(x + 8, y + j, white, 255);
-    }
-    c.put(x + 7, y + 11, white, 255);
-    c.put(x + 8, y + 11, white, 255);
-}
-
-/// The mark of a catalog entry not installed yet: a round accent badge
-/// with a white downward arrow, its top-left corner at (x, y) (over the
-/// icon's bottom-right corner).
-fn download_badge(c: &mut Canvas, x: i64, y: i64) {
-    c.round_rect(x - 1, y - 1, 18, 18, 9, MENU_COLOR, MENU_COLOR, 255);
-    c.round_rect(x, y, 16, 16, 8, ACCENT, ACCENT, 255);
-    for j in 3..11 {
-        c.put(x + 7, y + j, 0x00ff_ffff, 255);
-        c.put(x + 8, y + j, 0x00ff_ffff, 255);
-    }
-    for t in 0..4 {
-        c.put(x + 4 + t, y + 7 + t, 0x00ff_ffff, 255);
-        c.put(x + 11 - t, y + 7 + t, 0x00ff_ffff, 255);
-    }
-    for i in 4..12 {
-        c.put(x + i, y + 13, 0x00ff_ffff, 255);
-    }
-}
-
-/// The start menu's tiles (`list_programs` of PROGRAMS). Reads the file
-/// system: not under the desktop's lock.
+/// The programs shasha's start menu can list (`list_programs` of
+/// PROGRAMS). Reads the file system: not under the desktop's lock.
 fn available_programs() -> ([Entry; MAX_TILES], usize) {
     list_programs(PROGRAMS, &mut |path| super::process::program_exists(path))
 }
@@ -4176,7 +2780,6 @@ const USER_HIVE: &str = "USER\\S-1-5-21-1000000001-1000000002-1000000003-1001";
 const LXSS: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Lxss";
 const START_MENU_KEY: &str = "Software\\gala\\StartMenu";
 const REG_SZ: u32 = 1;
-const REG_DWORD: u32 = 4;
 const REG_MULTI_SZ: u32 = 7;
 
 /// `parts` joined by backslashes, as UTF-16 (a registry path).
@@ -4222,9 +2825,9 @@ fn reg_text<const N: usize>(v: &super::registry::Value) -> Option<linux::Text<N>
     linux::Text::new(&b[..n])
 }
 
-/// Registered distribution `name`'s application `index` (as its start
-/// menu tile's context menu lists them), or None: no such distribution
-/// or application.
+/// Registered distribution `name`'s application `index` (as LinuxList
+/// lists them after its terminal), or None: no such distribution or
+/// application.
 pub fn linux_app(name: &[u8], index: usize) -> Option<linux::App> {
     let listing = linux_listing();
     let distro = listing.installed.iter().find(|d| d.name.as_bytes() == name)?;
@@ -4243,15 +2846,6 @@ fn linux_listing() -> linux::Listing {
     let _ = registry::with(|r| {
         let path = reg_path(&[USER_HIVE, START_MENU_KEY]).ok_or(NtStatus::NO_MEMORY)?;
         if let Ok(key) = r.lookup(ROOT, &path) {
-            let dword = |r: &registry::Registry, name: &str| {
-                let (w, n) = wide_name::<32>(name);
-                r.value(key, &w[..n]).ok().and_then(|v| {
-                    (v.kind == REG_DWORD && v.data.len() >= 4)
-                        .then(|| u32::from_le_bytes([v.data[0], v.data[1], v.data[2], v.data[3]]))
-                })
-            };
-            listing.prefs.collapsed = dword(r, "LinuxCollapsed").unwrap_or(0) != 0;
-            listing.prefs.hidden = dword(r, "LinuxHidden").unwrap_or(0) != 0;
             let (w, n) = wide_name::<32>("LinuxDismissed");
             if let Ok(v) = r.value(key, &w[..n])
                 && v.kind == REG_MULTI_SZ
@@ -4427,60 +3021,6 @@ fn distro_apps(base: &[u8], d: &mut linux::Distro) {
     }
 }
 
-/// Saves the start menu's Linux choices in the boot user's hive
-/// (HKCU\Software\gala\StartMenu), kept across reboots as every key is
-/// (`persist`); logged, with a `window` event.
-fn save_prefs(p: linux::Prefs) {
-    use super::registry::{self, ROOT};
-    let now = platform::system_time();
-    let saved = registry::with(|r| {
-        let mut at = ROOT;
-        for part in USER_HIVE.split('\\').chain(START_MENU_KEY.split('\\')) {
-            let (w, n) = wide_name::<64>(part);
-            at = r.create(at, &w[..n], 0, &[], now)?.0;
-        }
-        for (name, on) in [("LinuxCollapsed", p.collapsed), ("LinuxHidden", p.hidden)] {
-            let (w, n) = wide_name::<32>(name);
-            r.set_value(at, &w[..n], REG_DWORD, &u32::from(on).to_le_bytes(), now)?;
-        }
-        let data = p.write_dismissed().ok_or(NtStatus::NO_MEMORY)?;
-        let (w, n) = wide_name::<32>("LinuxDismissed");
-        r.set_value(at, &w[..n], REG_MULTI_SZ, &data, now)
-    });
-    let mut names = [0u8; 64];
-    let mut len = 0;
-    for (i, s) in linux::SUGGESTIONS.iter().enumerate() {
-        if p.is_dismissed(i) && len + s.name.len() < names.len() {
-            if len > 0 {
-                names[len] = b',';
-                len += 1;
-            }
-            names[len..len + s.name.len()].copy_from_slice(s.name.as_bytes());
-            len += s.name.len();
-        }
-    }
-    let dismissed = core::str::from_utf8(&names[..len]).unwrap_or("");
-    match saved {
-        Ok(()) => crate::info!(
-            "desktop: start menu: Linux distributions {}{}, dismissed [{dismissed}] (saved in HKCU\\{START_MENU_KEY})",
-            if p.hidden { "hidden" } else { "shown" },
-            if p.collapsed { ", collapsed" } else { "" },
-        ),
-        Err(e) => crate::warn!("desktop: start menu: Linux choices not saved: {e:?}"),
-    }
-    crate::events::emit(
-        crate::events::Category::Window,
-        "start menu",
-        format_args!(
-            r#""op":"linux prefs","hidden":{},"collapsed":{},"dismissed":{},"status":{}"#,
-            p.hidden,
-            p.collapsed,
-            crate::events::Str(dismissed),
-            saved.err().map_or(0, |e| e.0)
-        ),
-    );
-}
-
 /// Where a tile's install is for `shell`'s start menu
 /// (GalaDesktopAction's InstallProgress from `gala install <id>`):
 /// `state` 0 resolving, 1 downloading (`percent`), 2 installing, 3 done
@@ -4521,7 +3061,7 @@ pub fn install_progress(
 }
 
 /// What became of the `gala install` a tile asked for: its pid, or
-/// None when it never started (`nt::action::start_from_menu`). A tile
+/// None when it never started (`nt::action::install_for_shell`). A tile
 /// whose installer never started, or whose installer later ends without
 /// a word (`process_ended`), goes quiet instead of waiting for ever.
 pub fn install_started(session: u32, program: &'static Program, pid: Option<u64>) {
@@ -4720,15 +3260,14 @@ pub struct LinuxTile {
 }
 
 /// The Linux section's tiles for `shell`'s start menu (GalaDesktopAction's
-/// LinuxList): the kernel menu's (`linux::entries`, the dismissed
-/// suggestions left out), read from the registry and the distributions'
+/// LinuxList): `linux::entries` (the suggestions the user's choices
+/// dismissed left out), read from the registry and the distributions'
 /// files before the desktop's lock, each with its install's progress.
 /// Reads only: what the desktop keeps is changed by the installs' own
 /// reports (`linux_progress`).
 pub fn linux_section(shell: &Shell) -> Vec<LinuxTile> {
-    let mut listing = linux_listing();
+    let listing = linux_listing();
     let d = shell.d.lock();
-    listing.prefs = d.linux_prefs(listing.prefs);
     let mut out = Vec::new();
     for distro in linux::entries(&listing) {
         let install = if distro.installed { None } else { d.linux_install_of(distro.name) };
@@ -4779,7 +3318,7 @@ pub fn linux_progress(
     };
     let listing = if progress.is_none() { Some(linux_listing()) } else { None };
     let mut d = shell.d.lock();
-    if let Some(listing) = listing {
+    if let Some(listing) = &listing {
         d.set_linux(listing);
     }
     d.linux_progress(name, progress);
@@ -4921,11 +3460,13 @@ pub fn work_area(shell: &Shell) -> Option<Rect> {
     (w.w > 0).then_some(w)
 }
 
-/// Shows wallpaper `name` (one of WALLPAPERS, a `.qoi` file's path, or
-/// "drawn") from now on and saves it as the "Wallpaper" value
-/// (GalaDesktopAction; SPI_SETDESKWALLPAPER): STATUS_OBJECT_NAME_NOT_FOUND
-/// for another name or a missing file, STATUS_NOT_SUPPORTED without a
-/// screen.
+/// Makes `name` the wallpaper (one of WALLPAPERS, a `.qoi` file's path,
+/// or "drawn" for none) and saves it as the "Wallpaper" value
+/// (GalaDesktopAction; SPI_SETDESKWALLPAPER), which shasha reads and
+/// draws when told (`nt::action`'s WM_SETTINGCHANGE): STATUS_OBJECT_NAME_NOT_FOUND
+/// for another name or a missing file, STATUS_INVALID_IMAGE_FORMAT for a
+/// file that is no QOI picture (`qoi_size`), STATUS_NOT_SUPPORTED where
+/// no shell runs (a bare desktop).
 pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
@@ -4935,33 +3476,9 @@ pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     } else {
         wallpaper_path(name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?
     };
-    let picture = if path.is_empty() {
-        None
-    } else {
-        let data = super::file::lookup(path)
-            .and_then(super::file::read_all)
-            .map_err(|_| NtStatus::OBJECT_NAME_NOT_FOUND)?;
-        Some(paint::decode_qoi(&data).ok_or(NtStatus::INVALID_IMAGE_FORMAT)?)
-    };
-    // The new layout is made outside the desktop's lock (it scales the
-    // picture to the screen), then swapped in.
-    let screen = shell.d.lock().s.screen;
-    let layout = if screen.0 > 0 {
-        Some(Wallpaper::new(screen.0, screen.1, picture.as_ref()).ok_or(NtStatus::NO_MEMORY)?)
-    } else {
-        None
-    };
-    *PICTURE.lock() = picture;
-    let mut d = shell.d.lock();
-    if let Some(layout) = layout
-        && d.s.live
-        && d.s.screen == screen
-    {
-        d.wallpaper = Some(layout);
-        d.s.add_damage(Rect { x: 0, y: 0, w: screen.0, h: screen.1 });
-        redraw_damage(&mut d);
+    if !path.is_empty() {
+        qoi_size(path)?;
     }
-    drop(d);
     crate::info!("desktop: wallpaper {name}");
     save_wallpaper(path);
     Ok(())
@@ -5001,15 +3518,11 @@ fn wheel_on(shell: &Shell, notches: i64) {
 }
 
 /// A key to the desktop the console shows. Returns the session and the
-/// program its start menu asked to start (Enter in the menu), if any.
-pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) -> Option<(u32, Launch)> {
+/// program a system key asked to start (Ctrl+Shift+Esc), if any.
+pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) -> Option<(u32, &'static Program)> {
     let desk = console()?;
     key_on(&desk.shell, &desk.windows, vk, scan, extended, down).map(|p| (desk.shell.session, p))
 }
-
-/// No tiles (input that cannot open the start menu).
-const NO_TILES: ([Entry; MAX_TILES], usize) =
-    ([Entry { program: 0, installed: false }; MAX_TILES], 0);
 
 fn key_on(
     shell: &Shell,
@@ -5018,25 +3531,10 @@ fn key_on(
     scan: u8,
     extended: bool,
     down: bool,
-) -> Option<Launch> {
-    // The Windows key's release may open the desktop's own start menu:
-    // which programs exist and what the Linux section lists (outside the
-    // desktop's lock: the file system, the registry), unless a hot key
-    // (the shell's) holds the key and the desktop's menu stays shut.
-    let opens = (vk == 0x5b || vk == 0x5c)
-        && !down
-        && !windows.holds_hot_key(crate::nt::window::MOD_WIN, u32::from(vk));
-    let (available, n) = if opens { available_programs() } else { NO_TILES };
-    let listing = if opens { Some(linux_listing()) } else { None };
+) -> Option<&'static Program> {
     let mut d = shell.d.lock();
     if !d.s.live || d.bare.is_some() {
         return None;
-    }
-    if opens && !d.menu_open() {
-        d.set_programs(&available[..n]);
-        if let Some(listing) = listing {
-            d.set_linux(listing);
-        }
     }
     // A hot key (RegisterHotKey) takes the key's down before the desktop
     // and the active window see it (the registry's lock is a leaf: taken
@@ -5055,17 +3553,11 @@ fn key_on(
     }
     redraw_damage(&mut d);
     let launch = d.take_launch();
-    if vk == 0x1b && launch.and_then(Launch::program).is_some_and(|p| p.name == TASK_MANAGER) {
+    if launch.is_some_and(|p| p.name == TASK_MANAGER) {
         crate::info!("desktop: Ctrl+Shift+Esc: {TASK_MANAGER}");
     }
-    if vk == b'E' && launch.and_then(Launch::program).is_some_and(|p| p.name == FILE_EXPLORER) {
-        crate::info!("desktop: Win+E: {FILE_EXPLORER}");
-    }
     let wakes = d.take_wakes();
-    let (catalog, linux) = (d.take_catalog_changed(), d.take_linux_changed());
     drop(d);
-    tell_catalog(shell.session, catalog);
-    tell_linux(shell.session, linux);
     match hot {
         Some((key, Ok(event), repeat)) => {
             if !repeat && cfg!(not(test)) {
@@ -5116,57 +3608,71 @@ fn listen_with(shell: &Shell, owner: u64, listener: Listener) -> Result<(), NtSt
     Ok(())
 }
 
-/// The clock thread has been started (`start_clock`), and how many times
-/// it has ticked (the `desktop: clock:` line at the end of a run).
-static CLOCK_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-static CLOCK_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The display watch has been started (`start_display_watch`), and how
+/// many times it has ticked (the `desktop: display watch:` line at the
+/// end of a run).
+static WATCH_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static WATCH_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// How long the clock thread sleeps between ticks.
-const CLOCK_MS: u64 = 1000;
+/// How long the display watch sleeps between ticks.
+const WATCH_MS: u64 = 1000;
 
-/// Starts the desktop's clock (once; later calls do nothing): [`tick`] at
+/// Starts the display watch (once; later calls do nothing): [`tick`] at
 /// once, then every second, on a thread of its own.
 ///
-/// Its own, because the clock is not input: it used to run every two
-/// hundred rounds of the input thread's poll loop, which meant that a
-/// machine with no PS/2 mouse -- the input thread stopped at one -- had a
-/// desktop whose taskbar minute never changed and which never noticed
-/// the host's window being resized.
-pub fn start_clock() {
-    if CLOCK_STARTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+/// Its own, because a display change is not input: on the input
+/// thread's poll loop, a machine with no PS/2 mouse (the input thread
+/// stops at one) would never notice the host's window being resized.
+pub fn start_display_watch() {
+    if WATCH_STARTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    if platform::spawn("desktop clock", clock_thread, 0).is_err() {
-        crate::warn!(
-            "desktop: no clock thread: the taskbar's minute and a display change will not be noticed"
-        );
+    if platform::spawn("desktop display", watch_thread, 0).is_err() {
+        crate::warn!("desktop: no display watch thread: a display change will not be noticed");
     }
 }
 
-fn clock_thread(_: usize) {
+fn watch_thread(_: usize) {
     loop {
         tick();
-        CLOCK_TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        platform::sleep_ms(CLOCK_MS);
+        WATCH_TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        platform::sleep_ms(WATCH_MS);
     }
 }
 
-/// The `desktop: clock:` line at the end of a run; nothing when no
-/// desktop went live (the clock starts with the first one).
-pub fn log_clock_stats() {
-    let ticks = CLOCK_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+/// The `desktop: display watch:` line at the end of a run; nothing when
+/// no desktop went live (the watch starts with the first one).
+pub fn log_display_stats() {
+    let ticks = WATCH_TICKS.load(core::sync::atomic::Ordering::Relaxed);
     if ticks == 0 {
         return;
     }
-    crate::info!("desktop: clock: {ticks} ticks, one every {CLOCK_MS} ms on its own thread");
+    crate::info!(
+        "desktop: display watch: {ticks} ticks, one every {WATCH_MS} ms on its own thread"
+    );
 }
 
-/// The clock: called by the clock thread (`start_clock`), for every live
-/// desktop. Also notices a display change (virtio-gpu: the host's window
-/// resized), which the desktop the screen shows follows.
+/// Whether `no_shell` has logged.
+static NO_SHELL_TOLD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// No shell runs (or will) on the console's desktop, for reason `why`:
+/// logged once, because what the screen then shows is the desktop's
+/// colour (DESKTOP_COLOR) and the windows alone, which looks broken to
+/// whoever does not know the kernel draws no shell of its own.
+pub fn no_shell(why: &str) {
+    if NO_SHELL_TOLD.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    crate::info!(
+        "desktop: no shell yet: {why}: the screen shows the desktop's colour and the windows alone (the kernel draws no taskbar or start menu)"
+    );
+}
+
+/// The display watch's tick (`start_display_watch`): notices a display
+/// change (virtio-gpu: the host's window resized), which the live
+/// desktop the screen shows follows.
 pub fn tick() {
-    let changed = platform::screen_changed();
-    let minute = platform::system_time() / 600_000_000;
+    let Some(changed) = platform::screen_changed() else { return };
     let Ok(ids) = super::session::ids() else { return };
     for id in ids {
         let Some(desk) = super::session::desk(id) else { continue };
@@ -5174,18 +3680,14 @@ pub fn tick() {
         if !d.s.live || d.bare.is_some() {
             continue;
         }
-        if let Some((w, h)) = changed
-            && d.presenter.kind() == Kind::Console
-        {
-            resize(&mut d, w, h);
+        if d.presenter.kind() == Kind::Console {
+            resize(&mut d, changed.0, changed.1);
         }
-        d.set_minute(minute);
-        redraw_damage(&mut d);
     }
 }
 
-/// The screen is now w x h: the shell is laid out again and everything
-/// redrawn. Windows keep their places (a later step moves maximized and
+/// The screen is now w x h: the desktop's layout (the work area, the
+/// taskbar's strip) is made again and everything redrawn. Windows keep their places (a later step moves maximized and
 /// docked ones and sends WM_DISPLAYCHANGE: ARCHITECTURE "Plan: graphics
 /// and GPU").
 fn resize(d: &mut Desktop, w: u32, h: u32) {

@@ -202,7 +202,7 @@ pub(super) fn gala_session(call: &mut Call<'_>) -> NtStatus {
             match desktop::inject(shell, &desk.windows, input) {
                 Ok(launch) => {
                     if let Some(program) = launch {
-                        super::super::action::start_from_menu(id, program);
+                        super::super::action::start_for_system_key(id, program);
                     }
                     NtStatus::SUCCESS
                 }

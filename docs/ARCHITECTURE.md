@@ -583,8 +583,8 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in\|out\|note: ...`) |
 | `trace` | log every system call (arguments, status) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
-| `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
-| `shell=` | `shasha` or none (the default): start the user-mode shell `shasha.exe` with the session; it takes the taskbar ("The user-mode shell"); `shell=desktop`: the desktop's own taskbar, start menu and wallpaper (the kernel's shell, until it is removed) |
+| `wallpaper=<name>` | pin the wallpaper shasha shows (`drawn` for none; screen checks pin one) |
+| `shell=` | `shasha` or none (the default): start the user-mode shell `shasha.exe` with the session; it takes the taskbar ("The user-mode shell"); any other value starts no shell (logged), and the screen shows the desktop's colour and the windows alone (the kernel draws no taskbar or start menu) |
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
@@ -7909,10 +7909,11 @@ rather than a format of their own.
 
 ## Windows on the screen
 
-**shasha** (Arabic شاشة, "screen") is gala's graphical shell: a
-compositor, window manager and shell in the kernel for now (module
-`nt::desktop`; ROADMAP SH moves the shell,
-then the compositor, to user mode). It imitates Windows 11's look
+**shasha** (Arabic شاشة, "screen") is gala's graphical shell: the
+taskbar, start menu and wallpaper are the user-mode program
+`shasha.exe` ("The user-mode shell"); the compositor and window manager
+are in the kernel for now (module `nt::desktop`; ROADMAP SH moves the
+compositor to user mode later). It imitates Windows 11's look
 (layout, metrics and colours of captions, taskbar and start menu) with
 gala's own artwork (the Masmak fortress and the wordmark) and an open
 font (Selawik); no Microsoft logo, font, wallpaper or icon file is used.
@@ -7933,15 +7934,17 @@ sessions and remote desktops" (one desktop per session).
 Code: `kernel/src/nt/winstate/` (the window state every desktop keeps, a bare one too:
 windows, Z order, focus, capture, client pixels, input for programs,
 the named actions; host tests in `winstate/tests.rs`),
-`kernel/src/nt/desktop/` (`mod.rs`: the compositor and shell on top of
-it: frames, taskbar, start menu, pointer, the mouse and keys; `paint.rs`:
-drawing; `tests.rs`), `kernel/src/console.rs` (boot splash),
+`kernel/src/nt/desktop/` (`mod.rs`: the compositor on top of it:
+frames, pointer, the mouse and keys, the system's keys, the wallpaper's
+choice, the programs and the catalog's and Linux distributions'
+install state for the shell; `paint.rs`: the frames' drawing;
+`appbar.rs`, `pkg.rs`, `linux.rs`; `tests.rs`), `kernel/src/console.rs` (boot splash),
 `kernel/src/input.rs` and `arch::ps2` (devices), `nt::platform::Display`
 (the screen), `desktop/present.rs` (presenters). Each session's desktop
 is a `Shell` (a `Desktop` behind its own `IrqMutex`: the window state,
 `winstate::State<Chrome>`, and the compositor's own: presenter,
-wallpaper, taskbar, start menu, pointer, drag; `nt::session::Desk` holds
-it). Every session's
+pointer, drag, the app bars, the programs' and distributions' listings
+and installs; `nt::session::Desk` holds it). Every session's
 desktop keeps its windows and their pixels whether or not anything shows
 it; the console session's (`session::CONSOLE`) is shown by the screen
 (or what `presenter=` names) and gets the keyboard and mouse; another
@@ -7954,7 +7957,7 @@ session's is shown by nothing unless GalaSession attaches a presenter
   `screen_write_row`, `screen_flush` (a damaged rectangle's rows are
   written: a GPU shows them), `screen_changed` (a new size) and
   `local_input` (the console session's desktop went live: the kernel
-  starts the PS/2 input thread and the desktop's clock thread, also
+  starts the PS/2 input thread and the desktop's display watch, also
   without a screen). The Console presenter
   is what uses it. The
   screen is the bootloader's framebuffer, or with `display=virtio` a
@@ -8033,88 +8036,90 @@ session's is shown by nothing unless GalaSession attaches a presenter
   (`Window::chrome`, drawn again when the window's `look` count moves
   on: title, icon, size, maximized). Windows of a process that ends are
   destroyed.
-- **Composition** (`Desktop::pixel`), layer by layer: the wallpaper;
-  each shown window (not hidden, not minimized) with a soft shadow
-  below it and its rounded shape (radius 8, anti-aliased by 4 x 4
-  samples) holding the outline, the caption and the client area; the
-  translucent taskbar; the start menu and its shadow; the pointer. A
-  maximized or docked window (filling the work area's height against
+- **Composition** (`Desktop::pixel`), layer by layer: the desktop's
+  colour (`DESKTOP_COLOR`, 0x3a6ea5); each shown window (not hidden,
+  not minimized) with a soft shadow below it and its rounded shape
+  (radius 8, anti-aliased by 4 x 4 samples) holding the outline, the
+  caption and the client area; the pointer. The shell's windows are
+  windows like any other: shasha's Progman (the wallpaper) at the
+  bottom, its taskbar and start menu topmost ("The user-mode shell").
+  A maximized or docked window (filling the work area's height against
   its left or right edge) is square with no shadow (`Window::square`).
+- **No shell of its own**: the kernel draws no taskbar, start menu,
+  clock or wallpaper and has no Windows-key menu or Win+E; shasha does
+  all of that. Without it (shasha.exe not installed, `shell=` naming
+  something else, or shasha ended) the screen shows the desktop's
+  colour and the windows alone, said once per boot (`desktop: no shell
+  yet: <why>: the screen shows the desktop's colour and the windows
+  alone (the kernel draws no taskbar or start menu)`); the taskbar's
+  strip stays reserved for window 0, drawn by nothing ("App bars").
+  What the system keeps whether a shell runs or not: Win+arrows (Snap)
+  and Ctrl+Shift+Esc (Task Manager), which no program may register
+  ("Window behaviour").
 - **Damage**: changes collect damage rectangles; `with`,
-  `pointer_event`, `key_event` and `tick` compose them row by row and
-  hand the rows to the desktop's presenter (`Presenter::write_row`,
-  then `flush`: the screen through `platform::screen_write_row`, a Test
+  `pointer_event` and `key_event` compose them row by row and hand the
+  rows to the desktop's presenter (`Presenter::write_row`, then
+  `flush`: the screen through `platform::screen_write_row`, a Test
   frame, or nothing: with no presenter nothing is composed). A desktop
   goes live lazily: its first use lays it out and draws it whole, as
   does attaching a presenter.
-- **Drawing** (`paint.rs`): integer-only blending and gradients, an ARGB
-  `Canvas` (rounded rectangles, outlines, tinted alpha masks, text in
-  the baked Selawik sizes of `paint::Font`: proportional, advances in
-  1/16 px, "..." truncation), the shadow falloff (quadratic in the
-  squared distance). Glyphs and masks are baked by xtask (`bake-fonts`,
-  `bake-icons`; WORKFLOW): the kernel embeds coverage bytes only.
-- **Wallpaper**: chosen at boot (`choose_wallpaper`): the
-  `wallpaper=<name>` boot option, else one of
-  `C:\Windows\Web\Wallpaper\{dunes,ribbons,najdi,night}.qoi` present at
-  random (by the time's low bits), decoded by `decode_qoi` (QOI, written
-  from its specification; fallible) and scaled to cover the screen
-  (centred, nearest pixel). Without one (or with `wallpaper=drawn`): a
-  radial blue gradient and three translucent ribbons from sines
-  (Bhaskara's approximation). Either way the fortress over the wordmark
-  sits in faint white at the bottom right. GalaDesktopAction's Wallpaper
-  changes it at run time. TODO: the choice is not kept across boots.
+- **The display watch** (`start_display_watch`, the thread "desktop
+  display", started with the input thread by `platform::local_input`):
+  `tick` once a second notices a new screen size
+  (`platform::screen_changed`) and lays the console session's desktop
+  out again; counted in `desktop: display watch: <n> ticks, one every
+  1000 ms on its own thread` at the end of a run.
+- **Drawing** (`paint.rs`): integer-only blending, an ARGB `Canvas`
+  (rounded outlines, text in Selawik 12, `paint::Font::Ui12`:
+  proportional, advances in 1/16 px, "..." truncation) for the
+  captions, the rounded shape's coverage, the shadow falloff (quadratic
+  in the squared distance). The glyphs are baked by xtask
+  (`bake-fonts`; WORKFLOW): the kernel embeds coverage bytes only.
+- **Wallpaper**: the kernel keeps the choice, shasha draws it. At boot
+  `choose_wallpaper` takes the `wallpaper=<name>` boot option, else one
+  of `C:\Windows\Web\Wallpaper\{dunes,ribbons,najdi,night}.qoi`
+  present at random (by the time's low bits), and saves it as the
+  user's value (`save_wallpaper`: HKCU's `Control Panel\Desktop`
+  Wallpaper, which shasha and SPI_GETDESKWALLPAPER read);
+  `wallpaper=drawn` chooses none. GalaDesktopAction's Wallpaper
+  (SPI_SETDESKWALLPAPER) changes it at run time. The kernel reads only
+  the file's 14-byte QOI header (`qoi_header`: "qoif", a width and
+  height not zero, 3 or 4 channels) to refuse what shasha could not
+  show (STATUS_OBJECT_NAME_NOT_FOUND, STATUS_INVALID_IMAGE_FORMAT;
+  `desktop: cannot use wallpaper <name> (<path>): <status>`); it
+  decodes no picture. Logged `desktop: wallpaper <name> (<w> x <h>)`.
 - **Frame**: a 1-pixel outline and a 32-pixel caption (user32's metrics
   match: `user/user32/src/window.rs` BORDER/CAPTION), light grey, the
   window's icon (16 x 16) and the title at the left (greyed when
   inactive), minimize, maximize/restore and close buttons (46 px each;
   close turns red under the pointer, the others grey).
-- **Taskbar**: the bottom 48 rows, translucent: centred, the fortress
-  as the start button and a 44-px button per window the programs show
-  (in creation order; the window's icon at 24 x 24, scaled by area
-  average from what user32 hands over, or else a letter tile; an accent
-  pill under the active one, a grey one under the others); at the right
-  a UTC clock over the date in 12-hour M/D/YYYY form (`tick` every
-  second from the desktop's clock thread); left of the clock, the notification
-  area (below).
-- **Start menu** (600 x 640, centred above the taskbar): a search box
-  (typing filters the programs, Enter starts the first, Esc or the
-  Windows key closes; the Windows key pressed and released alone also
-  opens it), "Pinned": a grid of tiles (six to a row, four rows:
-  `MAX_TILES`), "Recommended": the last four started, and a user foot
-  with the fortress as the avatar. The tiles are `desktop::PROGRAMS`
-  (ROADMAP SM): each a name, candidate paths (`%NAME%` of the boot
-  user's environment expanded by `process::expand_environment`; the
-  first that exists is the program) and, for a catalog entry, a winget
-  id. gala's own programs (Command Prompt: System32's cmd.exe, else
-  C:\gala's; gui_test's "Hello window") are listed when present, the
-  catalog always (Microsoft Office, FileZilla, .NET, Python, Chromium,
-  Git, 7-Zip; their paths are where each package's installer puts the
-  program per its winget-pkgs manifest, the user scope's first), one
-  tile per name (`list_programs`, reading the file system outside the
-  desktop's lock when a press or the Windows key's release may open the
-  menu). A catalog entry not installed is drawn dimmed with a download
-  badge (an accent circle with a white arrow). A click (or Enter, the
-  first tile) hands the program to `nt::action::start_from_menu`, which
-  checks again outside the lock (`menu_request`): a program that exists
-  starts (`process::launch`: the boot user, its directory current, new
-  console handles) and the menu closes, else `C:\gala\gala.exe install
-  <id>` runs. A console program (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a
-  console window, as one started from Explorer does: a console session
-  hosted by conhost.exe (System32's, else C:\gala's), started first with
-  the session's id and the program's name; that window stays after the
-  program ends. Logged (`desktop: start menu starts <name>: <path>`,
-  `desktop: start menu: <name> is not installed: <gala> install <id>
-  (no window)`, `desktop: started <path> (pid N) in a console window`)
-  and a `window` event `start menu` (op start, install or missing;
-  session, name, target, pid, status). The desktop's host tests test
-  this menu; scenario `start_menu` (start_menu_test, screen check)
-  tests shasha's, which draws the same install state ("The user-mode
-  shell").
-  - **An install happens on the tile**, as a Linux distribution's does:
-    the install runs with no window at all, the menu stays open and the
-    tile keeps the click's place with a progress bar in the row under
-    its name (the name then has one line, the badge goes). gala.exe
-    tells the menu where the install is through GalaDesktopAction's
+- **The programs** (`desktop::PROGRAMS`, ROADMAP SM): what shasha's
+  start menu lists, through GalaDesktopAction's Programs and Catalog.
+  Each is a name, candidate paths (`%NAME%` of the boot user's
+  environment expanded by `process::expand_environment`; the first
+  that exists is the program) and, for a catalog entry, a winget id.
+  gala's own programs (Command Prompt: System32's cmd.exe, else
+  C:\gala's; gui_test's "Hello window"; "Linux", wsl.exe; Task Manager;
+  File Explorer)
+  are listed when present, the catalog always (Microsoft Office,
+  FileZilla, .NET, Python, Chromium, Git, 7-Zip; their paths are where
+  each package's installer puts the program per its winget-pkgs
+  manifest, the user scope's first), one entry per name, at most
+  `MAX_TILES` (`list_programs`, reading the file system outside the
+  desktop's lock). GalaDesktopAction's Install (`nt::action::
+  install_for_shell`) runs `C:\gala\gala.exe install <id>` with no
+  window for a catalog entry not on the machine. A console program
+  (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a console window, as one started
+  from Explorer does: a console session hosted by conhost.exe
+  (System32's, else C:\gala's), started first with the session's id
+  and the program's name; that window stays after the program ends
+  (`desktop: started <path> (pid N) in a console window (<host>)`).
+  Ctrl+Shift+Esc starts Task Manager the same way
+  (`nt::action::start_for_system_key`: `desktop: system key starts
+  <name>: <path>`, a `window` event `system key`).
+  - **An install's progress** is kept per catalog entry, for shasha's
+    tile (`<id>State`, its bar: "The user-mode shell"). gala.exe tells
+    the desktop where the install is through GalaDesktopAction's
     InstallProgress (ACTION 15: the winget id as the text, the state,
     the percent downloaded and, on failure, the exit code it fails
     with): `desktop::install_progress` matches the id against the
@@ -8124,22 +8129,23 @@ session's is shown by nothing unless GalaSession attaches a presenter
     `Host::fetch_installer` reports it as the bytes come in),
     installing 85%, and on failure a full red bar (a click then tries
     again; a click while it installs does nothing). "Done" lists the
-    programs again, so the tile is drawn installed and its bar goes.
-    Each state is logged once (`desktop: start menu: install <id>:
-    <state> (<percent>%)`, a failure as `failed (gala exit N)` and,
-    where the code says more than that it failed, `(gala exit N: <that>)`
-    - `pkg::install_failure`, whose None is galapkg's own `Failed` (4),
+    programs again, so the entry is installed and its bar goes. Each
+    change posts WM_GALA_CATALOG to the shell's window. Each state is
+    logged once (`desktop: start menu: install <id>: <state>
+    (<percent>%)`, a failure as `failed (gala exit N)` and, where the
+    code says more than that it failed, `(gala exit N: <that>)` -
+    `pkg::install_failure`, whose None is galapkg's own `Failed` (4),
     the step being named by gala's own line above) with a `window`
-    event, since there is no window to show it in; gala's own output is
-    in the log too (a process without a console writes there). Whatever
-    ends the command, the tile hears: `galapkg::install::install`
-    reports Done or Failed around the whole install, and gala.exe
-    reports a failure with its exit code for anything that ends it
-    earlier.
+    event `start menu`, since there is no window to show it in; gala's
+    own output is in the log too (a process without a console writes
+    there). Whatever ends the command, the desktop hears:
+    `galapkg::install::install` reports Done or Failed around the whole
+    install, and gala.exe reports a failure with its exit code for
+    anything that ends it earlier.
   - **An install whose installer is gone goes quiet**, rather than
     waiting for a word that is not coming: a gala.exe killed outright,
     or faulting before it can report, says nothing at all.
-    `start_from_menu` reports the installer's pid to the desktop
+    `install_for_shell` reports the installer's pid to the desktop
     (`install_started`, None when it never started: no gala.exe, no
     memory for the command line, a session with no user, or a program
     that is neither on the machine nor in the catalog), and the
@@ -8147,104 +8153,95 @@ session's is shown by nothing unless GalaSession attaches a presenter
     distributions alike. A process that ends is the word that no word
     will come: `process_ended` asks the desktop about that pid
     (`installers_gone`), and the install goes to `Progress::Lost(at)`,
-    which keeps the bar where it got to, in grey, and draws the icon
-    grey under a white question mark where the download badge sits. A
-    click tries again, as on a tile whose install failed, and it is
-    told like any end ("The install went
-    quiet: its installer is gone with no word. A click tries again.",
-    or "The install never started. A click tries again."). The watch is
-    on the process and not on a silence: an install may say nothing for
-    half an hour (Office's does), so a timeout would call a working
-    install dead. The pid is forgotten with the install it belongs to
-    (`watch_only_waiting`, called wherever an install ends), since a
-    stale pid would turn a tile grey for a stranger's process ending;
-    at most MAX_INSTALLERS installs are watched at once (more than a
-    user can start), one past that is logged and left to the next
-    listing as before. Logged as `desktop: start menu: <name>'s install
-    went quiet at <at>%: <why>` with a `window` event (op "install
-    quiet") and a ledger entry ("install gone quiet"). A `Desktop`
-    method cannot write any of that itself - host unit tests build
-    without the `hosted` feature, where the console writes to COM1 with
-    `out`, which faults in user mode - so the desktop keeps what is to
-    be told (`Quieted`, as it keeps `launch`) and the module's free
-    functions drain it (`tell_quiet`).
+    which keeps the bar where it got to, in grey (shasha draws the
+    icon grey under a white question mark). A click tries again, as on
+    a tile whose install failed, and it is told like any end ("The
+    install went quiet: its installer is gone with no word. A click
+    tries again.", or "The install never started. A click tries
+    again."). The watch is on the process and not on a silence: an
+    install may say nothing for half an hour (Office's does), so a
+    timeout would call a working install dead. The pid is forgotten
+    with the install it belongs to (`watch_only_waiting`, called
+    wherever an install ends), since a stale pid would turn a tile grey
+    for a stranger's process ending; at most MAX_INSTALLERS installs
+    are watched at once (more than a user can start), one past that is
+    logged and left to the next listing as before. Logged as `desktop:
+    start menu: <name>'s install went quiet at <at>%: <why>` with a
+    `window` event (op "install quiet") and a ledger entry ("install
+    gone quiet"). A `Desktop` method cannot write any of that itself -
+    host unit tests build without the `hosted` feature, where the
+    console writes to COM1 with `out`, which faults in user mode - so
+    the desktop keeps what is to be told (`Quieted`, as it keeps
+    `launch`) and the module's free functions drain it (`tell_quiet`).
   - **An install that ends is told**, since the tile it ran on is out
     of sight as soon as the menu is closed: `desktop: start menu:
     <name>: Installed. Its tile starts it now.` or `... The install
-    failed[: <what the exit code says>].` in the log (`announce`; the
-    kernel's taskbar has no notification area to show it on, and this
-    menu goes with it, ROADMAP SH step 1). It is told once
-    and always: the listing that draws the tile installed is what tells
-    it, the install's own last word tells it when the listing has not
-    caught up with it, and a failure reported twice is told once (a
-    click that tries again and fails is told again). A distribution's
-    install is told the same way (`set_linux`, `linux_progress`), with
-    no reason: `wsl --import` gives no code to say one.
+    failed[: <what the exit code says>].` in the log (`announce`; an
+    install's notification above shasha's notification area is not
+    made yet, ROADMAP SH step 1). It is told once and always: the
+    listing that shows the entry installed is what tells it, the
+    install's own last word tells it when the listing has not caught up
+    with it, and a failure reported twice is told once (a click that
+    tries again and fails is told again). A distribution's install is
+    told the same way (`set_linux`, `linux_progress`), with no reason:
+    `wsl --import` gives no code to say one.
 - **Linux distributions** (ROADMAP LD step 7; `desktop/linux.rs` the
   model and `.desktop` parsing, host tests there and in
-  `desktop/tests.rs`; scenario `linux_menu` runs shasha's, "The Linux
-  section" in "The user-mode shell", which reads this model through
-  GalaDesktopAction's LinuxList): a section below the pinned
-  grid (which then shows at most two rows; not while searching): a
-  heading "Linux distributions" with a chevron (a click collapses or
-  expands it) and "Hide" at its right, then one row of tiles: the
-  suggestions (`linux::SUGGESTIONS`: Ubuntu and Alpine, each the URL of
-  the rootfs its distribution publishes for WSL) in order, installed or
-  not dismissed, then the other registered distributions. A suggestion
-  not installed is dimmed with the download badge and a dismiss cross at
-  its top right. What it lists is read outside the desktop's lock when a
-  press may open the menu (`linux_listing`): the boot user's Lxss keys in
-  State 1 (DistributionName, BasePath) and, for each, its applications:
-  `<BasePath>\rootfs\usr\share\applications\*.desktop` walked inside
-  its tree (`lx::file::resolve_in`), the Desktop Entry Specification's
-  Type=Application entries with Name and Exec, not NoDisplay, Hidden or
-  Terminal, Exec's field codes taken out (at most MAX_APPS).
-  - The user's choices (`linux::Prefs`) are kept in their hive,
-    `HKCU\Software\gala\StartMenu`: LinuxCollapsed, LinuxHidden
-    (REG_DWORD) and LinuxDismissed (REG_MULTI_SZ of names, so the table
-    may change); written outside the lock after the click that changed
-    them (`save_prefs`), so `persist` keeps them across reboots as any
-    key; a listing read while a change waits keeps the menu's. A hidden
-    section comes back from the menu's own context menu (a right click
-    on its background: "Show Linux distributions").
-  - A click on a suggestion installs it and the menu stays open: the
-    tile gets a progress bar, and the system runs `C:\gala\gala.exe
-    linux-install <name> <url>` with no window (`nt::action::start_linux`;
-    the URL is the suggestion's, or `<linux_mirror>/<its file name>`
-    with the boot option `linux_mirror=`). gala.exe fetches it over
-    winhttp, writes `%LOCALAPPDATA%\Linux\<name>.rootfs.tar.gz`, runs
-    `wsl --import <name> %LOCALAPPDATA%\Linux\<name> <tarball>`, deletes
-    the tarball and tells the menu through GalaDesktopAction's
-    LinuxProgress (ACTION 14: downloading with a percent, importing,
-    done, failed); the bar fills to 80% over the download, 90% while
-    importing, red on failure (a click then tries again); "done" lists
-    again, so the tile shows the registered distribution.
-  - A click on an installed distribution starts its desktop: `wsl.exe -d
+  `desktop/tests.rs`; scenario `linux_menu` runs shasha's section, "The
+  Linux section" in "The user-mode shell", which reads this model
+  through GalaDesktopAction's LinuxList): the suggestions
+  (`linux::SUGGESTIONS`: Ubuntu and Alpine, each the URL of the rootfs
+  its distribution publishes for WSL) in order, installed or not
+  dismissed, then the other registered distributions. What it lists is
+  read outside the desktop's lock (`linux_listing`): the boot user's
+  Lxss keys in State 1 (DistributionName, BasePath) and, for each, its
+  applications: `<BasePath>\rootfs\usr\share\applications\*.desktop`
+  walked inside its tree (`lx::file::resolve_in`), the Desktop Entry
+  Specification's Type=Application entries with Name and Exec, not
+  NoDisplay, Hidden or Terminal, Exec's field codes taken out (at most
+  MAX_APPS).
+  - The user's dismissals (`linux::Prefs`) are read from their hive,
+    `HKCU\Software\gala\StartMenu` LinuxDismissed (REG_MULTI_SZ of
+    names, so the table may change), so `persist` keeps them across
+    reboots as any key. Nothing writes the value yet: shasha offers no
+    dismiss, collapse or hide (ROADMAP SH step 1, part 11).
+  - GalaDesktopAction's Linux on a distribution not installed, failed
+    or gone quiet installs it: the desktop marks it downloading, and
+    the system runs `C:\gala\gala.exe linux-install <name> <url>` with
+    no window (`nt::action::linux_for_shell`; the URL is the
+    suggestion's, or `<linux_mirror>/<its file name>` with the boot
+    option `linux_mirror=`). gala.exe fetches it over winhttp, writes
+    `%LOCALAPPDATA%\Linux\<name>.rootfs.tar.gz`, runs `wsl --import
+    <name> %LOCALAPPDATA%\Linux\<name> <tarball>`, deletes the tarball
+    and tells the desktop through GalaDesktopAction's LinuxProgress
+    (ACTION 14: downloading with a percent, importing, done, failed);
+    the bar fills to 80% over the download, 90% while importing, red on
+    failure (a click then tries again); "done" lists again, so the
+    entry shows the registered distribution. Each change posts
+    WM_GALA_CATALOG with wparam 1 to the shell's window.
+  - On an installed distribution it starts its desktop: `wsl.exe -d
     <name> --exec /bin/sh /lx/xdesktop/session.sh` (LD step 6's session:
     rootful Xwayland on :1 as one window, twm, an xterm; it waits for
-    Xwayland's `-displayfd` and prints Xwayland's output when the session
-    fails) with no window of its own; a distribution without that script starts nothing
-    (logged, ledger `start menu`/`linux desktop session missing`). Its
-    context menu (a right click; drawn inside the menu, at the pointer)
-    has "Open terminal" (`wsl.exe -d <name>` in a console window, as
-    the Linux tile) and its applications (`wsl.exe -d <name> --exec
-    <Exec's words, quoted>`, no window: an X program reaches the
-    desktop's display :0 through Xwayland's abstract socket, a Wayland
-    one the server through WSLg's runtime directory: "The WSL facade").
+    Xwayland's `-displayfd` and prints Xwayland's output when the
+    session fails) with no window of its own; a distribution without
+    that script starts nothing (logged, ledger `start menu`/`linux
+    desktop session missing`). Its terminal is `wsl.exe -d <name>` in a
+    console window, its applications `wsl.exe -d <name> --exec <Exec's
+    words, quoted>` with no window (an X program reaches the desktop's
+    display :0 through Xwayland's abstract socket, a Wayland one the
+    server through WSLg's runtime directory: "The WSL facade").
   - Observability: `desktop: start menu: <op> <name>: <program> <args>`
     and a `window` event `start menu` per request (op `linux install`,
     `linux desktop`, `linux terminal`, `linux app`; pid, status);
     `desktop: start menu: Linux distribution <name>: <state> (<n>%)` and
     an event `linux progress` at each state and each tenth of a
-    download; `desktop: start menu: Linux distributions shown|hidden[,
-    collapsed], dismissed [...] (saved in HKCU\...)` and an event `linux
-    prefs` for each change of the choices; gala.exe's `gala: linux:
-    <name>: ...` lines on the serial log.
+    download; gala.exe's `gala: linux: <name>: ...` lines on the serial
+    log.
   - Limits: the desktop session is gala's script, which only the
     scenario's stand-in carries (Canonical's image has neither it nor
     Xwayland: its desktop is refused, its terminal and applications
-    work); one row of tiles (six); an install cannot be cancelled; the
-    progress of `wsl --import` itself is not reported (a fixed 90%).
+    work); an install cannot be cancelled; the progress of `wsl
+    --import` itself is not reported (a fixed 90%).
 
 #### The notification area
 
@@ -8416,10 +8413,11 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   user's token, after the self-tests (`selftest`, whose whole-kernel
   counts a running program would disturb) and before the agent panel
   (`desktop: started C:\Windows\System32\shasha.exe (pid 4)`: the
-  session's first program, so a `run=` program is pid 12). With
-  `shell=desktop` the desktop draws its own taskbar, as it does when
+  session's first program, so a `run=` program is pid 12). When
   shasha.exe is not installed (`desktop: no user-mode shell: ... not
-  opened ...: the desktop's taskbar stays`) or the desktop is bare.
+  opened (<status>)`), `shell=` names something else, or the desktop is
+  bare, no shell runs and the screen is the bare desktop ("Compositor
+  and look": `desktop: no shell yet: <why>: ...`).
   The image ships it: xtask adds `user/bin/shasha.exe` to every UEFI
   scenario's modules and to the release's system (with
   `Windows/Web/Wallpaper/ribbons.qoi`, the default wallpaper's file).
@@ -8545,8 +8543,9 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   the others (the menu closes). The section is read when the menu opens
   and whenever the shell's window gets WM_GALA_CATALOG with wparam 1
   (Progman passes the wparam on with WM_APP_CATALOG). Limits: no
-  dismiss cross, collapse or hide (the kernel menu's choices; LinuxList
-  leaves out the suggestions the user dismissed there), no icons.
+  dismiss cross, collapse or hide (LinuxList leaves out the
+  suggestions named in LinuxDismissed, which nothing writes yet), no
+  icons.
 - **The shell's keys** (ROADMAP SH step 1, part 11; `shasha::keys`,
   host tests there): the keys Windows' shell answers, registered with
   RegisterHotKey for the desktop window (Progman), which only the
@@ -8560,14 +8559,14 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   after them: a shown GetShellWindow is the sign that the shell is
   ready and holds its keys, which a program that presses them goes by
   (`hotkey_test`; screen checks wait for `shasha: the shell's keys:`).
-  While shasha holds them the kernel desktop's own actions for them
-  (its start menu, its File Explorer) do not run, and the Windows key's
-  release no longer gathers the kernel menu's programs. Win+arrows
+  The kernel has no action of its own for them: with no shell, the
+  Windows key does nothing and Win+E goes to the active window. Win+arrows
   (Snap) and Ctrl+Shift+Esc (Task Manager) are the system's, not the
   shell's: they work with no shell or a hung one, as on Windows.
 - **When shasha ends** (its process, or its bar removed) the taskbar's
-  bar is gone and the desktop places its own again on the same strip
-  (`taskbar_back`), so a session is never without a taskbar. A screen
+  bar goes back to window 0 on the same strip (`taskbar_back`), which
+  stays reserved and drawn by nothing, so maximized windows keep their
+  place until a shell takes it again. A screen
   size change moves the shell's bar to the new strip (the shell is not
   told yet).
 - **The notification area**: shasha's strip is `Shell_TrayWnd` and
@@ -8576,24 +8575,23 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   for more icons than fit; the menu has no pinned or recent programs, user or power
   buttons, or keyboard navigation of its tiles; the shell is not restarted when it ends
   (ROADMAP SH step 2). The wallpaper is QOI only and has no
-  watermark (the kernel's wallpaper draws one); SPI_SETDESKWALLPAPER
+  watermark; SPI_SETDESKWALLPAPER
   with NULL is unsupported (the ledger, FALSE).
 - **Observability**: shasha's lines (`shasha: started`, `shasha: the
   wallpaper is <path> (W x H)`, `shasha: the wallpaper <path> is not
   shown: <why>`, `shasha: no wallpaper: <why>`, `shasha: the
   taskbar at x,y wxh`, or `shasha: the taskbar's strip is not handed
-  over: <status>` with `shasha: the desktop keeps its taskbar`, `shasha:
+  over: <status>` with `shasha: the desktop keeps the taskbar's bar`, `shasha:
   <n> window(s) listed`, `shasha: activate/minimize window <hwnd>` and
   `... refused: <status>`); the kernel's `desktop: the taskbar's bar is
-  window <hwnd> of pid <p> (the shell's) at x,y wxh: the desktop no
-  longer draws it`, `desktop: pid <p>: the taskbar refused to window
+  window <hwnd> of pid <p> (the shell's) at x,y wxh`, `desktop: pid <p>: the taskbar refused to window
   <hwnd>: not the shell's (the shell's window is <hwnd>)`, `desktop:
   window <id> is the shell's window, kept at the bottom` (or `desktop:
   the shell's window <hwnd> (window <id>) not kept at the bottom:
   <status>`), `desktop: wallpaper value C:<path>`, `desktop: the
   shell's window <hwnd> told of the wallpaper` (or `not told ...`), `desktop: pid <p>: the taskbar not
   handed to window <hwnd> (...)`, `desktop: the taskbar's bar is gone:
-  the desktop's taskbar is back`, the menu's `shasha: the start menu
+  no shell draws a taskbar; its strip stays reserved`, the menu's `shasha: the start menu
   opens: <n> program(s): <names>`, `shasha: the start menu closes:
   <why>` (toggled, another window is active, a program started),
   `shasha: start <name> (<path>): pid <p>` or `... refused: <status>`,
@@ -8733,8 +8731,8 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
 
 #### Window behaviour
 
-Every action on a window (taskbar, caption buttons, Snap keys, the
-`gala` command) goes through `Desktop::act` ("Server and desktop
+Every action on a window (shasha's taskbar, caption buttons, Snap keys,
+the `gala` command) goes through `Desktop::act` ("Server and desktop
 workloads"). **The program moves its own window**: the desktop sends it
 WM_SYSCOMMAND or gala's own messages and user32 calls SetWindowPos, so
 the program always sees WM_SIZE/WM_MOVE.
@@ -8748,17 +8746,14 @@ the program always sees WM_SIZE/WM_MOVE.
   follows); for windows a kernel server serves (Wayland's), also
   GALA_WM_ACTIVE and GALA_WM_POINTER_LEFT ("Linux applications on the
   desktop (Wayland)", "Input").
-- **Mouse** (`Desktop::pointer`): a press on the start button toggles
-  the menu; with the menu open, a press elsewhere only closes it. A
-  taskbar button restores a minimized window, minimizes the active one,
-  else raises and activates. A press on a caption raises, activates and
+- **Mouse** (`Desktop::pointer`): a press on a caption raises, activates and
   starts a drag (the caption stays on the screen; the drag's end is
   reported with WM_MOVE). Caption buttons act on release over the same
-  button: minimize (in the desktop, then GALA_WM_MINIMIZED; the
-  taskbar's restore too), or WM_SYSCOMMAND SC_MAXIMIZE/SC_RESTORE/
+  button: minimize (in the desktop, then GALA_WM_MINIMIZED; shasha's
+  taskbar button restores it), or WM_SYSCOMMAND SC_MAXIMIZE/SC_RESTORE/
   SC_CLOSE to the program, as on Windows. user32's DefWindowProc turns
   SC_CLOSE into WM_CLOSE and maximizes to the work area (the screen
-  above the taskbar) or back to the kept restore rectangle with
+  without the taskbar's strip and the app bars) or back to the kept restore rectangle with
   SetWindowPos; the desktop marks a window maximized when it covers the
   work area. A program's own SC_MINIMIZE shows its window minimized
   with GalaWindowShow(id, 2) ("UI Automation", title bars). In a client
@@ -8779,8 +8774,9 @@ the program always sees WM_SIZE/WM_MOVE.
   held, Left and Right put the active window on that half of the work
   area, Up maximizes it (SC_MAXIMIZE), Down restores a maximized one
   (SC_RESTORE), gives a snapped one back its rectangle from before the
-  first snap, or else minimizes it; the Windows key's release then does
-  not open the start menu, and the program gets no keys.
+  first snap, or else minimizes it; the Windows key's release is then
+  no hot key (shasha's start menu stays shut), and the program gets no
+  keys.
 - **Popups**: a window created with style 1 (STYLE_POPUP) is frameless,
   all client area (any size from 1 x 1), square with a shadow, kept
   above the framed windows (raising a framed window puts it below
@@ -8857,11 +8853,10 @@ the program always sees WM_SIZE/WM_MOVE.
   no hot key for the bare Windows key; gala's convention is (MOD_WIN,
   VK_LWIN) (or VK_RWIN), delivered when the key goes up with no other
   key since it went down. shasha holds them ("The user-mode shell", the
-  shell's keys). While a shell holds them the desktop's built-in actions
-  (File Explorer, the start menu) don't run, and the Windows key's
-  release does not gather the desktop menu's lists
-  (`Windows::holds_hot_key`); while none does, they do (the kernel's
-  shell, `shell=desktop`, until it goes: ROADMAP SH step 1, part 11).
+  shell's keys). The desktop has no action of its own for them: with
+  no shell holding them, the Windows key alone does nothing and Win+E
+  goes to the active window as any other key (`Windows::holds_hot_key`
+  answers whether a process holds one).
   The system keeps Win+arrows (Snap) and Ctrl+Shift+Esc (Task Manager)
   for itself (`window::system_key`): nobody registers them, the shell
   neither, so they work whether a shell runs or not (ROADMAP SH step 3).
@@ -8870,7 +8865,7 @@ the program always sees WM_SIZE/WM_MOVE.
   windows seen).
 - **Capture** (GalaWindowCapture): the window gets every mouse message
   in its client coordinates (negative outside it) wherever the pointer
-  is; captions, the taskbar and the start menu get nothing meanwhile.
+  is; the captions and their buttons get nothing meanwhile.
   It ends with GalaWindowCapture(0) from its owner or with the window.
 
 #### Input to programs
@@ -8926,7 +8921,7 @@ registry ("Plan: windows across processes").
 | 0x7f38 | GalaWindowSetTitle(id, *text, length) | |
 | 0x7f39 | GalaWindowCapture(id) | mouse capture; 0 ends it |
 | 0x7f3a-0x7f3d, 0x7f3f | GalaConsoleHost, GalaConsoleRead, GalaConsoleInput, GalaConsoleInputEvents, GalaConsoleMode | console hosts ("Console windows") |
-| 0x7f3e | GalaWindowSetIcon(id, *pixels, size) | size x size 0xAARRGGBB, straight alpha, size at most 64; none: the letter tile |
+| 0x7f3e | GalaWindowSetIcon(id, *pixels, size) | size x size 0xAARRGGBB, straight alpha, size at most 64; none: no icon on the caption |
 | 0x7f58 | GalaDesktopAction | named desktop actions ("Server and desktop workloads") |
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
@@ -8952,8 +8947,12 @@ registry ("Plan: windows across processes").
   `nt::desktop` only draws it. Damage rectangles come from the window
   state (with the compositor's shadow margin, `winstate::Shadow`); a
   bare desktop drops them.
-- TODO: the shell belongs in a user-mode program (an explorer.exe of
-  gala's); the clock is UTC; popups and hidden windows are not listed by
+- The kernel draws no shell: no taskbar, start menu, clock or
+  wallpaper, and the Windows key and Win+E do nothing of the kernel's
+  own. What a session shows of a shell is a user-mode program's
+  windows (shasha), so a shell that ends or never starts leaves the
+  desktop's colour and the windows, never a half-drawn kernel taskbar.
+- TODO: popups and hidden windows are not listed by
   GalaDesktopAction's Windows (the registry has them:
   FindWindow/EnumWindows).
 
@@ -8962,8 +8961,8 @@ registry ("Plan: windows across processes").
 Servers and console programs (nginx, PostgreSQL, Elasticsearch, Go and
 Java services, the Docker image) must never bring up the graphical
 interface; GUI programs on a machine with a screen get the desktop.
-**One kernel serves both**: shasha (the compositor, wallpapers, start
-menu, taskbar) is always built in, and a server machine boots it with
+**One kernel serves both**: the desktop (`nt::desktop`'s compositor)
+is always built in, shasha.exe ships in the image, and a server machine boots it with
 `profile=server`, or simply has no screen. Where nothing can show a
 desktop, shasha does no work and adds nothing to a server program's
 path. ROADMAP SD.
@@ -8997,8 +8996,8 @@ draws nothing; user32 loads gdi32 lazily).
   STATUS_INVALID_DEVICE_STATE; presenter none is accepted, Test and
   Console are STATUS_NOT_SUPPORTED; the shell's actions, lists and
   wallpaper are STATUS_NOT_SUPPORTED (`has_shell` false). The compositor
-  does no work for it (`Desktop::bare`: no wallpaper or taskbar laid
-  out, no captions rendered, no PS/2 input or clock). Scenarios:
+  does no work for it (`Desktop::bare`: no taskbar strip laid out, no
+  captions rendered, no PS/2 input or display watch, no shell started). Scenarios:
   `noscreen_windows` (BIOS) and `server_profile_windows` (UEFI,
   `profile=server`) run presenter_test's `server` mode; user32_test's
   scenario checks the line on BIOS and in gala-um.
@@ -9024,11 +9023,12 @@ CLI-first.
   maximized: SC_RESTORE, or snapped: back to the rectangle before the
   snap), Close (SC_CLOSE: the program decides), Snap(Left | Right | Up |
   Down) and Place(x, y, w, h). **`Desktop::act(id, action)` is the only
-  code that does them**: the taskbar buttons (a click minimizes the
-  active window on top, else activates), the caption buttons, Win+arrows
-  and the system call all call it. Starting a program is
-  `nt::action::start_path`, shared by the start menu (input thread) and
-  the system call.
+  code that does them**: the caption buttons, Win+arrows and the
+  system call (shasha's taskbar buttons: a click minimizes the active
+  window on top, else activates; `gala`) all call it. Starting a
+  program is `nt::action::start_path` (or `start_in_window`), shared by
+  the system call and Ctrl+Shift+Esc (`start_for_system_key`, from the
+  input thread).
 - **GalaDesktopAction**(*Request, RequestLength, *Output, OutputLength,
   *ReturnLength), service 0x7f58 (`nt/action.rs`, which has the
   layouts): a versioned request (version 1: action, HWND, four i32
@@ -9045,9 +9045,8 @@ CLI-first.
     name that is not a distribution's or an operation or suggestion out
     of range, STATUS_OBJECT_NAME_NOT_FOUND for a desktop without a
     session or an application not there). What a user-mode shell's
-    start menu starts (ROADMAP SH step 1, part 4); the kernel's own
-    menu runs the same code (`launch_linux`, `start_install`,
-    `start_in_window`) as the boot user.
+    start menu starts (ROADMAP SH step 1, part 4; `launch_linux`,
+    `start_install`, `start_in_window`).
   - The launches' flags (Start, Install, Linux: the first argument): 1
     a console program gets a console window of its own (conhost.exe,
     started first, as Explorer's CreateProcess without a console to
@@ -9073,13 +9072,13 @@ CLI-first.
     gone quiet; the bar's percent; the index Linux takes, a
     distribution's suggestion or LINUX_NOT_SUGGESTED, an application's
     index; the distribution's name, 32 UTF-16 units, and the label, 48:
-    `linux::entries` as the kernel menu lists them, with the choices
-    not yet saved, each installed one followed by its terminal and its
+    `linux::entries` in order, the dismissed suggestions left out,
+    each installed one followed by its terminal and its
     applications; read-only, so a shell may read it on each change).
   - Install with a catalog entry's id marks its tile resolving before
     `gala install` starts (`desktop::begin_install`) and has the
-    desktop watch the installer's pid (`install_started`), as a click on
-    the kernel menu's tile does; an installer that ended before it was
+    desktop watch the installer's pid (`install_started`,
+    `action::install_for_shell`); an installer that ended before it was
     watched is told as gone at once (`installer_registered`), so a tile
     never waits for a word that will not come. Any other id just
     installs. Linux's install does the same for the distribution's tile
@@ -9094,9 +9093,9 @@ CLI-first.
     distributions listed again) posts it with wparam 1
     (`desktop::tell_linux`) and the shell reads LinuxList again.
   - Activate, Minimize, Maximize, Restore, Close, Snap, Move.
-  - Wallpaper (the picture is decoded and scaled outside the desktop's
-    lock, then swapped in and the screen redrawn; "drawn" is the drawn
-    one).
+  - Wallpaper (a name of WALLPAPERS or a `.qoi` path, its QOI header
+    checked, saved as the user's value and the shell's window told;
+    "drawn" is none; "Compositor and look").
   - Actions 12 and 13 (Tray, TrayClick) were the kernel taskbar's
     notification area and are unused: shasha's icons are UI Automation
     elements ("The notification area").
@@ -9115,8 +9114,8 @@ CLI-first.
   not checked (Windows' taskbar acts on elevated windows too). The
   launches (Start, Install, Linux) run their program under a copy of
   the caller's primary token (`token::for_new_process` of it, as
-  NtCreateUserProcess: `process::launch`'s token argument; the kernel's
-  start menu passes None, the boot user), and so does the conhost.exe
+  NtCreateUserProcess: `process::launch`'s token argument;
+  Ctrl+Shift+Esc passes None, the boot user), and so does the conhost.exe
   of its console window, so a Low caller's console is Low end to end;
   the parent id stays 0. Tested by `launch_test` (a Low caller's
   launches run Low).
@@ -9408,8 +9407,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   small, the class's big and small icons, reads its bitmaps (GetDIBits,
   32 bits; alpha from the colour bitmap, else from the mask; a
   monochrome icon black and white), averages icons above 64 pixels down
-  to 32, and calls GalaWindowSetIcon. The desktop keeps it at 24 x 24
-  for the taskbar and 16 x 16 (SM_CXSMICON) for the caption. conhost's
+  to 32, and calls GalaWindowSetIcon. The desktop keeps it at 16 x 16
+  (SM_CXSMICON) for the caption (shasha's task buttons show no icon
+  yet: ROADMAP SH step 1, part 10). conhost's
   class has its own icon (a dark square with ">_", drawn in code).
   TODO: hand over the small icon itself for the caption (now the big
   one, scaled); conhost showing its program's icon.
@@ -12813,15 +12813,14 @@ alone in `winstate/tests.rs`.
   (the same `Desktop::pointer`, `key`, `wheel`): screen checks inside
   the guest, without the devices. A desktop shown by the console or by
   nothing takes none (STATUS_INVALID_DEVICE_STATE).
-- **The clock** (`tick`, from the desktop's clock thread every second:
-  `desktop::start_clock`, started with the input thread by
-  `platform::local_input`, counted in `desktop: clock: <n> ticks` at
-  exit) updates every live desktop; a display change resizes the
-  desktop the Console presenter shows. Its own thread, because the
-  clock is not input: riding the input thread's poll loop, it stopped
-  wherever that thread stopped -- a machine with no PS/2 mouse had a
-  desktop whose minute never changed and which never noticed a display
-  change.
+- **The display watch** (`tick`, from the thread "desktop display"
+  every second: `desktop::start_display_watch`, started with the input
+  thread by `platform::local_input`, counted in `desktop: display
+  watch: <n> ticks` at exit): a display change resizes the desktop the
+  Console presenter shows. Its own thread, because it is not input:
+  riding the input thread's poll loop, it would stop wherever that
+  thread stops -- a machine with no PS/2 controller would never notice
+  a display change (`no_i8042`).
 - **GalaSession** (0x7fb0; SeTcbPrivilege for every operation, since
   another session's pixels are its users'; STATUS_NOT_FOUND for a
   session that does not exist; a bare desktop's answers are in "Server
@@ -15540,15 +15539,14 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
     run some seconds has drawn (1.6 columns a second); the busy
     window's CPU cell risen and its memory cell filled; and an idle
     `cat`'s CPU cell background above the floor its line rests on.
-- **Opening it** (`nt::desktop`, `TASK_MANAGER`): the start menu's tile
-  (a PROGRAMS entry listed when System32 has it), Ctrl+Shift+Esc (the
-  system's key, not the shell's: the desktop tracks Ctrl and Shift, no
-  program sees that Esc nor may register it; logged
-  `desktop: Ctrl+Shift+Esc: Task Manager`) and the taskbar's context
-  menu (a right click on its free space: a card above the taskbar with
-  "Task Manager", on a light card; any press closes it;
-  logged `desktop: taskbar menu: Task Manager`): each starts it as the
-  tile does (`action::start_from_menu`). `gala start "Task Manager"`
+- **Opening it** (`nt::desktop`, `TASK_MANAGER`): shasha's start menu
+  tile (a PROGRAMS entry listed when System32 has it) and Ctrl+Shift+Esc
+  (the system's key, not the shell's, so it works with no shell: the
+  desktop tracks Ctrl and Shift, no program sees that Esc nor may
+  register it; logged `desktop: Ctrl+Shift+Esc: Task Manager`, then
+  `desktop: system key starts Task Manager: <path>` from
+  `action::start_for_system_key`; a console program gets a console
+  window). The taskbar's context menu is not in shasha yet. `gala start "Task Manager"`
   is the CLI's way; `gala ps` lists both personalities from the same
   query and `gala kill <pid>` ends a Linux process as End task does.
 - **Limits**: no per-process disk, network, GPU or power columns (no
@@ -15735,9 +15733,8 @@ explorer`; `main.rs` the window's program), shasha (Win+E), `nt::desktop` (the s
   logging `explorer: change: click <id>`.
 - **Win+E** (the shell's key: shasha, "The user-mode shell"): shasha
   starts `%SystemRoot%\explorer.exe` (logged `shasha: Win+E: start File
-  Explorer (<path>): pid <p>`); no other program sees the E. With
-  `shell=desktop` the kernel desktop starts File Explorer's PROGRAMS
-  entry instead (`desktop: Win+E: File Explorer`), until that shell goes.
+  Explorer (<path>): pid <p>`); no other program sees the E. With no
+  shell Win+E is no hot key and goes to the active window.
 - **Its place**: the window opens at 100,40, 1080 x 700, moved and if
   need be narrowed into the work area (`explorer::fit` on
   SPI_GETWORKAREA), so it opens beside an app bar such as the docked
@@ -16116,7 +16113,7 @@ The first GPU driver (G1). Code: `kernel/src/arch/virtio.rs`
 - **Seam** (`nt::platform::Display`): `screen_flush(x, y, w, h)` after
   the desktop writes a damaged rectangle's rows (nothing for a
   framebuffer); `screen_changed()`, polled by `desktop::tick` every
-  second from the desktop's clock thread: a new size re-lays out the desktop
+  second from the desktop's display watch: a new size re-lays out the desktop
   (`Desktop::set_screen`) and redraws it. The console stops drawing on
   the framebuffer when the desktop takes the screen.
 - **Scenarios**: `virtio_gpu` (gui_test with `display=virtio`; QEMU gets

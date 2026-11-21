@@ -118,12 +118,11 @@ Rules for this file:
 
 | Font | Version | Source | License | Use |
 |---|---|---|---|---|
-| Selawik (regular, semilight, semibold, bold) | 1.01 (`Selawik_Release.zip`, SHA-256 `3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423`, measured) | github.com/microsoft/Selawik releases | SIL Open Font License 1.1, Reserved Font Name "Selawik" (`fonts/selawik/LICENSE.txt`) | `fonts/selawik/*.ttf`, unmodified. Embedded in gala's `gdi32.dll` (`user/gdi32/src/font.rs`), which rasterizes them for programs' text. Shipped as `C:\Windows\Fonts\selawk*.ttf` to scenarios using gala's `dwrite.dll` (DirectWrite's system collection). `cargo xtask bake-fonts` rasterizes them into `kernel/assets/ui-*.glyphs` (the desktop's captions, taskbar and start menu). An open replacement metric-compatible with Segoe UI; no Segoe UI file is used. |
+| Selawik (regular, semilight, semibold, bold) | 1.01 (`Selawik_Release.zip`, SHA-256 `3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423`, measured) | github.com/microsoft/Selawik releases | SIL Open Font License 1.1, Reserved Font Name "Selawik" (`fonts/selawik/LICENSE.txt`) | `fonts/selawik/*.ttf`, unmodified. Embedded in gala's `gdi32.dll` (`user/gdi32/src/font.rs`), which rasterizes them for programs' text. Shipped as `C:\Windows\Fonts\selawk*.ttf` to scenarios using gala's `dwrite.dll` (DirectWrite's system collection). `cargo xtask bake-fonts` rasterizes the regular face at 12 px into `kernel/assets/ui-12-regular.glyphs` (the desktop's window captions). An open replacement metric-compatible with Segoe UI; no Segoe UI file is used. |
 
 ## Artwork
 
-- `kernel/assets/fortress.svg` (the Masmak Fortress: the start button,
-  the start menu's avatar, the wallpaper's mark and the boot splash) and
+- `kernel/assets/fortress.svg` (the Masmak Fortress: the boot splash) and
   `kernel/assets/wordmark.svg` (the wordmark "قلعة" under it, lettered in
   the Saudi font released by the Ministry of Culture): the project
   owner's artwork, supplied for gala on 2026-11-01; the `.alpha` files

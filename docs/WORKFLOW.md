@@ -260,7 +260,7 @@ alone prints the usage.
 | `compare <windows.json> [gala.json]` | against `run-all.ps1`'s report from Windows |
 | `docker-test [xtask args]` | run `cargo xtask test` (or the args) in `docker/test.Dockerfile` |
 | `qemu` | build the pinned QEMU ("QEMU") |
-| `bake-fonts`, `bake-icons` | rasterize the desktop's fonts and icons ("Screenshots") |
+| `bake-fonts`, `bake-icons` | rasterize the captions' font, the boot splash's pictures and shell32's icons ("Screenshots") |
 
 To compare with Windows: copy `user/bin` to a Windows 11 machine, run
 `powershell -ExecutionPolicy Bypass -File run-all.ps1 -Out windows.json`
@@ -2872,14 +2872,15 @@ A root is what its workload opened on real 26.04, traced:
   app, 8 `sleep`, 11 `sh`, 14 the distribution's heading), 16 what is
   left).
 - Host tests: `cargo test -p kernel --lib nt::tasks` (the layout),
-  `nt::desktop` (Ctrl+Shift+Esc, the taskbar's menu, the tile), `cargo
+  `nt::desktop` (Ctrl+Shift+Esc, the PROGRAMS entry), `cargo
   test -p taskmgr` (parsing, groups, sorting, search, CPU shares,
   formats, End task's targets, the window's view: `window::tests`
   checks each part's rectangle, the clicks' messages and the pictures'
   `src`). `cargo clippy -p taskmgr --lib --tests`
   checks the library on the host (the program links Windows DLLs).
 - Reading a run: `desktop: Ctrl+Shift+Esc: Task Manager`, `desktop:
-  start menu starts Task Manager: ...`, `tasks: pid N (Taskmgr.exe)
+  system key starts Task Manager: ...` (or shasha's `shasha: start
+  Task Manager (<path>): pid <p>` from its menu), `tasks: pid N (Taskmgr.exe)
   lists the processes: ...`, `process: pid N (Taskmgr.exe) terminates
   pid M (...)`, `tasks: pid N (Taskmgr.exe) ends linux process M with
   signal 15: 0x00000000`, `... ends linux distribution (bb: 1
@@ -2933,8 +2934,8 @@ A root is what its workload opened on real 26.04, traced:
 - Host tests: `cargo test -p shellns` (lists, parsing and display
   names, order), `cargo test -p explorer --lib` (rows, sorting, search,
   formats, the change flow's states), `cargo test -p kernel --lib nt::wslfs` and
-  `nt::desktop` (Win+E under `shell=desktop`), `cargo test -p shasha
-  --lib keys` (the shell's keys). `cargo clippy -p explorer --lib --tests` and
+  `cargo test -p shasha --lib keys` (the shell's keys, Win+E among
+  them). `cargo clippy -p explorer --lib --tests` and
   `-p shellns --tests` check them on the host.
 - Reading a run: `desktop: hot key <id> (Win+E) to pid <shasha>`,
   `shasha: Win+E: start File Explorer (<path>): pid <n>`, explorer.exe's
@@ -4073,13 +4074,14 @@ has no font engine or SVG renderer (both are xtask host dependencies).
 Rerun the command and commit its output after changing a source.
 
 - `cargo xtask bake-fonts` rasterizes Selawik (`fonts/selawik/`) with
-  fontdue into `kernel/assets/ui-<px>-<weight>.glyphs` (12 regular and
-  semibold, 14 and 20 semibold, 28 semilight; chars 0x20-0xFF). The
-  format is in `bake_fonts`; `paint.rs` reads it. Add a size there and
-  in `paint::Font` together.
-- `cargo xtask bake-icons` renders `kernel/assets/fortress.svg` (24 and
-  96 px, square) and `wordmark.svg` (112 px wide, cropped) with resvg
-  into `.alpha` coverage masks; the compositor tints them.
+  fontdue into `kernel/assets/ui-<px>-<weight>.glyphs` (12 regular, the
+  window captions: the kernel draws no taskbar or start menu; chars
+  0x20-0xFF). The format is in `bake_fonts`; `paint.rs` reads it. Add
+  a size there and in `paint::Font` together.
+- `cargo xtask bake-icons` renders `kernel/assets/fortress.svg` (160
+  px, square) and `wordmark.svg` (220 px wide, cropped) with resvg into
+  `.alpha` coverage masks for the boot splash (`console.rs` tints
+  them), and shell32's icons (`user/shell32/assets/*.svg`) into BGRA.
 - Wallpapers are QOI files in `kernel/assets/wallpapers/` (provenance
   and conversion in its README.md); scenarios that use the screen list
   them in `EXTRA_MODULES` (`Windows/Web/Wallpaper`).

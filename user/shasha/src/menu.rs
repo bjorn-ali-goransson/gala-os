@@ -200,7 +200,7 @@ pub fn parse_catalog(b: &[u8]) -> Vec<CatalogEntry> {
 }
 
 /// What gala's exit code says beyond the install having failed, as the
-/// kernel's tile tells it (kernel/src/nt/desktop/pkg.rs
+/// kernel words it (kernel/src/nt/desktop/pkg.rs
 /// `install_failure`, galapkg's `Kind`; keep the two alike). 4 says no
 /// more than that: which step failed is in gala's own line in the log.
 fn install_failure(exit: i32) -> Option<&'static str> {

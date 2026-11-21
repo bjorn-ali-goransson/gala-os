@@ -211,20 +211,13 @@ pub const LISTED_ACTIVE: u32 = 4;
 /// Against the left or right edge, the work area's height (Snap).
 pub const LISTED_SNAPPED: u32 = 8;
 
-/// The size the taskbar draws a window's icon at.
-pub const ICON: usize = 24;
 /// The caption's icon size (Windows' small icon, SM_CXSMICON).
 pub const SMALL_ICON: usize = 16;
 
-/// An icon of `size` x `size` 0xAARRGGBB pixels scaled to ICON x ICON:
+/// An icon of `size` x `size` 0xAARRGGBB pixels scaled to `to` x `to`:
 /// each output pixel averages the source area it covers (box filter,
 /// weighted by alpha so transparent pixels don't darken the edges).
-pub fn scale_icon(src: &[u32], size: usize) -> Option<Vec<u32>> {
-    scale_icon_to(src, size, ICON)
-}
-
-/// `scale_icon` to `to` x `to` pixels.
-pub fn scale_icon_to(src: &[u32], size: usize, to: usize) -> Option<Vec<u32>> {
+pub fn scale_icon(src: &[u32], size: usize, to: usize) -> Option<Vec<u32>> {
     let mut out = Vec::new();
     out.try_reserve_exact(to * to).ok()?;
     if size == 0 || src.len() < size * size {
@@ -337,10 +330,8 @@ pub struct Window<X> {
     /// the wallpaper): in the bottom layer, under every other window
     /// whichever is active, as Windows keeps the shell's window.
     pub bottom: bool,
-    /// Its icon (GalaWindowSetIcon), ICON x ICON 0xAARRGGBB pixels
-    /// (straight alpha); empty: none (the taskbar shows a lettered tile).
-    pub icon: Vec<u32>,
-    /// The same at SMALL_ICON for the caption.
+    /// Its icon (GalaWindowSetIcon) at SMALL_ICON for the caption,
+    /// 0xAARRGGBB pixels (straight alpha); empty: none.
     pub small_icon: Vec<u32>,
     /// Its rectangle before Snap put it on a half of the screen (Win+Down
     /// gives it back).
@@ -460,9 +451,6 @@ pub struct State<X> {
     /// (`foreground`).
     pub last_input: Option<u64>,
     pub damage: Vec<Rect>,
-    /// What the taskbar lists changed (a window shown, hidden, minimized,
-    /// activated, renamed, given an icon, gone).
-    pub listing_changed: bool,
     shadow: Shadow,
     /// Input queued for programs, oldest first.
     pub input: Vec<InputEvent>,
@@ -526,7 +514,6 @@ impl<X: Default> State<X> {
             popup_grab: None,
             last_input: None,
             damage: Vec::new(),
-            listing_changed: true,
             shadow,
             input: Vec::new(),
             listeners: Vec::new(),
@@ -662,7 +649,6 @@ impl<X: Default> State<X> {
             client,
             title: name,
             program: Vec::new(),
-            icon: Vec::new(),
             small_icon: Vec::new(),
             unsnapped: None,
             popup,
@@ -716,7 +702,6 @@ impl<X: Default> State<X> {
         if !visible && self.active == Some(id) {
             self.activate_top();
         }
-        self.listing_changed = true;
         self.add_damage(bounds);
         Ok(bounds)
     }
@@ -822,7 +807,6 @@ impl<X: Default> State<X> {
         v.try_extend_from_slice(name).map_err(|_| NtStatus::NO_MEMORY)?;
         let win = self.find(id, owner)?;
         win.program = v;
-        self.listing_changed = true;
         Ok(())
     }
 
@@ -844,13 +828,12 @@ impl<X: Default> State<X> {
         win.title = name;
         win.restyled();
         let r = win.caption_rect();
-        self.listing_changed = true;
         self.add_damage(r);
         Ok(r)
     }
 
     /// `owner`'s window `id`'s icon: `size` x `size` 0xAARRGGBB pixels
-    /// (none when empty), shown on its taskbar button.
+    /// (none when empty), shown on its caption.
     pub fn set_icon(
         &mut self,
         id: u32,
@@ -858,21 +841,16 @@ impl<X: Default> State<X> {
         pixels: &[u32],
         size: usize,
     ) -> Result<(), NtStatus> {
-        let (icon, small) = if pixels.is_empty() {
-            (Vec::new(), Vec::new())
+        let small = if pixels.is_empty() {
+            Vec::new()
         } else {
-            (
-                scale_icon(pixels, size).ok_or(NtStatus::NO_MEMORY)?,
-                scale_icon_to(pixels, size, SMALL_ICON).ok_or(NtStatus::NO_MEMORY)?,
-            )
+            scale_icon(pixels, size, SMALL_ICON).ok_or(NtStatus::NO_MEMORY)?
         };
         let win = self.find(id, owner)?;
-        win.icon = icon;
         win.small_icon = small;
         win.restyled();
         let r = win.caption_rect();
         self.add_damage(r);
-        self.listing_changed = true;
         Ok(())
     }
 
@@ -981,7 +959,6 @@ impl<X: Default> State<X> {
         // window it named went meanwhile (the owner's other popups go
         // with it).
         self.input.retain(|e| e.window != id || e.message == GALA_WM_POPUP_DONE);
-        self.listing_changed = true;
     }
 
     // ---- Input for programs ----------------------------------------------
@@ -1500,7 +1477,6 @@ impl<X: Default> State<X> {
                 self.send(new, GALA_WM_ACTIVE, 1, how);
             }
         }
-        self.listing_changed = true;
     }
 
     /// The topmost shown window becomes active (or none).
@@ -1536,7 +1512,6 @@ impl<X: Default> State<X> {
         if self.active == Some(id) {
             self.activate_top_as(by);
         }
-        self.listing_changed = true;
     }
 
     /// The user restores a minimized window (its taskbar button).
@@ -1548,7 +1523,6 @@ impl<X: Default> State<X> {
         self.add_damage(bounds);
         self.raise(id);
         self.activate(Some(id));
-        self.listing_changed = true;
     }
 
     /// Moves a window to (x, y), its caption kept on the screen.

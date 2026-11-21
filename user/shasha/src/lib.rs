@@ -35,7 +35,7 @@ pub use menu::{
     StartMenu, TILES_IN_ROW, parse_catalog, parse_programs, program_id, state_text,
 };
 
-/// The taskbar's height (the desktop's own taskbar's, TASKBAR).
+/// The taskbar's height (the desktop's taskbar strip, TASKBAR).
 pub const HEIGHT: i32 = 48;
 /// A window's button: its width (the title cut to fit).
 pub const TASK_WIDTH: i32 = 160;

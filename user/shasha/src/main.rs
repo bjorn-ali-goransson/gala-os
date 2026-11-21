@@ -1,8 +1,8 @@
 //! gala's `shasha.exe` (ROADMAP SH step 1, part 6; ARCHITECTURE "The
-//! user-mode shell"): the taskbar as a program of the session instead of
-//! the kernel's drawing. The desktop starts it with the session when the
-//! boot asks for it (`shell=shasha`) and it is installed
-//! (`%SystemRoot%\System32\shasha.exe`).
+//! user-mode shell"): the taskbar, start menu and desktop as a program of
+//! the session (the kernel draws none of them). The desktop starts it with
+//! the session when it is installed (`%SystemRoot%\System32\shasha.exe`)
+//! and the boot names no other shell.
 //!
 //! - **The strip**: a popup window `HEIGHT` high across the bottom of the
 //!   screen, topmost and never activated (WS_EX_NOACTIVATE: a click on a
@@ -10,8 +10,8 @@
 //!   shell's window (SetShellWindow) and takes over the taskbar's app bar
 //!   from the desktop (GalaAppBar's ABM_GALA_TASKBAR, which only the
 //!   shell window's process may ask): ABM_GETTASKBARPOS answers with it,
-//!   the work area stays above it, and the desktop stops drawing its own
-//!   taskbar. When shasha ends, the desktop's taskbar comes back.
+//!   the work area stays above it. When shasha ends, the desktop takes
+//!   the bar back and keeps its strip reserved, drawn by nothing.
 //! - **The buttons**: the desktop's window list (GalaDesktopAction
 //!   ACTION_WINDOWS), read again on each WinEvent that changes it
 //!   (EVENT_SYSTEM_FOREGROUND, MINIMIZESTART, MINIMIZEEND; EVENT_OBJECT_
@@ -47,7 +47,7 @@
 //!   session, on a terminal's tile a terminal, on an application's the
 //!   application, the menu closing. A click on one under way does
 //!   nothing. Dismissing a suggestion and the section's collapse and
-//!   hide choices are the kernel menu's alone so far.
+//!   hide choices are not offered yet.
 //! - **The notification area** (part 8): the strip's window is
 //!   `Shell_TrayWnd`, the class Explorer's taskbar has, which shell32's
 //!   Shell_NotifyIcon finds and sends its request to (WM_COPYDATA,
@@ -1305,8 +1305,8 @@ pub extern "C" fn mainCRTStartup() -> ! {
                 };
             }
         }
-        // Drawn, but the desktop's taskbar stays under it.
-        None => log("the desktop keeps its taskbar"),
+        // Drawn, but the bar (and so the work area) stays the desktop's.
+        None => log("the desktop keeps the taskbar's bar"),
     }
     make_menu(sw, sh - HEIGHT);
     make_balloon(sw, sh - HEIGHT, shown);

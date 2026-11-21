@@ -8,10 +8,13 @@
 //! bar there is set or removed. ARCHITECTURE "App bars".
 //!
 //! The taskbar is a bar itself, on the bottom edge (Windows' is
-//! Shell_TrayWnd's): the desktop registers its own (window 0, process 0:
+//! Shell_TrayWnd's): the desktop reserves its strip (window 0, process 0:
 //! no program's window is 0, so no program can move or remove it) when
-//! the screen is laid out, and ABM_GETTASKBARPOS answers with its strip.
-//! A program's bottom bar goes above it.
+//! the screen is laid out, until the shell takes it (`hand_taskbar`) and
+//! again once the shell is gone; nothing draws window 0's, so that
+//! maximized windows leave room for the taskbar a shell puts there.
+//! ABM_GETTASKBARPOS answers with its strip. A program's bottom bar goes
+//! above it.
 //!
 //! gala's own rule (the docked agent panel's): a bar on the left or the
 //! right edge reaches from the top of the screen down to the bars on the
@@ -36,8 +39,8 @@ pub const ABM_GETTASKBARPOS: u32 = 5;
 /// the shell window's process ask.
 pub const ABM_GALA_TASKBAR: u32 = 0x100;
 
-/// The desktop's own taskbar's bar: its window (no program's is 0) and
-/// its process.
+/// The taskbar's bar while no shell holds it, the strip kept reserved:
+/// its window (no program's is 0) and its process.
 pub const TASKBAR_WINDOW: u64 = 0;
 
 pub const ABE_LEFT: u32 = 0;
@@ -122,8 +125,8 @@ impl AppBars {
         self.set(hwnd, edge, rect, screen)
     }
 
-    /// The taskbar's window: TASKBAR_WINDOW while the desktop draws it,
-    /// the shell's once it was handed over (`hand_taskbar`).
+    /// The taskbar's window: TASKBAR_WINDOW while the desktop holds its
+    /// strip, the shell's once it was handed over (`hand_taskbar`).
     pub fn taskbar_window(&self) -> Option<u64> {
         self.taskbar
     }
@@ -307,7 +310,7 @@ mod tests {
         Rect { x: l, y: t, w: rr - l, h: b - t }
     }
 
-    /// Bars with the desktop's taskbar placed at the bottom.
+    /// Bars with the desktop's taskbar strip placed at the bottom.
     fn with_taskbar() -> AppBars {
         let mut a = AppBars::new();
         let tb = r(0, 800 - TB, 1280, 800);
@@ -417,7 +420,8 @@ mod tests {
         assert!(a.take_posts().is_empty());
         // Again by the same window: the same strip.
         assert_eq!(a.hand_taskbar(5, 0x30, 0x8043), Some((ABE_BOTTOM, strip)));
-        // The shell ends: no taskbar until the desktop places its own.
+        // The shell ends: no taskbar until the desktop reserves the strip
+        // again.
         assert_eq!(a.drop_owned(5), Changed::Yes);
         assert_eq!(a.taskbar_window(), None);
         assert_eq!(a.insets(SCREEN), [0, 0, 300, 0]);

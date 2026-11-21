@@ -750,17 +750,18 @@ and a click installs it on the tile: `gala install <id>` with no window,
 the menu open and a progress bar on the tile (the states gala reports
 through GalaDesktopAction's InstallProgress), red if it fails and
 installed when it is done; installed, a click starts the program. An
-install that ends, either way, is also told above the notification area
-(the program's name, and what the exit code says when it says more than
-that it failed). An install whose `gala install` is gone without a word
+install that ends, either way, is also told in the log (the program's
+name, and what the exit code says when it says more than that it
+failed; a notification above shasha's notification area is not made
+yet). An install whose `gala install` is gone without a word
 (killed, or faulting before it can report) or never started goes quiet
 instead of waiting for ever: the desktop watches the installer's pid,
-which `start_from_menu` reports, and the process ending leaves the tile
+which `nt::action::install_for_shell` reports, and the process ending leaves the tile
 grey under a question mark with its bar where it got to, a click trying
-again and the same notification. A console program started from the menu
+again and the same line. A console program started from the menu
 gets its own console window. Tests: the desktop's, `nt::action`'s and
-galapkg's host tests; shasha's start menu has the same install tiles
-now (SH step 1, part 11) and scenario `start_menu` tests them there.
+galapkg's host tests; the menu and its tiles are shasha's (SH step 1,
+part 11), scenario `start_menu`.
 TimKosse.FileZilla.Client is not in winget-pkgs today: its tile's bar
 turns red and `gala install`'s "no package" is in the log (the portable
 C:\filezilla placement of the FileZilla scenarios still counts as
@@ -859,7 +860,8 @@ shell part) leaves it.
       process only); its buttons (Start, one per listed window, the
       clock) are UIA elements; a click activates a window or minimizes
       the active one; the list follows WinEvents. When shasha ends the
-      desktop's own taskbar is back on the same strip. Test:
+      strip goes back to the desktop, reserved and drawn by nothing.
+      Test:
       `shasha_test` with the screen scenario `shasha` (ARCHITECTURE
       "The user-mode shell"). Not yet in shasha: the window buttons'
       icons; the shell's bar is not told when the
@@ -909,11 +911,10 @@ shell part) leaves it.
       `shasha_test`, scenario `shasha` (ARCHITECTURE "The user-mode
       shell"). Not yet: other picture formats, the WM_SETTINGCHANGE
       broadcast to every top-level window, SPI_SETDESKWALLPAPER with
-      NULL (the value from the registry again), the watermark (drawn
-      only by the kernel's wallpaper).
+      NULL (the value from the registry again), the watermark.
    10. Done: shasha is the default shell. The kernel starts
       `C:\Windows\System32\shasha.exe` with every session that has a
-      screen unless `shell=desktop`; the image (every UEFI scenario and
+      screen; the image (every UEFI scenario and
       the release) ships it and `ribbons.qoi`; a handover carries the
       running shasha instead of starting a second one; Esc closes its
       start menu. The kernel's self-tests run before it starts. Painting
@@ -935,8 +936,8 @@ shell part) leaves it.
       against shasha (`shasha_tray`, its ARM64 twin `arm_shasha_tray`),
       `wow64_tray_test` became a UEFI shasha scenario, and without a
       shell (`no_i8042`) the tray part is skipped as Shell_NotifyIcon
-      fails. The kernel start menu's install notices are log lines
-      until that menu goes.
+      fails. An install's notices are log lines only (`desktop: start
+      menu: ...`).
       Done: the install tiles. shasha's start menu lists, after the
       installed programs, the catalog's entries not on this machine
       (GalaDesktopAction's Catalog: name, winget id, state, bar, gala's
@@ -946,7 +947,7 @@ shell part) leaves it.
       install stopped without a word.") and its bar (red when it failed,
       grey when it went quiet). A click asks for the install
       (GalaDesktopAction's Install, which now marks the tile resolving
-      and watches the installer's pid as the kernel menu's click did)
+      and watches the installer's pid)
       and the menu stays open; each change of a tile posts gala's
       WM_GALA_CATALOG (0x03A0) to the shell's window, and shasha reads
       the catalog again. Test: `start_menu` now runs against shasha
@@ -986,18 +987,40 @@ shell part) leaves it.
       the Windows key toggles shasha's menu. The system keeps
       Win+arrows (Snap) and Ctrl+Shift+Esc (Task Manager), which no
       program may register, so they work whether a shell runs or not.
-      The kernel desktop's own Windows-key menu and Win+E step aside
-      while a hot key holds them (`Windows::holds_hot_key`) and act
-      only under `shell=desktop`. Test: `hotkey_test` now runs beside
+      Test: `hotkey_test` now runs beside
       shasha (the shell window is shasha's Progman; the program is
       refused the shell's keys and SetShellWindow; Win+E reaches
       shasha, which opens File Explorer; the Windows key opens
       shasha's menu; neither reaches the program); `explorer` and
       `explorer_agent` press Win+E once shasha has taken it.
-      Next: the kernel's menu, taskbar, clock and wallpaper
-      (`nt/desktop`'s `paint.rs`, `linux.rs`, `pkg.rs` and most of
-      `mod.rs`), its Windows-key and Win+E fallbacks, and
-      `shell=desktop` go.
+      Done: the kernel's own shell is gone. `nt::desktop` no longer
+      draws a taskbar, start menu, clock or wallpaper, and has no
+      Windows-key menu or Win+E of its own; `shell=desktop` is gone
+      (`shell=` names shasha or nothing). What stays is the window
+      system's: composition and presenting, the app bars (the
+      taskbar's strip stays reserved for window 0, drawn by nothing,
+      when no shell holds it), GalaDesktopAction's actions, the
+      catalog's and the Linux section's install watching (ending in
+      WM_GALA_CATALOG), Snap and Ctrl+Shift+Esc. With no shell the
+      screen shows the desktop's colour and the windows, said once
+      (`desktop: no shell yet: ...`). The wallpaper action checks the
+      file's QOI header rather than decoding it (shasha draws it); the
+      clock thread became the display watch (`desktop: display
+      watch:`), which only notices a display resize. The fonts and
+      pictures only the kernel shell drew went from `kernel/assets`
+      and `bake-fonts`/`bake-icons`. Tests: the desktop's host tests
+      now check that no taskbar or menu is drawn, the strip after the
+      shell ends, the install watching through its model, and the
+      wallpaper's header check; `shasha` expects the strip kept after
+      shasha ends, `no_i8042` the display watch, `presenter_test` the
+      desktop's colour around session 2's window (no shell there). The
+      windows' 24-pixel icon, kept only for the kernel's task buttons,
+      went too (the caption's 16-pixel one stays). Not yet: shasha's
+      restart when it ends (step 2: until then the screen is the bare
+      desktop); the Linux section's collapse and hide choices and
+      dismissing a suggestion, which only the kernel menu offered
+      (`LinuxDismissed` is still honoured, nothing writes it);
+      the install notices, still log lines only.
 2. Supervision: the session (RS B4's session manager, the kernel until
    then) restarts a shell that ends, with its exit status and crash
    record in the event stream; windows stay usable meanwhile (Win+arrows
@@ -4682,7 +4705,7 @@ the next breakthroughs).
    shasha's menu (SH step 1 part 11) has the tiles, the install, the
    desktop, the terminal and the applications (each its own tile there,
    not a context menu's item); the collapse, dismiss and hide choices
-   are still the kernel menu's only (`shell=desktop`).
+   are not offered yet.
    Open: the desktop session is gala's script, which a real
    distribution lacks (it should come from gala, through `/mnt/c` or
    WSLg's `/mnt/wslg`, once CT step 3 mounts them, with Xwayland
