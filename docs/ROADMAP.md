@@ -1971,8 +1971,32 @@ need gala's.
    what `trace_from=` records: d3d10_1's slots are wrapped now, the
    device's implemented methods and its eighty-seven E_NOTIMPL stubs
    alike (`cargo xtask gen-trace`, scenario `trace_from_d3d10_test`,
-   OBSERVABILITY "Call tracing"), so the reading is a run with the
-   trace armed at the last method the ledger shows Word reaching. The
+   OBSERVABILITY "Call tracing"), and the reading is made. Armed at
+   `d3d10_1.dll!ID3D10Device::CheckMultisampleQualityLevels`, the last
+   of its methods the ledger shows Word reaching, a run records three
+   calls and all three answers:
+   `CheckMultisampleQualityLevels(B8G8R8A8_UNORM, sample count 2)`
+   answered S_OK, then `GetDeviceRemovedReason` twice, S_OK each time;
+   a run that gets further adds `CreateTexture2D` answered S_OK and
+   the whole Direct2D render-target, bitmap and brush sequence after
+   it. So the device refuses Word nothing, and the two
+   `GetDeviceRemovedReason` answers say Word is not being told its
+   device went away either. The same runs found the thing to hold on
+   to instead: Word's path varies between them. Of five `office_word`
+   runs three stop within 350 ms of that second
+   `GetDeviceRemovedReason` having made no Direct2D call at all, and
+   one goes on through the render target to `CreateSolidColorBrush`
+   and the box nine milliseconds after it; an untraced control run
+   took the short path too, so the variance is Word's own and not what
+   the stream costs. Both paths end the same way, which `events=file`
+   on a short-path run shows (`open`, `key` and `value` events,
+   OBSERVABILITY "Event stream"): the last thing before the box is
+   `uxtheme.dll` loaded from System32 after the Office16 miss, then
+   the eight private `Microsoft.Windows.Common-Controls` probes, and
+   63 ms later the box -- the box being built, as on the long path
+   below, not what decided it. So the long path's 9.2 ms of user-mode
+   work is not where the decision has to be: the short path gives up
+   before Direct2D, and neither run records anything failing. The
    message itself is Word's own `user32!MessageBoxW`, and the stack at
    its write names who asked for it: `Mso20win32client.dll`'s frame
    directly above user32's, then `MSO.DLL` and `Mso30win32client.dll`
@@ -6649,9 +6673,14 @@ among the slowest hand-offs.
      end between a call and its answer, never the other way about. It
      closes the blind spot the first reading of Word's window ran into,
      where six identical calls read the same whether each one succeeded
-     or each one failed. Its gaps: one armed method a run, and once
-     armed every traced call in that process is recorded, not only the
-     method named; the OpenTelemetry export does not map `call` or
+     or each one failed. Its gaps: one armed method a run, and arming is per DLL per process,
+     so once armed every traced call that program makes into *that*
+     DLL is recorded, not only the method named, and none of the calls
+     it makes into another of gala's DLLs -- the Word reading ran into
+     that, where the d3d10_1 trace that recorded its three device
+     calls recorded none of the Direct2D calls after them, so two DLLs
+     are two runs until the one-shot asks the kernel whether a trace
+     is live (OBSERVABILITY "Call tracing"); the OpenTelemetry export does not map `call` or
      `ret` events yet (the same gap `ledger:` rows have, OT5).
    - **The import slots, for the DLLs gala did not write.** Done.
      `imports=<program>[!<dll>][:<n>]` records the first call a program

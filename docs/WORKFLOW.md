@@ -598,7 +598,9 @@ XTASK_CMDLINE='events=call events_match=WINWORD \
 
 Every call into that DLL after the first `CreateSolidColorBrush` is a
 `call` event with its arguments, 4096 at most (`:<n>` asks for another
-budget). The name is the one a `ledger:` row spells, so pick the last
+budget). Into *that* DLL: arming is per DLL, so the Direct2D calls
+Word makes after a Direct3D 10.1 method is armed are not recorded, and
+a question about two of gala's DLLs is two runs. The name is the one a `ledger:` row spells, so pick the last
 method the ledger shows the program reaching and arm there. `events=call`
 is what carries them and `events_match=`/`events_pid=` choose the
 process, as for every other category.

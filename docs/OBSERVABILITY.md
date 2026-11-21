@@ -1258,11 +1258,21 @@ method that answers records a second line a call:
   is still in the ledger (`<object> QueryInterface`, with the IID's first
   dword), so what the trace misses there is the order: which object was
   asked, between which other calls.
-  Arming is per process, because the flag lives in the DLL's own data;
-  the budget is the run's, shared by every process that traces. Once
-  armed, *every* traced call in that process is recorded, not only the
-  method named -- the method is where recording starts, not what is
-  recorded.
+  Arming is per DLL per process, because the flag lives in that DLL's
+  own data; the budget is the run's, shared by every DLL and process
+  that traces. Once armed, *every* traced call that program makes into
+  *that* DLL is recorded, not only the method named -- the method is
+  where recording starts, not what is recorded. A call into another of
+  gala's DLLs is not: armed at
+  `d3d10_1.dll!ID3D10Device::CheckMultisampleQualityLevels`, an
+  `office_word` run records the three Direct3D 10.1 calls Word makes
+  and none of the Direct2D calls that follow them, and arming a d2d1
+  method on such a run is answered `was never reached` instead. So two
+  questions about one program's two DLLs are two runs; ROADMAP OT3b's
+  next piece is for the slot's own one-shot to ask the kernel whether
+  a trace is live, which it already calls into to record its `reached`
+  row, so a trace would span every DLL gala wrote at no new cost per
+  call.
 
 ### Import tracing (`imports=`)
 
