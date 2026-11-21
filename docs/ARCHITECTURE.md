@@ -11590,7 +11590,14 @@ expected answers are those of `user/d3d10_1_test` run on Windows.
   one slots), holding the Direct3D 11 device and its immediate context.
   CreateTexture2D, CopyResource, Flush, GetFeatureLevel,
   GetCreationFlags, GetDeviceRemovedReason, CheckFormatSupport,
-  CheckMultisampleQualityLevels and the private data are its own;
+  CheckMultisampleQualityLevels and the private data are its own.
+  CheckMultisampleQualityLevels answers what Direct3D 11 answers and
+  leaves a ledger row when that is no quality level for a sample count
+  Direct3D allows: the count is an answer a program acts on and the
+  call succeeds while giving it, so nothing else would show it
+  (`d3d10_1_test` measures the counts against real Windows, which
+  offers a level for 1, 2, 4, 8 and 16 on B8G8R8A8_UNORM where the
+  renderer under gala offers one for 1, 4 and 8).
   QueryInterface for an interface that is not one of its own is
   forwarded to the Direct3D 11 device, which is how a program reaches
   the IDXGIDevice under it (the adapter's name comes from there).

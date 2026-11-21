@@ -133,6 +133,41 @@ int main(void) {
     rel(adapter);
     rel(dxgi_dev);
 
+    /* What multisampling the device offers for the format Direct2D
+     * draws onto, which is the last thing Word asks it before it gives
+     * up (ROADMAP OF: Word asks B8G8R8A8_UNORM with 2 samples). Two of
+     * these are pinned and the rest are a machine's own and printed, as
+     * in metrics_test and caps_test: one sample is always one quality
+     * level, and a device reporting Direct3D 10.1 must offer 4x
+     * multisampling for a render target format, that being the feature
+     * level's own requirement. A count of 0 or above 32 is asked for
+     * too, with its HRESULT printed rather than assumed. */
+    {
+        static const UINT counts[] = {0, 1, 2, 4, 8, 16, 32, 33};
+        size_t c;
+        for (c = 0; c < sizeof counts / sizeof counts[0]; c++) {
+            UINT n = 0xffffffffu;
+            HRESULT hr = ID3D10Device1_CheckMultisampleQualityLevels(
+                dev, DXGI_FORMAT_B8G8R8A8_UNORM, counts[c], &n);
+            printf("d3d10_1_test: multisample B8G8R8A8_UNORM x%u: hr 0x%08lx, %u quality level(s)\n",
+                   counts[c], (unsigned long)hr, n);
+            if (counts[c] == 1) {
+                last = hr;
+                CHECK(SUCCEEDED(hr) && n == 1);
+            }
+            if (counts[c] == 4) {
+                last = hr;
+                CHECK(SUCCEEDED(hr) && n >= 1);
+            }
+        }
+        fflush(stdout);
+    }
+
+    /* A device that has not been removed says so, which is what Word
+     * asks twice right before its message box. */
+    last = ID3D10Device1_GetDeviceRemovedReason(dev);
+    CHECK(last == S_OK);
+
     /* The texture Direct2D will draw into, and the staging texture the
      * frame is read back through. */
     D3D10_TEXTURE2D_DESC td;
