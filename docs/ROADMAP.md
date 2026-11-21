@@ -2509,15 +2509,21 @@ need gala's.
      -- the version-less key, not the absent `Office\16.0\Common\Graphics`
      below, which reads alike -- under the adapter's own name
      (`00010005-00000000-00000000-00000000_00000023-00000000-0000FFFF-0000FFFF`),
-     finds it absent and writes a 4-byte DWORD there: its verdict on
-     this adapter. The verdict is `1`, written 6 ms after the read that
-     found nothing, which the stream says because a value event now
-     carries its data (OBSERVABILITY's `file` category). What Word
-     means by that number is its own, documented nowhere public, and
-     one observation of one adapter cannot settle it; what the reading
-     buys is the experiment -- seed the value before Word starts and
-     see which numbers change the box, and whether the write is a
-     verdict at all or a cache Word fills on its way past. What fails of the
+     finds it absent and writes a 4-byte DWORD there: a `1`, 6 ms after
+     the read that found nothing, which the stream says because a value
+     event carries its data (OBSERVABILITY's `file` category). That
+     write is a cache, not a gate. Seeded with a `0` before the run,
+     Word reads the `0`, is answered, writes nothing back -- and prints
+     the same box 4.4 s later. So neither the write nor what it holds
+     decides anything, and the stretch before the box holds no registry
+     read, no call into a DLL gala wrote, no exception and no cached
+     verdict either. What Word still has that gala has not read is what
+     it writes about itself: the `WINWORD\12` values are its own
+     session record in JSON
+     (`{"AppName":"winword.exe","AppVersion":{"Major":"16",...`), 360
+     bytes of it as Word starts and 401 written after the box, of which
+     a value event carries the first 64. Reading one of them whole is
+     the next instrument. What fails of the
      reading is keys a fresh Windows does not
      have either (`...\Office\16.0\Common\Graphics`,
      `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
