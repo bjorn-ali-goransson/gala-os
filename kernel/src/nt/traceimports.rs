@@ -127,6 +127,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use super::crashreport::module_at;
 use super::platform::TrapFrame;
 use super::platform::{self, ThreadId};
 use super::process::Process;
@@ -430,6 +431,54 @@ struct Pending {
 /// user memory is touched.
 static PENDING: IrqMutex<Vec<Pending>> = IrqMutex::new(Vec::new());
 
+/// The longest importing module name kept, which is as much of an
+/// image's file name as a capture holds (`crashreport::Module`).
+const MODULE_LEN: usize = 40;
+
+/// The image of a slot that no image holds, or of one in an image past
+/// [`MAX_IMAGES`]: such a slot is armed and recorded all the same, with
+/// `?` for the module, rather than refused for want of a name.
+const NO_IMAGE: u16 = u16::MAX;
+
+/// The most images one run names. A program of Word's size imports from
+/// some ninety, and the table is one entry an image however many of its
+/// slots are armed, so this is what the index in a [`Trap`] holds and
+/// not a bound anything reaches.
+const MAX_IMAGES: usize = NO_IMAGE as usize;
+
+/// One image some of whose import slots are armed.
+#[derive(Clone, Copy)]
+struct Image {
+    /// Whose image it is: the program `imports=` names may run twice,
+    /// and two processes' images are as often as not at one base.
+    pid: u64,
+    /// Where it is mapped, which is what tells two images apart where
+    /// their names cannot (one DLL mapped into two processes).
+    base: u64,
+    name: [u8; MODULE_LEN],
+    len: u8,
+    /// How many of its slots are armed, counted as each one is
+    /// ([`note_armed`]): what the summary says of where a budget went.
+    slots: u32,
+}
+
+impl Image {
+    const NONE: Image = Image { pid: 0, base: 0, name: [0; MODULE_LEN], len: 0, slots: 0 };
+
+    fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..usize::from(self.len)]).unwrap_or("?")
+    }
+}
+
+/// The images the armed slots are in, one entry each. Searched rather
+/// than hashed because it is short: a program imports from a few dozen
+/// images where it has thousands of slots, which is the reason a
+/// [`Trap`] holds an index here and not a name of its own.
+static IMAGES: IrqMutex<Vec<Image>> = IrqMutex::new(Vec::new());
+
+/// Armed slots in no image at all, which nothing can name.
+static NAMELESS: AtomicU32 = AtomicU32::new(0);
+
 /// One armed import slot.
 #[derive(Clone, Copy)]
 struct Trap {
@@ -445,6 +494,13 @@ struct Trap {
     /// `<dll>!<export>`, as the ledger spells a name.
     name: [u8; NAME_LEN],
     len: u8,
+    /// The image the slot is in, as an index into [`IMAGES`]: who made
+    /// the call, which the name above does not say. One import is a
+    /// slot in every image that imports it, so a trace of a whole
+    /// program records the same name called from the program and from
+    /// its DLLs, and without this the records are one line twice. Free:
+    /// a `u16` here fits the padding this struct has anyway.
+    image: u16,
     /// Whether the first call through it has been seen. A later call
     /// through a trap address the program kept a copy of is sent on like
     /// the first, and recorded no more than once.
@@ -835,6 +891,7 @@ pub fn arm(process: &Process, base: u64, index: u64, slot: u64, target: u64, nam
         target,
         name: [0; NAME_LEN],
         len: len as u8,
+        image: image_of(process, slot),
         reached: false,
         read: false,
     };
@@ -883,7 +940,73 @@ pub fn arm(process: &Process, base: u64, index: u64, slot: u64, target: u64, nam
         }
     }
     ARMED.fetch_add(1, Ordering::Relaxed);
+    note_armed(entry.image);
     true
+}
+
+/// The image the slot at `slot` is in, as an index into [`IMAGES`]. An
+/// import address table is part of its own image, so the slot's address
+/// is who imported the name -- there is no stack to walk and nothing to
+/// ask the program, which is what makes this answerable at all for a
+/// DLL Microsoft wrote. Resolved here, once a slot, where a page's
+/// protection is being changed anyway: a recorded call then costs
+/// nothing to attribute, and a call nobody records costs nothing.
+fn image_of(process: &Process, slot: u64) -> u16 {
+    let Some(module) = module_at(process, slot) else {
+        return NO_IMAGE;
+    };
+    let (base, name) = (module.base(), module.name().as_bytes());
+    let mut held = IMAGES.lock();
+    if let Some(at) = held.iter().position(|had| had.pid == process.id && had.base == base) {
+        return u16::try_from(at).unwrap_or(NO_IMAGE);
+    }
+    if held.len() >= MAX_IMAGES {
+        return NO_IMAGE;
+    }
+    let mut entry = Image { pid: process.id, base, ..Image::NONE };
+    entry.len = u8::try_from(name.len().min(MODULE_LEN)).unwrap_or(0);
+    entry.name[..usize::from(entry.len)].copy_from_slice(&name[..usize::from(entry.len)]);
+    if held.try_push(entry).is_err() {
+        let images = held.len();
+        // The lock goes first: a warning takes the console's, and the
+        // order of those two is this one everywhere.
+        drop(held);
+        warn!(
+            "imports: out of memory for the image table at {images} images: the slots \
+             of the images past it are armed and recorded without a module (imports=)"
+        );
+        return NO_IMAGE;
+    }
+    u16::try_from(held.len() - 1).unwrap_or(NO_IMAGE)
+}
+
+/// Counts one slot against the image it is in, once the slot is armed.
+/// Counted here and not where the image is named, so that a slot the
+/// kernel could not arm is counted as armed by neither number.
+fn note_armed(image: u16) {
+    if image == NO_IMAGE {
+        NAMELESS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let mut held = IMAGES.lock();
+    if let Some(entry) = held.get_mut(usize::from(image)) {
+        entry.slots += 1;
+    }
+}
+
+/// The name of the image at `image`, copied into `out` so that a record
+/// is written with no lock of this table held, or `?` where the slot is
+/// in no image the table could name.
+fn from_name(image: u16, out: &mut [u8; MODULE_LEN]) -> &str {
+    let mut written = 0;
+    if image != NO_IMAGE {
+        let held = IMAGES.lock();
+        if let Some(entry) = held.get(usize::from(image)) {
+            written = usize::from(entry.len);
+            out[..written].copy_from_slice(&entry.name[..written]);
+        }
+    }
+    core::str::from_utf8(&out[..written]).ok().filter(|name| !name.is_empty()).unwrap_or("?")
 }
 
 /// A fault at a trap address. An instruction fetch is the call the trap
@@ -1072,12 +1195,14 @@ fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) -> Op
     quote(process, &args.map(Some), &mut bytes, &mut found);
     let text = Texts { places: &CALL_PLACES, found: &found, bytes: &bytes };
     let name = core::str::from_utf8(&entry.name[..usize::from(entry.len)]).unwrap_or("?");
+    let mut owner = [0u8; MODULE_LEN];
+    let from = from_name(entry.image, &mut owner);
     events::emit(
         Category::Call,
         "import",
         format_args!(
             "{}",
-            Fields { pid: process.id, process: process.name, call: name, args: &args, text }
+            Fields { pid: process.id, process: process.name, from, call: name, args: &args, text }
         ),
     );
     if text.any_text() && TEXT_CALLS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
@@ -1673,12 +1798,14 @@ fn answer(process: &Process, frame: &TrapFrame, entry: &Trap, waited: &Pending) 
     quote(process, &at, &mut bytes, &mut found);
     let text = Texts { places: &RETURN_PLACES, found: &found, bytes: &bytes };
     let name = core::str::from_utf8(&entry.name[..usize::from(entry.len)]).unwrap_or("?");
+    let mut owner = [0u8; MODULE_LEN];
+    let from = from_name(entry.image, &mut owner);
     events::emit(
         Category::Call,
         "ret",
         format_args!(
             "{}{}",
-            Answer { pid: process.id, process: process.name, call: name, answer: got },
+            Answer { pid: process.id, process: process.name, from, call: name, answer: got },
             text
         ),
     );
@@ -1872,6 +1999,7 @@ pub fn log_stats() {
     } else {
         info!("imports: first calls recorded: {done} of {armed} slots armed{read} (imports=)");
     }
+    log_images(armed);
     let asked = REPEAT_ASKED.load(Ordering::Relaxed);
     if asked != 0 {
         let again = REPEATED.load(Ordering::Relaxed);
@@ -1888,6 +2016,71 @@ pub fn log_stats() {
     log_answers();
     log_strings();
     log_bytes();
+}
+
+/// How many images one summary line names; the rest are counted.
+const SHOWN_IMAGES: usize = 5;
+
+/// Which images the armed slots are in, for the end of a run.
+/// `imports=<program>` arms the program's own import table and those of
+/// every DLL it loads, so a budget that went on one DLL's imports reads
+/// from these counts alone. The `from` of a record says who made a
+/// call; this says where the slots were before any call was made, which
+/// is the other half of the same question and is said whether or not
+/// the event stream was on.
+fn log_images(armed: u64) {
+    let mut top = [Image::NONE; SHOWN_IMAGES];
+    let mut images = 0;
+    {
+        let held = IMAGES.lock();
+        for entry in held.iter().filter(|entry| entry.slots != 0) {
+            images += 1;
+            // Into a list of the biggest few, which is what the line
+            // shows and is cheaper than sorting a table of ninety.
+            if let Some(at) = top.iter().position(|had| entry.slots > had.slots) {
+                top[at..].rotate_right(1);
+                top[at] = *entry;
+            }
+        }
+    }
+    if images == 0 {
+        return;
+    }
+    let nameless = NAMELESS.load(Ordering::Relaxed);
+    let spread = Spread { shown: &top[..images.min(SHOWN_IMAGES)], images, nameless };
+    info!("imports: those {armed} slots are in {spread} (imports=)");
+}
+
+/// `2 images: testdll2.dll 2, iat_from_test.exe 1`, the biggest first,
+/// with what is not named counted: `87 images: MSO.DLL 4821, ... and 82
+/// with fewer`.
+struct Spread<'a> {
+    shown: &'a [Image],
+    images: usize,
+    /// Armed slots in no image, which cannot be named at all. Said only
+    /// where there are some: it is a gap, and not a number a reader
+    /// expects to see.
+    nameless: u32,
+}
+
+impl fmt::Display for Spread<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let images = self.images;
+        write!(f, "{images} image{}: ", if images == 1 { "" } else { "s" })?;
+        for (i, entry) in self.shown.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{} {}", entry.name(), entry.slots)?;
+        }
+        if images > self.shown.len() {
+            write!(f, " and {} with fewer", images - self.shown.len())?;
+        }
+        match self.nameless {
+            0 => Ok(()),
+            n => write!(f, "; {n} in no image at all"),
+        }
+    }
 }
 
 /// What the run quoted, for the end of a run: the arguments that read
@@ -2086,6 +2279,11 @@ impl fmt::Display for Reads {
 struct Fields<'a> {
     pid: u64,
     process: &'a str,
+    /// The image whose import slot the call went through, which is who
+    /// made it: `call` is what was called, and the DLL it names is the
+    /// one that supplies the export rather than the one that asked for
+    /// it. `?` where no image holds the slot.
+    from: &'a str,
     call: &'a str,
     args: &'a [u64],
     /// What those registers read as where one of them reads as text.
@@ -2098,7 +2296,11 @@ impl fmt::Display for Fields<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (pid, args, text) = (self.pid, Words(self.args), self.text);
         let (process, call) = (Str(self.process), Str(self.call));
-        write!(f, r#""pid":{pid},"process":{process},"call":{call},"args":{args}{text}"#)
+        let from = Str(self.from);
+        write!(
+            f,
+            r#""pid":{pid},"process":{process},"from":{from},"call":{call},"args":{args}{text}"#
+        )
     }
 }
 
@@ -2317,10 +2519,11 @@ impl fmt::Display for Name<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ARGS, BUDGET, BYTE_WINDOW, CALL_PLACES, Calls, Carried, Dumped, Fields, MAX_ANSWERS,
+        ARGS, BUDGET, BYTE_WINDOW, CALL_PLACES, Calls, Carried, Dumped, Fields, Image, MAX_ANSWERS,
         MAX_BUDGET, MAX_BYTES, MAX_REPEAT, MAX_STRINGS, PutStep, Quote, READ, RET_OFFSET,
-        RETURN_PLACES, Reads, STRIDE, Said, TEXT_CHARS, TEXT_WINDOW, Text, Texts, answer_budget,
-        byte_budget, holds, repeat_budget, split_budget, string_budget, text_in, trap_at,
+        RETURN_PLACES, Reads, SHOWN_IMAGES, STRIDE, Said, Spread, TEXT_CHARS, TEXT_WINDOW, Text,
+        Texts, Trap, answer_budget, byte_budget, holds, repeat_budget, split_budget, string_budget,
+        text_in, trap_at,
     };
 
     #[test]
@@ -2413,15 +2616,68 @@ mod tests {
         let fields = Fields {
             pid: 12,
             process: "WINWORD.EXE",
+            from: "wwlib.dll",
             call: "d2d1.dll!D2D1CreateFactory",
             args: &[0, 2078216, 0, 2078208],
             text: Texts { places: &CALL_PLACES, found: &found, bytes: &bytes },
         };
         assert_eq!(
             alloc::format!("{{\"ev\":\"import\",{fields}}}"),
-            "{\"ev\":\"import\",\"pid\":12,\"process\":\"WINWORD.EXE\",\"call\":\
-             \"d2d1.dll!D2D1CreateFactory\",\"args\":[0,2078216,0,2078208]}"
+            "{\"ev\":\"import\",\"pid\":12,\"process\":\"WINWORD.EXE\",\"from\":\
+             \"wwlib.dll\",\"call\":\"d2d1.dll!D2D1CreateFactory\",\"args\":\
+             [0,2078216,0,2078208]}"
         );
+    }
+
+    /// An image of `slots` armed slots, for the spread below.
+    fn image(name: &str, slots: u32) -> Image {
+        let mut entry = Image { slots, ..Image::NONE };
+        entry.len = name.len() as u8;
+        entry.name[..name.len()].copy_from_slice(name.as_bytes());
+        entry
+    }
+
+    /// Where a run's armed slots were, which is the other half of what
+    /// a record's `from` says: the biggest few images named, the rest
+    /// counted so that the line is bounded however many images a
+    /// program loads, and the slots no image holds said only where
+    /// there are some.
+    #[test]
+    fn the_images_of_a_run_are_the_biggest_few_and_the_rest_counted() {
+        let two = [image("testdll2.dll", 2), image("iat_from_test.exe", 1)];
+        assert_eq!(
+            alloc::format!("{}", Spread { shown: &two, images: 2, nameless: 0 }),
+            "2 images: testdll2.dll 2, iat_from_test.exe 1"
+        );
+        // One image is one image: a program whose imports are all its
+        // own is the common case of that, and it must not read as a
+        // count that has gone wrong.
+        assert_eq!(
+            alloc::format!("{}", Spread { shown: &two[..1], images: 1, nameless: 0 }),
+            "1 image: testdll2.dll 2"
+        );
+        let many: [Image; SHOWN_IMAGES] =
+            core::array::from_fn(|i| image("MSO.DLL", 5000 - i as u32));
+        let line = alloc::format!("{}", Spread { shown: &many, images: 87, nameless: 0 });
+        assert!(line.starts_with("87 images: MSO.DLL 5000, "), "{line}");
+        assert!(line.ends_with(" and 82 with fewer"), "{line}");
+        // A slot in no image at all is a gap in the instrument, so it
+        // is said as a number of its own rather than left out.
+        assert_eq!(
+            alloc::format!("{}", Spread { shown: &two, images: 2, nameless: 3 }),
+            "2 images: testdll2.dll 2, iat_from_test.exe 1; 3 in no image at all"
+        );
+    }
+
+    /// Knowing which image a slot is in costs no memory: the index sits
+    /// in padding the entry has for its alignment anyway, so the whole
+    /// ceiling `imports=<n>` may ask for still fits the budget the
+    /// docs name (9 MiB).
+    #[test]
+    fn a_slot_costs_no_more_for_knowing_which_image_it_is_in() {
+        assert_eq!(size_of::<Trap>(), 136);
+        let table = size_of::<Trap>() * MAX_BUDGET as usize;
+        assert!(table <= 9 * 1024 * 1024, "{table} bytes for {MAX_BUDGET} slots");
     }
 
     /// What a window of bytes read at an argument reads as. A run of

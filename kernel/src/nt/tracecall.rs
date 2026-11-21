@@ -179,7 +179,7 @@ pub fn record_answer(process: &str, pid: u64, name: &[u8], answer: u64) -> bool 
     events::emit(
         Category::Call,
         "ret",
-        format_args!("{}", Answer { pid, process, call: text, answer }),
+        format_args!("{}", Answer { pid, process, from: "", call: text, answer }),
     );
     ANSWERED.fetch_add(1, Ordering::Relaxed);
     left > 0
@@ -266,6 +266,16 @@ impl fmt::Display for Fields<'_> {
 pub(super) struct Answer<'a> {
     pub(super) pid: u64,
     pub(super) process: &'a str,
+    /// The module the call was made from, where that is known, and
+    /// empty where it is not -- which is every call recorded here, and
+    /// why the field is written only when it has something to say. A
+    /// method call is an indirect call through a vtable from anywhere
+    /// in the program's own code, and the wrapper that records it is
+    /// handed the call's arguments and not its caller; `traceimports`
+    /// knows the module of every call it records, the slot the call
+    /// went through being an entry of that module's own import address
+    /// table.
+    pub(super) from: &'a str,
     pub(super) call: &'a str,
     pub(super) answer: u64,
 }
@@ -274,7 +284,11 @@ impl fmt::Display for Answer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (pid, answer) = (self.pid, self.answer);
         let (process, call) = (Str(self.process), Str(self.call));
-        write!(f, r#""pid":{pid},"process":{process},"call":{call},"answer":{answer}"#)
+        write!(f, r#""pid":{pid},"process":{process}"#)?;
+        if !self.from.is_empty() {
+            write!(f, r#","from":{}"#, Str(self.from))?;
+        }
+        write!(f, r#","call":{call},"answer":{answer}"#)
     }
 }
 
@@ -338,6 +352,7 @@ mod tests {
         let fields = Answer {
             pid: 12,
             process: "WINWORD.EXE",
+            from: "",
             call: "d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush",
             answer: 0x8007_000e,
         };

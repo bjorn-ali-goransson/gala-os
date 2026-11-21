@@ -6683,6 +6683,28 @@ among the slowest hand-offs.
      is the window: 32 bytes is a structure and not a buffer, and
      reading more than that of one is a dump of memory and not a line
      per call.
+     Nor is who made the call: each record carries `from`, the image
+     whose import slot the call went through, where `call` names the
+     DLL that supplies the export and not the one that asked for it.
+     One import is a slot in every image that imports it, so a trace
+     armed over a whole program records the same name called from the
+     program and from its DLLs, and without this those records are one
+     line twice. An import address table is part of its own image, so
+     the slot's own address is the answer: the kernel resolves it as it
+     arms the slot, which costs a `u16` that fits the padding the entry
+     has anyway -- the 65536-slot ceiling stays the same 9 MiB -- and a
+     recorded call then costs nothing to attribute, with no stack to
+     walk, nothing asked of the program and the same answer for a DLL
+     Microsoft wrote. The summary says the other half, where a run's
+     slots were before any call was made: the five biggest images named
+     with their counts and the rest counted, which is what a budget
+     spent on one DLL's heap imports reads from. Scenario `iat_from`
+     with an ARM64 twin, where one name is armed in two images at once
+     (testdll2 imports from testdll, and `imports=` arms every image of
+     the process), so the two records differ in this field alone. Its
+     gap: an image past 65535, or a slot in no image at all, is armed
+     and recorded with `?` for the module rather than refused, and the
+     summary counts those slots apart.
      Nor is a budget spent on the names that are noise:
      `imports_except=<text>[,<text>...]` leaves an import whose
      `<dll>!<name>` holds one of the texts unarmed, so that it costs no
@@ -6711,7 +6733,10 @@ among the slowest hand-offs.
    (`kernel/src/nt/stack_at.rs`, scenarios `stack_at_test` and
    `stack_at_from_test`, OBSERVABILITY "Stack captures"). The wrappers
    say what happened inside a DLL gala wrote; this says who called, in
-   any DLL, including Microsoft's own. Its gaps: a scan, not an unwind, so dead words of
+   any DLL, including Microsoft's own, at any system call and for the
+   price of a stack scan -- where an import record's `from` says it for
+   nothing, out of the slot's own address, but only of the imports a
+   trace armed. Its gaps: a scan, not an unwind, so dead words of
    earlier frames come with the call path, and a 32-bit program's
    frames are above the WOW64 thunk the capture is taken at.
 
