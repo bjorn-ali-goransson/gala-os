@@ -447,7 +447,6 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f71, &[U]),                      // GalaWinEventUnhook
     (0x7f72, &[U, U, Hi, U, U]),         // GalaWinEventNotify
     (0x7f73, &[U, U, U]),                // GalaWinEventTake
-    (0x7f74, &[U, U, U, U]),             // GalaTrayIcon
     (0x7f75, &[U, U, U]),                // GalaAppBar
     (0x7f76, &[U]),                      // GalaCursorPos
     (0x7f77, &[U, U, Hi, U, U, U]),      // GalaHotKey

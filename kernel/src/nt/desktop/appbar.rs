@@ -23,7 +23,6 @@
 
 use super::NtStatus;
 use super::Rect;
-use super::tray::Post;
 use crate::mm::heap::TryVec;
 use alloc::vec::Vec;
 
@@ -56,6 +55,16 @@ pub struct Bar {
     pub callback: u32,
     /// Its edge and strip once ABM_SETPOS placed it.
     pub placed: Option<(u32, Rect)>,
+}
+
+/// A message for an app bar's window (its callback message: ABN_*),
+/// posted once the desktop's lock is let go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Post {
+    pub hwnd: u64,
+    pub message: u32,
+    pub wparam: u64,
+    pub lparam: u64,
 }
 
 #[derive(Default)]

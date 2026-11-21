@@ -882,9 +882,9 @@ shell part) leaves it.
    8. Done: shasha's notification area. The strip's window has
       Explorer's class `Shell_TrayWnd`; shell32's Shell_NotifyIcon
       finds it and sends its request (WM_COPYDATA: NIM_ message and
-      request, or an icon's corners for Shell_NotifyIconGetRect), and
-      the kernel's GalaTrayIcon is used only when no such window exists
-      (a stopgap that goes with the kernel's shell code). The icons are
+      request, or an icon's corners for Shell_NotifyIconGetRect); with
+      no such window there is no notification area, as on Windows
+      without Explorer. The icons are
       gala_ui slots left of the clock with their pictures (gala_ui
       `image` drawn with GdiAlphaBlend); a click or right click posts
       the icon's window the callbacks of its version (version 4: the
@@ -928,11 +928,23 @@ shell part) leaves it.
       boots with it (`desktop_at_boot` checks shasha's taskbar, wallpaper
       and start menu: Windows key, Esc). Not yet: the task buttons'
       icons; the scenarios that test the kernel's own shell (`start_menu`,
-      `linux_menu`, `tray_test`, `hotkey_test`, which plays the shell)
-      run with `shell=desktop` until it is removed.
-   Then the kernel's shell code (about 4-5k lines of `nt/desktop`: the
-   menu, taskbar, tray, wallpaper, the Linux and install tiles)
-   removed, its scenarios moved to shasha.
+      `linux_menu`, `hotkey_test`, which plays the shell) run with
+      `shell=desktop` until it is removed.
+   11. The kernel's shell code removed, its scenarios moved to shasha.
+      Done: the notification area. The kernel's tray (`desktop/tray.rs`,
+      the taskbar's icons, tips and balloon), the GalaTrayIcon syscall
+      (0x7f74, not reused), GalaDesktopAction's Tray and TrayClick and
+      `gala tray` are gone; automation finds shasha's icons by their UI
+      Automation ids (`TrayIcon<hwnd>_<id>`). `tray_test` runs only
+      against shasha (`shasha_tray`, its ARM64 twin `arm_shasha_tray`),
+      `wow64_tray_test` became a UEFI shasha scenario, and without a
+      shell (`no_i8042`) the tray part is skipped as Shell_NotifyIcon
+      fails. The kernel start menu's install notices are log lines
+      until that menu goes. Next: shasha's start menu gains the install
+      tiles (`start_menu`), the Linux tiles (`linux_menu`) and the shell
+      keys (`hotkey_test`); then the kernel's menu, taskbar, clock and
+      wallpaper (`nt/desktop`'s `paint.rs`, `linux.rs`, `pkg.rs` and
+      most of `mod.rs`) and `shell=desktop` go.
 2. Supervision: the session (RS B4's session manager, the kernel until
    then) restarts a shell that ends, with its exit status and crash
    record in the event stream; windows stay usable meanwhile (Win+arrows
@@ -3334,7 +3346,7 @@ need gala's.
      NIM_SETVERSION). Done: shasha's taskbar has a notification area
      (Shell_NotifyIconW/A with every NIM_ message, the NOTIFYICONDATA
      sizes and versions, version 4's callback layout, balloons,
-     Shell_NotifyIconGetRect; `gala tray` and its clicks; comctl32's
+     Shell_NotifyIconGetRect; comctl32's
      LoadIconMetric and LoadIconWithScaleDown, PNG icons and sizes in
      CreateIconFromResourceEx, .ico files in LoadImageW; `tray_test`,
      `wow64_tray_test`; ARCHITECTURE "The notification area"); whether

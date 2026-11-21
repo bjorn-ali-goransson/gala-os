@@ -1,36 +1,25 @@
 //! The notification area: Shell_NotifyIconW/A and
 //! Shell_NotifyIconGetRect, as Microsoft documents them, over the
-//! kernel's tray (GalaTrayIcon; ARCHITECTURE "The notification area").
+//! shell's taskbar (ARCHITECTURE "The notification area").
 //! NOTIFYICONDATA is read as far as its cbSize goes: the four documented
 //! sizes (V1 with a 64-character tip, V2 adding the 128-character tip,
 //! state and balloon, V3 the GUID, the full one the balloon's icon); any
 //! other size counts as V1, as Wine's systray tests record of Windows
 //! (an invalid cbSize works, with the first version's fields). The icon
-//! goes to the kernel as pixels (user32's GalaIconArgb), which the
-//! taskbar draws at 16 x 16. Where gala runs no shell (a bare desktop:
-//! no screen, the server profile) there is no notification area and the
-//! calls fail as on Windows without Explorer (recorded).
+//! goes as pixels (user32's GalaIconArgb), which the taskbar draws at
+//! 16 x 16.
 //!
-//! A shell's taskbar (`Shell_TrayWnd`: shasha's on gala, Explorer's on
-//! Windows) holds the icons when there is one: the request goes to it by
-//! WM_COPYDATA ([`to_shell`]: dwData [`COPY_NOTIFY`], the message, then
-//! the same request GalaTrayIcon takes), its answer TRUE or FALSE, and
-//! Shell_NotifyIconGetRect asks it for the icon's corners
-//! ([`COPY_TOP_LEFT`], [`COPY_BOTTOM_RIGHT`]). The kernel's tray answers
-//! only where no such window is (the desktop's own taskbar: a stopgap
-//! until the kernel's shell code is gone, ROADMAP SH step 1).
+//! The shell's taskbar (`Shell_TrayWnd`: shasha's on gala, Explorer's on
+//! Windows) holds the icons: the request goes to it by WM_COPYDATA
+//! ([`to_shell`]: dwData [`COPY_NOTIFY`], the message, then the request
+//! below), its answer TRUE or FALSE, and Shell_NotifyIconGetRect asks it
+//! for the icon's corners ([`COPY_TOP_LEFT`], [`COPY_BOTTOM_RIGHT`]).
+//! Where no shell runs (a bare desktop: no screen, the server profile)
+//! there is no notification area and the calls fail as on Windows
+//! without Explorer (recorded).
 
 use crate::unsupported;
 use core::ffi::c_void;
-
-#[cfg_attr(
-    target_arch = "x86",
-    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
-)]
-#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
-unsafe extern "system" {
-    fn GalaTrayIcon(op: u32, request: *const u8, length: usize, rect: *mut i32) -> u32;
-}
 
 #[cfg_attr(
     target_arch = "x86",
@@ -125,7 +114,6 @@ const NIIF_LARGE_ICON: u32 = 0x20;
 /// What the V1 structure may set (NIF_MESSAGE, NIF_ICON, NIF_TIP).
 const V1_FLAGS: u32 = 0x07;
 
-const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
 const S_OK: i32 = 0;
 const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
 const E_FAIL: i32 = 0x8000_4005u32 as i32;
@@ -231,7 +219,12 @@ fn counted(cb: u32, sizes: [usize; 4]) -> usize {
     if sizes.contains(&cb) { cb } else { sizes[0] }
 }
 
-/// GalaTrayIcon's request (kernel/src/nt/syscalls.rs `tray_request`).
+/// The request `Shell_TrayWnd` is sent (shasha reads it:
+/// user/shasha/src/tray.rs): version (1), flags (NIF_*), hWnd (u64),
+/// uID, uCallbackMessage, dwState, dwStateMask, uVersion, dwInfoFlags,
+/// guidItem (16 bytes), the icon's side (0: none, at most MAX_SIDE),
+/// zero, then szTip (128 UTF-16 units), szInfoTitle (64), szInfo (256)
+/// and the icon (side x side 0xAARRGGBB, straight alpha).
 const TEXT_AT: usize = 64;
 const TIP_LEN: usize = 128;
 const TITLE_LEN: usize = 64;
@@ -329,19 +322,15 @@ fn notify(message: u32, d: &DataW, size: usize, sizes: [usize; 4]) -> i32 {
         }
     }
     let bar = shell_bar();
-    if bar != 0 {
-        // The message, then the request.
-        let mut b = [0u8; 4 + REQUEST];
-        b[..4].copy_from_slice(&message.to_le_bytes());
-        b[4..].copy_from_slice(&r.0);
-        return i32::from(to_shell(bar, COPY_NOTIFY, d.hwnd, &b) == Some(1));
-    }
-    // SAFETY: our request of REQUEST bytes.
-    let status = unsafe { GalaTrayIcon(message, r.0.as_ptr(), REQUEST, core::ptr::null_mut()) };
-    if status == STATUS_NOT_SUPPORTED {
+    if bar == 0 {
         unsupported(b"shell32.dll!Shell_NotifyIcon(no notification area)", message.into());
+        return 0;
     }
-    i32::from(status == 0)
+    // The message, then the request.
+    let mut b = [0u8; 4 + REQUEST];
+    b[..4].copy_from_slice(&message.to_le_bytes());
+    b[4..].copy_from_slice(&r.0);
+    i32::from(to_shell(bar, COPY_NOTIFY, d.hwnd, &b) == Some(1))
 }
 
 /// Shell_NotifyIconW(dwMessage, lpData): NIM_ADD, NIM_MODIFY,
@@ -436,40 +425,23 @@ pub extern "system" fn Shell_NotifyIconGetRect(id: *const Identifier, rect: *mut
         }
     }
     let bar = shell_bar();
-    if bar != 0 {
-        let corner = |kind| {
-            let a = to_shell(bar, kind, id.hwnd, &r.0)? as u32;
-            (a != u32::MAX).then_some((a as u16 as i16 as i32, (a >> 16) as u16 as i16 as i32))
-        };
-        let (Some((l, t)), Some((rr, b))) = (corner(COPY_TOP_LEFT), corner(COPY_BOTTOM_RIGHT))
-        else {
-            return E_FAIL;
-        };
-        // SAFETY: the caller's RECT (left, top, right, bottom).
-        unsafe {
-            *rect = l;
-            *rect.add(1) = t;
-            *rect.add(2) = rr;
-            *rect.add(3) = b;
-        }
-        return S_OK;
-    }
-    let mut xywh = [0i32; 4];
-    // SAFETY: our request and rectangle.
-    let status = unsafe { GalaTrayIcon(0x10, r.0.as_ptr(), REQUEST, xywh.as_mut_ptr()) };
-    if status != 0 {
-        if status == STATUS_NOT_SUPPORTED {
-            unsupported(b"shell32.dll!Shell_NotifyIconGetRect(no notification area)", 0);
-        }
+    if bar == 0 {
+        unsupported(b"shell32.dll!Shell_NotifyIconGetRect(no notification area)", 0);
         return E_FAIL;
     }
-    let [x, y, w, h] = xywh;
+    let corner = |kind| {
+        let a = to_shell(bar, kind, id.hwnd, &r.0)? as u32;
+        (a != u32::MAX).then_some((a as u16 as i16 as i32, (a >> 16) as u16 as i16 as i32))
+    };
+    let (Some((l, t)), Some((rr, b))) = (corner(COPY_TOP_LEFT), corner(COPY_BOTTOM_RIGHT)) else {
+        return E_FAIL;
+    };
     // SAFETY: the caller's RECT (left, top, right, bottom).
     unsafe {
-        *rect = x;
-        *rect.add(1) = y;
-        *rect.add(2) = x + w;
-        *rect.add(3) = y + h;
+        *rect = l;
+        *rect.add(1) = t;
+        *rect.add(2) = rr;
+        *rect.add(3) = b;
     }
     S_OK
 }

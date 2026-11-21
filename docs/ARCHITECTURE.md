@@ -8148,7 +8148,7 @@ session's is shown by nothing unless GalaSession attaches a presenter
     which keeps the bar where it got to, in grey, and draws the icon
     grey under a white question mark where the download badge sits. A
     click tries again, as on a tile whose install failed, and it is
-    told above the notification area like any end ("The install went
+    told like any end ("The install went
     quiet: its installer is gone with no word. A click tries again.",
     or "The install never started. A click tries again."). The watch is
     on the process and not on a silence: an install may say nothing for
@@ -8166,11 +8166,12 @@ session's is shown by nothing unless GalaSession attaches a presenter
     `out`, which faults in user mode - so the desktop keeps what is to
     be told (`Quieted`, as it keeps `launch`) and the module's free
     functions drain it (`tell_quiet`).
-  - **An install that ends is told above the notification area**, since
-    the tile it ran on is out of sight as soon as the menu is closed:
-    the program's name over "Installed. Its tile starts it now." or
-    "The install failed[: <what the exit code says>]." on the card a
-    program's balloon uses ("The notification area"). It is told once
+  - **An install that ends is told**, since the tile it ran on is out
+    of sight as soon as the menu is closed: `desktop: start menu:
+    <name>: Installed. Its tile starts it now.` or `... The install
+    failed[: <what the exit code says>].` in the log (`announce`; the
+    kernel's taskbar has no notification area to show it on, and this
+    menu goes with it, ROADMAP SH step 1). It is told once
     and always: the listing that draws the tile installed is what tells
     it, the install's own last word tells it when the listing has not
     caught up with it, and a failure reported twice is told once (a
@@ -8243,92 +8244,68 @@ session's is shown by nothing unless GalaSession attaches a presenter
 
 #### The notification area
 
-Code: `desktop/tray.rs` (the icons, their messages, the balloon; host
-tests there and in `desktop/tests.rs`), `user/shasha/src/tray.rs` (the
-same model in the user-mode shell, host-tested there) and shasha's
-`main.rs` (its window's side), shell32's `tray.rs`
-(Shell_NotifyIconW/A, Shell_NotifyIconGetRect), user32's GalaIconArgb.
-Test: `tray_test` and its x86 twin `wow64_tray_test` (Windows'
-expectations from Microsoft's documentation and Wine's shell32
-systray.c; on gala also `gala tray`, its clicks and a mouse click
-through the screen check); with `args=screen shell` in scenario
-`shasha_tray`, the same requests answered by shasha, a real left and
-right click on its icon and the balloon's pixels.
+Code: `user/shasha/src/tray.rs` (the icons, their messages, the
+balloon; host-tested there) and shasha's `main.rs` (its window's
+side), shell32's `tray.rs` (Shell_NotifyIconW/A,
+Shell_NotifyIconGetRect), user32's GalaIconArgb. The kernel has no
+notification area (its taskbar had one until ROADMAP SH step 1 moved
+it to shasha). Test: `tray_test` (Windows' expectations from
+Microsoft's documentation and Wine's shell32 systray.c) in scenario
+`shasha_tray` (`args=screen shell`: shasha answers, a real left and
+right click on its icon and the balloon's pixels; `arm_shasha_tray`
+its ARM64 twin), its x86 build `wow64_tray_test` (UEFI, `args=shell`)
+and `no_i8042` (no shell: the tray part skipped).
 
 - **Who answers**: Shell_NotifyIcon asks the window of class
   `Shell_TrayWnd` (Explorer's taskbar's; shasha's strip has it) with
   WM_COPYDATA (SendMessageTimeout, SMTO_ABORTIFHUNG, 4 s; wParam the
-  icon's window): dwData 1 is the NIM_ message (u32) then GalaTrayIcon's
-  request layout, answered TRUE/FALSE; 3 and 4 are the request alone,
-  answered with the icon's top-left or bottom-right screen corner
-  (MAKELONG(x, y), -1 when it is not shown) for
-  Shell_NotifyIconGetRect. With no such window shell32 uses the
-  kernel's GalaTrayIcon and the desktop's area below (a stopgap that
-  goes with the kernel's shell code, ROADMAP SH step 1). shasha keeps
-  the same rules as the kernel's (64 icons, the same refusals, the
-  same messages and balloon); a version 4 icon's point is its slot's
-  middle; an icon goes when its window is gone (checked with IsWindow
-  whenever the window list is read again, and when a post fails). Its
-  slots are 32 x 40 gala_ui rows (UIA AutomationId
-  `TrayIcon<hwnd>_<id>`; no name yet: gala_ui has no accessible name
-  apart from text) left of the clock, the 16 x 16 picture drawn with
-  GdiAlphaBlend; its balloon is a hidden gala_ui popup "Notification"
-  (360 x 96, above the clock) shown while one is on.
-
-- **Icons**: per desktop, at most 64, each keyed by its window and id
-  (or its GUID with NIF_GUID), with the process that added it, its
-  callback message (NIF_MESSAGE), NOTIFYICON version, hidden state
-  (NIF_STATE's NIS_HIDDEN), tip (128 units) and pixels (16 x 16,
-  straight alpha: shell32 reads the HICON with user32's GalaIconArgb,
-  the kernel scales it). NIM_ADD of an icon there fails
-  (STATUS_OBJECT_NAME_COLLISION), NIM_MODIFY/NIM_DELETE/NIM_SETFOCUS/
-  NIM_SETVERSION of one that is not there fail
-  (STATUS_OBJECT_NAME_NOT_FOUND); Shell_NotifyIcon answers FALSE for
-  each. An icon goes with its process, or when a message to its window
-  fails because the window is gone (Windows' shell drops such icons
-  when the pointer passes over them).
-- **Layout**: slots 32 px wide right to left from the clock's 96 px,
-  the first added furthest left; the icon in the middle of its slot,
-  lit under the pointer (or with NIM_SETFOCUS's focus).
-  Shell_NotifyIconGetRect gives the slot's screen rectangle (E_FAIL for
-  an icon not shown).
-- **Messages** (to the icon's window, posted through the window
-  registry as the system's: `window::post_from_system`, after the
-  desktop's lock is let go): WM_MOUSEMOVE as the pointer moves over the
-  icon, the button messages on press and release, then on a release
-  from version 3 on NIN_SELECT (left) or WM_CONTEXTMENU (right). Version
-  4's layout: wParam the point (x, y as 16-bit halves), lParam the event
-  with the id in its high word; older versions: wParam the id, lParam
-  the event. No callback message, no messages.
-- **Balloon** (NIF_INFO): one at a time, a card of the start menu's
-  colours above the taskbar at the right (title in 14 px semibold, the
-  text wrapped to four lines); NIN_BALLOONSHOW when it shows,
-  NIN_BALLOONHIDE when another replaces it, NIN_BALLOONTIMEOUT after
-  BALLOON_SECONDS (7) clock ticks, NIN_BALLOONUSERCLICK when clicked
-  (it goes). NIIF_USER/NIIF_LARGE_ICON's own icon is not drawn
-  (recorded); no sound is played. The same card shows the tip of the
-  icon under the pointer (a version 4 icon's only with NIF_SHOWTIP), one
-  line.
-- **The shell's own balloon** (`Tray::announce`): what the shell itself
-  has to say (an install that ended, "The start menu") belongs to no
-  window, so no icon is told that it shows, goes or was clicked, and it
-  does not go with a process; it replaces the balloon on show and times
-  out as any other. The card is drawn in front of the start menu where
-  the two meet, and a click there is the balloon's - the menu closes
-  too, as it does for any click outside it.
+  icon's window): dwData 1 is the NIM_ message (u32) then shell32's
+  request (`Request`: one layout for 32- and 64-bit callers), answered
+  TRUE/FALSE; 3 and 4 are the request alone, answered with the icon's
+  top-left or bottom-right screen corner (MAKELONG(x, y), -1 when it
+  is not shown) for Shell_NotifyIconGetRect. With no such window there
+  is no notification area: Shell_NotifyIcon is FALSE and
+  Shell_NotifyIconGetRect E_FAIL (recorded `shell32.dll!
+  Shell_NotifyIcon(no notification area)`), as on Windows without
+  Explorer (a bare desktop: no screen, the server profile).
+- **Icons**: at most 64, each keyed by its window and id (or its GUID
+  with NIF_GUID), with its callback message (NIF_MESSAGE), NOTIFYICON
+  version, hidden state (NIF_STATE's NIS_HIDDEN), tip (128 units) and
+  pixels (straight alpha: shell32 reads the HICON with user32's
+  GalaIconArgb). NIM_ADD of an icon there fails, NIM_MODIFY/NIM_DELETE/
+  NIM_SETFOCUS/NIM_SETVERSION of one that is not there fail;
+  Shell_NotifyIcon answers FALSE for each. An icon goes when its
+  window is gone (checked with IsWindow whenever the window list is
+  read again, and when a post fails), as Windows' shell drops such
+  icons when the pointer passes over them.
+- **Layout**: slots of 32 x 40 gala_ui rows right to left from the
+  clock, the first added furthest left, the 16 x 16 picture drawn with
+  GdiAlphaBlend in the middle, lit under the pointer (or with
+  NIM_SETFOCUS's focus). Each slot is a UI Automation element with
+  AutomationId `TrayIcon<hwnd in hex>_<id>` (no name yet: gala_ui has
+  no accessible name apart from text): that is how a test or the agent
+  finds and clicks an icon. Shell_NotifyIconGetRect gives the slot's
+  screen rectangle.
+- **Messages** (posted to the icon's window): WM_MOUSEMOVE as the
+  pointer moves over the icon, the button messages on press and
+  release, then on a release from version 3 on NIN_SELECT (left) or
+  WM_CONTEXTMENU (right). Version 4's layout: wParam the point (x, y
+  as 16-bit halves: the slot's middle), lParam the event with the id in
+  its high word; older versions: wParam the id, lParam the event. No
+  callback message, no messages.
+- **Balloon** (NIF_INFO): one at a time, a hidden gala_ui popup
+  "Notification" (360 x 96, above the clock) shown while one is on;
+  NIN_BALLOONSHOW when it shows, NIN_BALLOONHIDE when another replaces
+  it, NIN_BALLOONTIMEOUT after BALLOON_SECONDS (7), NIN_BALLOONUSERCLICK
+  when clicked (it goes). NIIF_USER/NIIF_LARGE_ICON's own icon is not
+  drawn (recorded); no sound is played.
 - **NOTIFYICONDATA** (shell32): the counted bytes are cbSize when it is
   one of the four documented sizes (V1 168/152, V2 952/936, V3 968/952,
   full 976/956 bytes for x64/x86; A: 104/88, 504/488, 520/504,
   528/508), else the first version's (Wine's tests record that an
   invalid cbSize works on Windows); V1 carries NIF_MESSAGE, NIF_ICON and
   a 64-character NIF_TIP only, V3 and later the GUID. The A form widens
-  its texts from the ANSI code page. GalaTrayIcon's request is one
-  layout for both widths (`syscalls::tray_request`).
-- **Where nothing shows the desktop** (a bare one: no screen and no
-  `presenter=`, the server profile) there is no taskbar and so no
-  notification area: GalaTrayIcon is STATUS_NOT_SUPPORTED and
-  Shell_NotifyIcon FALSE (recorded `shell32.dll!Shell_NotifyIcon(no
-  notification area)`), as on Windows without Explorer.
+  its texts from the ANSI code page.
 - **TaskbarCreated**: RegisterWindowMessage("TaskbarCreated") is a
   registered message as any other; Windows broadcasts it when Explorer
   (re)creates its taskbar, which programs answer by adding their icons
@@ -8336,17 +8313,7 @@ right click on its icon and the balloon's pixels.
   there is no moment to broadcast it and gala does not. (Registered
   messages are per process in gala's user32: the session-wide table
   waits for the kernel's atoms, ROADMAP AG.)
-- **CLI parity**: GalaDesktopAction's Tray lists the icons and
-  TrayClick clicks one (`gala tray`, `gala tray click <hwnd> <id>
-  [right]`): `Desktop::tray_click` sends what the mouse's press and
-  release in the icon's middle send. A click passes UIPI against the
-  icon's window's process, as the window actions do.
-- **Observability**: `desktop: notification-area icon added/deleted:
-  window <hwnd> id <n>, pid <p> (<n> shown)` (and `not added/deleted`
-  with the status); every message a `window` event `tray` (op, session,
-  pid, hwnd, id, flags, status); a post that fails for another reason
-  than a gone window is a warning; gone windows' icons are logged as
-  removed. In shasha: `shasha: notification-area icon added/modified/
+- **Observability**: `shasha: notification-area icon added/modified/
   deleted/focused: window <hwnd> id <n> "<tip>"`, `... set to version
   <v>`, `shasha: notification-area NIM_<op> (<n>) for window <hwnd> id
   <n> refused: <why>`, `... malformed (<n> bytes)`, `... click/right
@@ -8354,7 +8321,8 @@ right click on its icon and the balloon's pixels.
   window <hwnd> id <n> is gone`, `... balloon shown for window <hwnd>
   id <n>: "<title>"`, `balloon timed out/clicked/gone`, `... its
   picture is not drawn`; shell32 records a request the shell did not
-  answer in time (`Shell_NotifyIcon(the taskbar did not answer)`).
+  answer in time (`Shell_NotifyIcon(the taskbar did not answer)`) and
+  one with no shell to answer it (`(no notification area)`).
 
 #### App bars
 
@@ -8399,8 +8367,8 @@ and the SHAppBarMessage reference).
   behaviour").
 - **ABN_POSCHANGED**: when a bar is set or removed, the other bars on
   its edge get their callback message with wParam ABN_POSCHANGED,
-  posted as the system's after the desktop's lock is let go (as the
-  notification area's messages are). ABN_STATECHANGE,
+  posted as the system's after the desktop's lock is let go
+  (`appbar::Post`). ABN_STATECHANGE,
   ABN_FULLSCREENAPP and ABN_WINDOWARRANGE are not sent (no auto-hide,
   no full-screen detection yet).
 - **Where nothing shows the desktop** there is no taskbar and no work
@@ -8857,7 +8825,6 @@ registry ("Plan: windows across processes").
 | 0x7f58 | GalaDesktopAction | named desktop actions ("Server and desktop workloads") |
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
-| 0x7f74 | GalaTrayIcon(op, *request, length, *rect) | Shell_NotifyIcon's NIM_* on the notification area, or 0x10: an icon's screen rectangle ("The notification area") |
 | 0x7f75 | GalaAppBar(op, *request, length) | SHAppBarMessage's ABM_NEW, ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS and ABM_GETTASKBARPOS ("App bars") |
 | 0x7f76 | GalaCursorPos(*point) | GetCursorPos: the desktop's pointer (two i32), whichever process last had a mouse message |
 | 0x7f77 | GalaHotKey(op, hwnd, id, modifiers, vk) | RegisterHotKey (op 0) and UnregisterHotKey (op 1) ("Hot keys") |
@@ -8995,10 +8962,9 @@ CLI-first.
   - Wallpaper (the picture is decoded and scaled outside the desktop's
     lock, then swapped in and the screen redrawn; "drawn" is the drawn
     one).
-  - Tray (the notification area's icons: HWND, id, process id,
-    version, hidden, the screen rectangle, the tip) and TrayClick (the
-    request's HWND, the icon id in the first argument, the button in
-    the second: 0 left, 1 right).
+  - Actions 12 and 13 (Tray, TrayClick) were the kernel taskbar's
+    notification area and are unused: shasha's icons are UI Automation
+    elements ("The notification area").
   Windows are named by their HWND: the window registry's record
   (version 2) carries the window's id on the desktop, so the kernel
   goes from HWND to the desktop's window and back. Without shasha's
@@ -9032,7 +8998,6 @@ CLI-first.
 | `gala activate\|minimize\|maximize\|restore\|close <window>` | window actions |
 | `gala snap left\|right\|up\|down <window>`, `gala move <window> x y w h` | Snap, Move |
 | `gala wallpaper <name>` | Wallpaper |
-| `gala tray`, `gala tray click <hwnd> <id> [right]` | Tray, TrayClick |
 | `gala ps` | processes (SystemProcessInformation) |
 | `gala kill <pid\|name>` | OpenProcess/TerminateProcess; a name ends every process of that image but gala itself |
 | `gala install`, `search`, `list`, `upgrade`, `uninstall` | packages ("Installing software") |
@@ -15445,7 +15410,7 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   desktop tracks Ctrl and Shift; no program sees that Esc; logged
   `desktop: Ctrl+Shift+Esc: Task Manager`) and the taskbar's context
   menu (a right click on its free space: a card above the taskbar with
-  "Task Manager", drawn as the balloon's card is; any press closes it;
+  "Task Manager", on a light card; any press closes it;
   logged `desktop: taskbar menu: Task Manager`): each starts it as the
   tile does (`action::start_from_menu`). `gala start "Task Manager"`
   is the CLI's way; `gala ps` lists both personalities from the same

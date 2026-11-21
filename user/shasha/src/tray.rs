@@ -60,11 +60,11 @@ pub const MAX_ICONS: usize = 64;
 /// default, and ignores uTimeout since Vista).
 pub const BALLOON_SECONDS: u32 = 7;
 
-/// shell32's request (user/shell32/src/tray.rs, the same GalaTrayIcon
-/// takes): flags at 4, the window at 8, the id at 16, the callback at
-/// 20, state and mask at 24 and 28, the version at 32, the balloon's
-/// flags at 36, the GUID at 40, the icon's side at 56, then the tip,
-/// the balloon's title and text (UTF-16) and the icon's pixels.
+/// shell32's request (user/shell32/src/tray.rs `Request`): flags at 4,
+/// the window at 8, the id at 16, the callback at 20, state and mask at
+/// 24 and 28, the version at 32, the balloon's flags at 36, the GUID at
+/// 40, the icon's side at 56, then the tip, the balloon's title and text
+/// (UTF-16) and the icon's pixels.
 const TEXT_AT: usize = 64;
 const ICON_AT: usize = TEXT_AT + 2 * (TIP_LEN + TITLE_LEN + INFO_LEN);
 const MAX_SIDE: usize = 64;

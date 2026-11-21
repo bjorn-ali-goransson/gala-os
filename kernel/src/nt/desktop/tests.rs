@@ -300,10 +300,10 @@ fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() 
     // Another process ending is not this install's.
     d.installers_gone(&[8]);
     assert_eq!(d.pixel(bx, by), ACCENT);
-    assert!(d.tray.balloon.is_none());
+    assert!(d.told.is_empty());
     // Its own: the bar stays where it got to, in grey, the icon turns
-    // grey under a question mark, and it is told above the notification
-    // area as any install that ends is.
+    // grey under a question mark, and it is told (logged) as any install
+    // that ends is.
     d.installers_gone(&[7]);
     assert_eq!(d.pixel(bx, by), TEXT_DIM);
     assert_ne!(d.pixel(bx + 50, by), TEXT_DIM, "the bar says how far it got");
@@ -311,7 +311,7 @@ fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() 
     let (qx, qy) = (ix + 20, iy + 20);
     assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff, "the question mark");
     assert_eq!(d.pixel(qx + 8, qy + 2), TEXT_DIM, "its badge");
-    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+    let said = d.told.last().cloned();
     assert_eq!(
         said,
         Some((
@@ -322,13 +322,8 @@ fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() 
         ))
     );
     // Told once, however often the word comes.
-    for _ in 0..tray::BALLOON_SECONDS {
-        d.tray.tick();
-    }
-    d.tray_changed();
-    d.refresh();
     d.installers_gone(&[7]);
-    assert!(d.tray.balloon.is_none(), "told twice");
+    assert_eq!(d.told.len(), 1, "told twice");
     // A click tries again, as it does on a tile whose install failed.
     click(&mut d, r.x + 20, r.y + 10);
     assert!(d.menu_open());
@@ -340,7 +335,7 @@ fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() 
     assert_eq!(d.pixel(bx, by), TEXT_DIM);
     assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff);
     assert_eq!(
-        d.tray.balloon.as_ref().map(|b| b.text.clone()),
+        d.told.last().map(|(_, text)| text.clone()),
         Some(title("The install never started. A click tries again."))
     );
     // Installed after all (the install got that far before its
@@ -351,7 +346,7 @@ fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() 
     ]);
     assert!(d.installs.is_empty());
     assert_eq!(
-        d.tray.balloon.as_ref().map(|b| b.text.clone()),
+        d.told.last().map(|(_, text)| text.clone()),
         Some(title("Installed. Its tile starts it now."))
     );
 }
@@ -374,7 +369,7 @@ fn a_distributions_installer_gone_without_a_word_is_told_the_same_way() {
     let (ix, iy) = (tile.x + (tile.w - 32) / 2, tile.y + 10);
     let (qx, qy) = (ix + 20, iy + 20);
     assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff, "the question mark");
-    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+    let said = d.told.last().cloned();
     assert_eq!(
         said,
         Some((
@@ -437,12 +432,10 @@ fn the_watch_holds_only_the_installs_still_waiting_for_a_word() {
     assert!(watched(&d).is_empty());
 }
 
-/// An install that ends says so above the notification area, as
-/// Windows does: the name on the balloon a program's icon would raise,
-/// and whether it worked. The tile is out of sight as soon as the menu
-/// is closed, so the tile's bar alone is not enough.
+/// An install that ends is told (the log: the kernel's taskbar has no
+/// notification area): the program's name and whether it worked, once.
 #[test]
-fn an_install_that_ends_is_told_above_the_notification_area() {
+fn an_install_that_ends_is_told() {
     let (mut d, _) = desktop_with_window();
     let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
     let listed =
@@ -451,64 +444,39 @@ fn an_install_that_ends_is_told_above_the_notification_area() {
     // Nothing is told while it is going on: the tile shows that.
     d.install_progress(office, Some(pkg::Progress::Resolving));
     d.install_progress(office, Some(pkg::Progress::Downloading(50)));
-    assert!(d.tray.balloon.is_none() && d.card.is_none());
-    // It failed: the program's name, what gala's exit code stands for,
-    // on a card above the notification area.
+    assert!(d.told.is_empty());
+    // It failed: the program's name, what gala's exit code stands for.
     d.install_progress(office, Some(pkg::Progress::Failed(2)));
-    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
     assert_eq!(
-        said,
+        d.told.last().cloned(),
         Some((
             title("Microsoft Office"),
             title("The install failed: the source has no such package or version.")
         ))
     );
-    let card = d.card.as_ref().map(|(r, _)| *r).unwrap();
-    assert_eq!(card.x + card.w, 1024 - 12);
-    assert_eq!(card.y + card.h, 768 - i64::from(TASKBAR) - 12);
-    // It goes when its time is up, as a program's balloon does, and the
-    // same failure reported again does not tell it twice.
-    for _ in 0..tray::BALLOON_SECONDS {
-        d.tray.tick();
-    }
-    d.tray_changed();
-    d.refresh();
-    assert!(d.card.is_none());
+    // The same failure reported again does not tell it twice.
     d.install_progress(office, Some(pkg::Progress::Failed(2)));
-    assert!(d.tray.balloon.is_none(), "told twice");
+    assert_eq!(d.told.len(), 1, "told twice");
     // A click tries again and it works: the listing that draws the tile
     // installed is what tells it, and the install's own last word then
     // has nothing to add.
     d.install_progress(office, Some(pkg::Progress::Resolving));
     d.set_programs(&listed(true));
-    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
     assert_eq!(
-        said,
+        d.told.last().cloned(),
         Some((title("Microsoft Office"), title("Installed. Its tile starts it now.")))
     );
-    d.tray.balloon = None;
     d.install_progress(office, None);
-    assert!(d.tray.balloon.is_none(), "told twice");
+    assert_eq!(d.told.len(), 2, "told twice");
     // An install whose last word comes before the listing catches up is
     // told by that last word instead, so it is never missed.
     d.set_programs(&listed(false));
     d.install_progress(office, Some(pkg::Progress::Installing));
     d.install_progress(office, None);
     assert_eq!(
-        d.tray.balloon.as_ref().map(|b| b.text.clone()),
+        d.told.last().map(|(_, text)| text.clone()),
         Some(title("Installed. Its tile starts it now."))
     );
-    // It is the newest thing on the screen: in front of the start menu
-    // where they meet, and it is what a click there takes away (the
-    // menu's foot is under it, and keeps its click).
-    let start = d.start_rect();
-    click(&mut d, start.x + 10, start.y + 10);
-    let card = d.card.as_ref().map(|(r, _)| *r).unwrap();
-    let under = (card.x + 8, card.y + card.h - 4);
-    assert!(d.menu_rect().contains(under.0, under.1), "nothing to be in front of");
-    click(&mut d, under.0, under.1);
-    assert!(d.card.is_none() && d.tray.balloon.is_none());
-    assert!(!d.menu_open() && d.take_launch().is_none());
 }
 
 #[test]
@@ -1461,73 +1429,6 @@ fn a_press_outside_a_popup_grab_s_owner_ends_it_and_goes_nowhere() {
     assert_eq!(d.take_input(7, &mut out), 0);
 }
 
-/// A notification-area icon: drawn left of the clock, its rectangle
-/// known, a click and a right click are its window's callback messages
-/// in version 4's layout, a balloon shows above the taskbar and a click
-/// on it is NIN_BALLOONUSERCLICK; the icon goes with its process.
-#[test]
-fn notification_area_icons_are_drawn_clicked_and_dropped() {
-    let (mut d, _) = desktop_with_window();
-    let red = [0xffff_0000u32; tray::ICON * tray::ICON];
-    let data = tray::Data {
-        flags: tray::NIF_MESSAGE | tray::NIF_ICON | tray::NIF_TIP,
-        hwnd: 0x20040,
-        uid: 3,
-        callback: 0x8001,
-        tip: title("Syncing"),
-        icon: red.to_vec(),
-        ..tray::Data::default()
-    };
-    d.tray_op(7, tray::NIM_ADD, &data).unwrap();
-    assert_eq!(d.tray_op(7, tray::NIM_ADD, &data), Err(NtStatus::OBJECT_NAME_COLLISION));
-    let key = tray::Key::Id(0x20040, 3);
-    let r = d.tray_rect(key).unwrap();
-    assert_eq!(r, Rect { x: 1024 - CLOCK_W - tray::SLOT, y: 768 - 48 + 4, w: tray::SLOT, h: 40 });
-    assert_eq!(d.pixel(r.x + r.w / 2, r.y + r.h / 2), 0x00ff_0000);
-    d.tray_op(7, tray::NIM_SETVERSION, &tray::Data { version: 4, ..data.clone() }).unwrap();
-    let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
-    click(&mut d, cx, cy);
-    go(&mut d, cx, cy, 2);
-    go(&mut d, cx, cy, 0);
-    let at = (cx as u64) | (cy as u64) << 16;
-    let events: Vec<(u64, u64)> =
-        d.take_tray_posts().iter().map(|p| (p.wparam, p.lparam)).collect();
-    assert_eq!(
-        events,
-        [
-            // The pointer arriving over it.
-            (at, 0x200 | 3 << 16),
-            (at, 0x201 | 3 << 16),
-            (at, 0x202 | 3 << 16),
-            (at, u64::from(tray::NIN_SELECT) | 3 << 16),
-            (at, 0x204 | 3 << 16),
-            (at, 0x205 | 3 << 16),
-            (at, u64::from(tray::WM_CONTEXTMENU) | 3 << 16),
-        ]
-    );
-    // The named action does the same as the mouse.
-    d.tray_click(key, tray::Button::Left).unwrap();
-    assert_eq!(d.take_tray_posts().len(), 3);
-    // A balloon, clicked.
-    let info = tray::Data {
-        flags: tray::NIF_INFO,
-        title: title("Installing"),
-        info: title("Office is installing in the background"),
-        ..data.clone()
-    };
-    d.tray_op(7, tray::NIM_MODIFY, &info).unwrap();
-    let card = d.card.as_ref().map(|(r, _)| *r).unwrap();
-    assert_eq!(card.x + card.w, 1024 - 12);
-    assert_eq!(d.pixel(card.x + 8, card.y + card.h - 4), MENU_COLOR);
-    click(&mut d, card.x + 20, card.y + 20);
-    let events: Vec<u64> = d.take_tray_posts().iter().map(|p| p.lparam & 0xffff).collect();
-    assert_eq!(events, [u64::from(tray::NIN_BALLOONSHOW), u64::from(tray::NIN_BALLOONUSERCLICK)]);
-    assert!(d.card.is_none());
-    d.destroy_owned(7);
-    assert_eq!(d.tray_rect(key), None);
-    assert_ne!(d.pixel(cx, cy), 0x00ff_0000);
-}
-
 /// The start menu open on a desktop with one window, listing the Command
 /// Prompt and `listing`'s Linux section.
 fn menu_with_linux(listing: linux::Listing) -> Desktop {
@@ -1633,7 +1534,7 @@ fn a_suggestion_installs_with_progress_and_then_starts_its_desktop() {
     // An install that ends is told above the notification area, as a
     // package's is (`an_install_that_ends_is_told_above_the_notification_area`);
     // `wsl --import` gives no code to say why, so it is not said.
-    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+    let said = d.told.last().cloned();
     assert_eq!(said, Some((title("Ubuntu"), title("The install failed."))));
     // A failed install may be tried again.
     click(&mut d, tile.x + 20, tile.y + 20);
@@ -1644,7 +1545,7 @@ fn a_suggestion_installs_with_progress_and_then_starts_its_desktop() {
     d.set_linux(listing);
     assert!(d.progress.is_empty());
     assert_eq!(
-        d.tray.balloon.as_ref().map(|b| b.text.clone()),
+        d.told.last().map(|(_, text)| text.clone()),
         Some(title("Installed. Its tile starts it now."))
     );
     assert_ne!(d.pixel(bx, by), ACCENT);

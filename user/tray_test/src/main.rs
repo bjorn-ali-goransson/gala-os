@@ -16,27 +16,20 @@
 //!   LoadIconWithScaleDown any size; its errors (E_INVALIDARG,
 //!   HRESULT_FROM_WIN32(ERROR_RESOURCE_TYPE_NOT_FOUND)); ordinals 380
 //!   and 381 are the two functions.
-//! - `tray` (skipped on a Windows without Explorer's taskbar,
-//!   Shell_TrayWnd): NIM_ADD once (a second add fails), NIM_MODIFY,
+//! - `tray` (skipped without a shell's taskbar, Shell_TrayWnd:
+//!   Explorer's on Windows, shasha's on gala): NIM_ADD once (a second add fails), NIM_MODIFY,
 //!   NIM_SETVERSION, NIM_SETFOCUS of an icon there (not of one that is
 //!   not), Shell_NotifyIconGetRect (a rectangle; a failure for an unknown
 //!   icon, its HRESULT an `info` line), a balloon (NIF_INFO), NIM_DELETE with cbSize 3, the ANSI
 //!   form, an icon named by its GUID.
-//! - On gala only: NIN_BALLOONSHOW came with the balloon. With the
-//!   desktop's own notification area (no `Shell_TrayWnd`; 64-bit: `gala
-//!   tray` and `gala tray click`, the desktop's named actions): the icon
-//!   is listed with its tip, a click is WM_LBUTTONDOWN, WM_LBUTTONUP and
-//!   NIN_SELECT, a right click WM_RBUTTONDOWN, WM_RBUTTONUP and
-//!   WM_CONTEXTMENU, each in version 4's layout (wParam the point, the
-//!   icon's middle; lParam the event and the id); with the argument
-//!   `screen` the test then waits for a real click on the icon (xtask's
-//!   screen check: `tray_test: click the icon` on the serial log). With
-//!   shasha's (`Shell_TrayWnd`, the taskbar of a user-mode shell, as
-//!   Explorer's on Windows; the argument `shell` waits for it) and
-//!   `screen`: a real click on the icon
-//!   (`tray_test: TrayIcon at X,Y (pointer at PX,PY)`, then `click the
-//!   icon`) and a real right click (`right click the icon`) bring the
-//!   same three messages each.
+//! - On gala only: NIN_BALLOONSHOW came with the balloon. The argument
+//!   `shell` waits for shasha's taskbar (a shell started with the
+//!   session is still coming up); with `screen` too, a real click on the
+//!   icon (`tray_test: TrayIcon at X,Y (pointer at PX,PY)`, then `click
+//!   the icon`) is WM_LBUTTONDOWN, WM_LBUTTONUP and NIN_SELECT, and a
+//!   real right click (`right click the icon`) WM_RBUTTONDOWN,
+//!   WM_RBUTTONUP and WM_CONTEXTMENU, each in version 4's layout (wParam
+//!   the point, the icon's middle; lParam the event and the id).
 //!
 //! Prints `tray_test: ok` (`wow64_tray_test` for the x86 build), or
 //! `<name>: check N got X (line L)` and exits with N.
@@ -652,158 +645,6 @@ fn icons(c: &mut Checks) -> Result<Handle, u32> {
     }
 }
 
-// ---- gala's named actions (64-bit) ----------------------------------------
-
-#[cfg(not(target_arch = "x86"))]
-mod cli {
-    use super::{CloseHandle, GetStdHandle, Handle, W};
-
-    #[link(name = "kernel32", kind = "raw-dylib")]
-    unsafe extern "system" {
-        fn CreatePipe(read: *mut Handle, write: *mut Handle, sa: *const usize, size: u32) -> i32;
-        fn SetHandleInformation(h: Handle, mask: u32, flags: u32) -> i32;
-        #[allow(clippy::too_many_arguments)]
-        fn CreateProcessW(
-            app: *const u16,
-            cmd: *mut u16,
-            pa: usize,
-            ta: usize,
-            inherit: i32,
-            flags: u32,
-            env: usize,
-            dir: *const u16,
-            startup: *const u8,
-            info: *mut [usize; 3],
-        ) -> i32;
-        fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: usize) -> i32;
-        fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
-        fn GetExitCodeProcess(h: Handle, code: *mut u32) -> i32;
-    }
-
-    pub struct Output {
-        pub b: [u8; 4096],
-        pub n: usize,
-    }
-
-    impl Output {
-        pub fn has(&self, what: &[u8]) -> bool {
-            self.b[..self.n].windows(what.len()).any(|w| w == what)
-        }
-    }
-
-    /// Runs `C:\gala\gala.exe <args>`: its exit code and output.
-    pub fn gala(args: &[u8]) -> (u32, Output) {
-        let mut o = Output { b: [0; 4096], n: 0 };
-        let mut line = [0u16; 300];
-        for (d, &b) in line.iter_mut().zip(b"gala.exe ".iter().chain(args)) {
-            *d = b.into();
-        }
-        let exe = W::new("C:\\gala\\gala.exe");
-        let sa = [24usize, 0, 1];
-        let (mut r, mut w) = (0, 0);
-        // SAFETY: plain calls with our buffers and handles.
-        unsafe {
-            if CreatePipe(&mut r, &mut w, sa.as_ptr(), 0) == 0 {
-                return (0xffff_0000, o);
-            }
-            SetHandleInformation(r, 1, 0);
-            let mut startup = [0u8; 104];
-            startup[0] = 104;
-            startup[60..64].copy_from_slice(&0x100u32.to_le_bytes()); // STARTF_USESTDHANDLES
-            startup[80..88].copy_from_slice(&(GetStdHandle(-10i32 as u32) as u64).to_le_bytes());
-            startup[88..96].copy_from_slice(&(w as u64).to_le_bytes());
-            startup[96..104].copy_from_slice(&(w as u64).to_le_bytes());
-            let mut info = [0usize; 3];
-            let ok = CreateProcessW(
-                exe.ptr(),
-                line.as_mut_ptr(),
-                0,
-                0,
-                1,
-                0,
-                0,
-                core::ptr::null(),
-                startup.as_ptr(),
-                &mut info,
-            );
-            CloseHandle(w);
-            if ok == 0 {
-                CloseHandle(r);
-                return (0xfffe_0000, o);
-            }
-            let mut got = 0;
-            while o.n < o.b.len()
-                && ReadFile(r, o.b.as_mut_ptr().add(o.n), (o.b.len() - o.n) as u32, &mut got, 0)
-                    != 0
-                && got > 0
-            {
-                o.n += got as usize;
-            }
-            CloseHandle(r);
-            WaitForSingleObject(info[0], 60_000);
-            let mut code = 0xdead_0000;
-            GetExitCodeProcess(info[0], &mut code);
-            CloseHandle(info[0]);
-            CloseHandle(info[1]);
-            (code, o)
-        }
-    }
-
-    /// `hwnd` in hexadecimal, as `gala tray click` takes it.
-    pub fn hex(hwnd: Handle, out: &mut [u8; 18]) -> &[u8] {
-        out[0] = b'0';
-        out[1] = b'x';
-        for i in 0..16 {
-            out[2 + i] = b"0123456789abcdef"[(hwnd >> (60 - 4 * i)) & 0xf];
-        }
-        &out[..]
-    }
-}
-
-/// The checks on gala's named actions: the listing, a click and a right
-/// click through `gala tray click`, each callback in version 4's layout.
-#[cfg(not(target_arch = "x86"))]
-fn named_actions(c: &mut Checks, hwnd: Handle, middle: usize) -> Result<(), u32> {
-    say(b"gala tray");
-    let (code, out) = cli::gala(b"tray");
-    c.eq(code.into(), 0)?;
-    c.ok(out.has(b"tray_test icon"), out.n as u64)?;
-    let mut h = [0u8; 18];
-    let mut args = [0u8; 64];
-    for (button, events) in [
-        (&b""[..], [WM_LBUTTONDOWN, WM_LBUTTONUP, NIN_SELECT]),
-        (&b" right"[..], [WM_RBUTTONDOWN, WM_RBUTTONUP, WM_CONTEXTMENU]),
-    ] {
-        let mut n = 0;
-        for &b in b"tray click ".iter().chain(cli::hex(hwnd, &mut h)).chain(b" 1").chain(button) {
-            args[n] = b;
-            n += 1;
-        }
-        let before = COUNT.load(Ordering::Relaxed);
-        let (code, _) = cli::gala(&args[..n]);
-        c.eq(code.into(), 0)?;
-        c.ok(pump_until(before + 3, 60_000), COUNT.load(Ordering::Relaxed) as u64)?;
-        for (k, event) in events.into_iter().enumerate() {
-            let (wp, lp) = got(before + k);
-            c.eq(wp as u64, middle as u64)?;
-            c.eq(lp as u64, (event | 1 << 16) as u64)?;
-        }
-    }
-    let mut n = 0;
-    for &b in b"tray click ".iter().chain(cli::hex(hwnd, &mut h)).chain(b" 77") {
-        args[n] = b;
-        n += 1;
-    }
-    let (code, _) = cli::gala(&args[..n]);
-    c.eq(code.into(), 2)?; // not found
-    Ok(())
-}
-
-#[cfg(target_arch = "x86")]
-fn named_actions(_: &mut Checks, _: Handle, _: usize) -> Result<(), u32> {
-    Ok(())
-}
-
 /// Whether the command line asks for the screen part (`screen`).
 fn screen_arg() -> bool {
     has_arg(b"screen")
@@ -904,7 +745,7 @@ fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
     // here are destroyed.
     unsafe {
         // A shell's taskbar (Explorer's; shasha's on gala) holds the
-        // icons; without one, on gala, the desktop's own does.
+        // icons; without one there is no notification area.
         // With the argument `shell` a shell started with the session
         // (gala's `shell=shasha`) is still coming up: wait for its bar,
         // as a program started at logon waits for TaskbarCreated.
@@ -914,9 +755,8 @@ fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
             pump_until(usize::MAX, 100);
         }
         let shell_bar = FindWindowW(bar_class.ptr(), core::ptr::null()) != 0;
-        let desktop_tray = gala && !shell_bar;
-        if !gala && !shell_bar {
-            say(b"tray skipped (no notification area: Explorer's taskbar is not running)");
+        if !shell_bar {
+            say(b"tray skipped (no notification area: no shell's taskbar is running)");
             return Ok(());
         }
         let class = W::new("tray_test window");
@@ -986,10 +826,6 @@ fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
         d.uid = 1;
 
         let packed = (middle.0 as u16 as usize) | (middle.1 as u16 as usize) << 16;
-        if desktop_tray {
-            named_actions(c, hwnd, packed)?;
-        }
-
         // A balloon (Windows 11 shows it as a notification).
         let before = COUNT.load(Ordering::Relaxed);
         d.flags = NIF_INFO;
@@ -1001,21 +837,8 @@ fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
             c.ok(pump_until(before + 1, 30_000), 0)?;
             let (_, lp) = got(before);
             c.eq((lp & 0xffff) as u64, NIN_BALLOONSHOW as u64)?;
-            if screen_arg() && shell_bar {
+            if screen_arg() {
                 real_clicks(c, middle, packed)?;
-            } else if screen_arg() {
-                // xtask moves the mouse to the icon and clicks it.
-                let before = COUNT.load(Ordering::Relaxed);
-                say(b"click the icon");
-                let mut clicked = false;
-                let end = GetTickCount64() + 300_000;
-                while !clicked && GetTickCount64() < end {
-                    pump_until(COUNT.load(Ordering::Relaxed) + 1, 1_000);
-                    let n = COUNT.load(Ordering::Relaxed);
-                    clicked = (before..n).any(|k| got(k).1 & 0xffff == NIN_SELECT);
-                }
-                c.ok(clicked, COUNT.load(Ordering::Relaxed) as u64)?;
-                say(b"clicked");
             }
         }
 

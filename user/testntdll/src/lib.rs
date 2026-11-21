@@ -461,8 +461,6 @@ syscall_stubs! {
     GalaWinEventUnhook = 0x7f71, fn(id: u32);
     GalaWinEventNotify = 0x7f72, fn(event: u32, hwnd: u64, object: i32, child: i32);
     GalaWinEventTake = 0x7f73, fn(records: *mut u8, max: u32, count: *mut u32);
-    // The notification area (Shell_NotifyIcon, Shell_NotifyIconGetRect).
-    GalaTrayIcon = 0x7f74, fn(op: u32, request: *const u8, length: usize, rect: *mut i32);
     // App bars (SHAppBarMessage's own bars).
     GalaAppBar = 0x7f75, fn(op: u32, request: *mut u8, length: usize);
     // The desktop's pointer (GetCursorPos).

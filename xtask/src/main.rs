@@ -10899,13 +10899,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_webservices_test", "x86/webservices.dll", "Windows/SysWOW64"),
     // The notification area, PNG icons, LoadIconMetric (user/tray_test),
     // x64 on the screen and x86 on a Test presenter.
-    ("tray_test", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
-    ("tray_test", "ntdll.dll", "Windows/System32"),
-    ("tray_test", "kernel32.dll", "Windows/System32"),
-    ("tray_test", "user32.dll", "Windows/System32"),
-    ("tray_test", "gdi32.dll", "Windows/System32"),
-    ("tray_test", "shell32.dll", "Windows/System32"),
-    ("tray_test", "comctl32.dll", "Windows/System32"),
     // App bars (user/appbar_test), on a Test presenter.
     ("appbar_test", "ntdll.dll", "Windows/System32"),
     ("appbar_test", "kernel32.dll", "Windows/System32"),
@@ -13596,7 +13589,8 @@ const UEFI_SCENARIOS: &[&str] = &[
     "taskmgr",
     "explorer",
     "linux_menu",
-    "tray_test",
+    // shasha's notification area from a 32-bit program.
+    "wow64_tray_test",
     "topmost_test",
     "shell_events_test",
     "hotkey_test",
@@ -14066,7 +14060,7 @@ const ARM64_TWINS: &[&str] = &[
     "gui_test",
     "start_menu",
     "desktop_at_boot",
-    "tray_test",
+    "shasha_tray",
     "d2d1_window",
     "taskmgr",
     "explorer",
@@ -15678,6 +15672,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // and the tile's bar turns red (the screen check).
             "gala: source https://github.com/microsoft/winget-pkgs: listing",
             "desktop: start menu: install 7zip.7zip: failed (gala exit 4)",
+            "desktop: start menu: 7-Zip: The install failed.",
             "start_menu_test: no install window",
             "xtask: screen ok",
             "start_menu_test: ok",
@@ -16335,36 +16330,18 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &["wow64_gdiplus_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // The notification area (user/tray_test): Shell_NotifyIcon's
-        // messages, the icon on shasha's taskbar, `gala tray` and its
-        // clicks, then a real click (TRAY_SCREEN); PNG icons and
-        // LoadIconMetric. UEFI: a screen.
-        name: "tray_test",
-        // The kernel's own notification area (shell=desktop: no shasha) until SH
-        // removes it and the test moves to shasha's (ROADMAP SH).
-        cmdline: "qemu_exit shell=desktop wallpaper=night run=tray_test.exe args=screen",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "tray_test: icons",
-            "desktop: notification-area icon added: window",
-            "tray_test: icon at 1168,776",
-            "tray_test: gala tray",
-            "tray_test: click the icon",
-            "tray_test: clicked",
-            "xtask: screen ok",
-            "desktop: notification-area icon deleted: window",
-            "tray_test: ok",
-            "exited with status 0x00000000",
-        ],
-    },
-    Scenario {
-        // The same from a 32-bit program, on a Test presenter (a shell
-        // without a screen: BIOS).
+        // The notification area from a 32-bit program (user/tray_test
+        // built for x86): its Shell_NotifyIcon requests go to shasha's
+        // taskbar by WM_COPYDATA as a 64-bit program's do (shasha_tray
+        // clicks them); UEFI: a screen, so the shell.
         name: "wow64_tray_test",
-        cmdline: "qemu_exit presenter=test run=wow64_tray_test.exe",
+        cmdline: "qemu_exit agent=off run=wow64_tray_test.exe args=shell",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
-            "desktop: notification-area icon added: window",
+            "shasha: started",
+            "shasha: notification-area icon added: window",
+            "wow64_tray_test: icon at ",
+            "shasha: notification-area icon deleted: window",
             "wow64_tray_test: ok",
             "exited with status 0x00000000",
         ],
@@ -16670,14 +16647,14 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // waiting), and the desktop must keep its clock, which is a
         // thread of its own and not the input thread's passenger.
         // tray_test is the desktop program here because it needs no
-        // input: on a Test presenter it adds its icon, talks to the
-        // notification area and ends by itself.
+        // input: on a Test presenter (no shell, so no notification area)
+        // it makes its icons and ends by itself.
         name: "no_i8042",
         cmdline: "qemu_exit presenter=test run=tray_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "input: the PS/2 controller (ports 0x60 and 0x64) never answered",
-            "desktop: notification-area icon added: window",
+            "tray_test: tray skipped (no notification area",
             "desktop: clock: ",
             "tray_test: ok",
             "exited with status 0x00000000",
@@ -21790,7 +21767,6 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
     ("desktop_at_boot", "needs a screen (the desktop the boot ends on)"),
     ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
-    ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("topmost_test", "needs a screen (what is on top is checked on it)"),
     ("shell_events_test", "needs a screen (the desktop's window actions are its shell's)"),
     ("hotkey_test", "needs a screen (its keys are pressed on the desktop)"),
@@ -25375,55 +25351,11 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
             // the menu, so it is also what says the menu stayed open on
             // the click; the wallpaper is there otherwise.
             //
-            // The install ended, so it is told above the notification
-            // area too: a card 360 wide, 12 from the right edge and 12
-            // above the taskbar (908, 740 at its bottom right), in
-            // front of the menu. Its light background and the grey of
-            // "The install failed." are in the band that holds the text
-            // whether it takes one line or two. The balloon goes after
-            // BALLOON_SECONDS, which is many tries of this check.
+            // That the install ended is told in the log (the line
+            // "desktop: start menu: 7-Zip: The install failed.");
+            // no card: the notification area is shasha's.
             input: &[],
-            pixels: &[
-                PixelCheck::AnyIn(562, 368, 61, 4, 0xc42b1c),
-                PixelCheck::AnyIn(960, 700, 300, 36, 0xf2f4f8),
-                PixelCheck::AnyIn(960, 700, 300, 36, 0x5d5d5d),
-            ],
-        },
-    ],
-};
-
-/// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
-/// 1-pixel outline and a 32-pixel caption (Windows 11's metrics), so its
-/// client area starts at (101, 133) (kernel/src/nt/desktop). The screen is
-/// 1280 x 800: the wallpaper, the taskbar in the bottom 48 rows with the
-/// start button (Gala's fortress) and the window's button centred, the
-/// clock at the right; the start menu (600 x 640) opens centred above it
-/// at (340, 100). Shaded colours are checked as "some pixel near".
-/// tray_test's icon on the taskbar (1280 x 800: the first icon's slot is
-/// 32 px left of the clock's 96, its middle at (1168, 776)): the blue
-/// square with the white middle, then a click on it with the mouse
-/// (from the middle of the screen), which the program waits for.
-const TRAY_SCREEN: ScreenCheck = ScreenCheck {
-    marker: "tray_test: click the icon",
-    steps: &[
-        ScreenStep {
-            after: "",
-            input: &[],
-            pixels: &[
-                PixelCheck::AnyIn(1160, 768, 4, 4, 0x2080f0), // the icon's blue
-                PixelCheck::At(1168, 776, 0xffffff),          // its white middle
-            ],
-        },
-        ScreenStep {
-            after: "",
-            input: &[
-                "mouse_move 255 255",
-                "mouse_move 255 121",
-                "mouse_move 18 0",
-                "mouse_button 1",
-                "mouse_button 0",
-            ],
-            pixels: &[],
+            pixels: &[PixelCheck::AnyIn(562, 368, 61, 4, 0xc42b1c)],
         },
     ],
 };
@@ -25856,7 +25788,6 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("explorer_agent", EXPLORER_AGENT_SCREEN),
     ("agent_chat", AGENT_CHAT_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
-    ("tray_test", TRAY_SCREEN),
     ("shasha_tray", SHASHA_TRAY_SCREEN),
     ("topmost_test", TOPMOST_SCREEN),
     ("hotkey_test", HOTKEY_SCREEN),
