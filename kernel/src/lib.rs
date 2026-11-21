@@ -380,6 +380,12 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(text) = cmdline.value("events_match") {
         events::set_syscall_match(text);
     }
+    // `events_data=<n>`: how much of a value's data a value event
+    // carries, for a record a program writes about itself (the default
+    // peek is 64 bytes; nt::syscalls::registry_calls).
+    if let Some(text) = cmdline.value("events_data") {
+        nt::syscalls::registry_calls::peek_bytes(text);
+    }
     // `stack_at=<service>[:<n>]`: the calling thread's user stack the
     // first few times a process reaches that system call (nt::stack_at).
     if let Some(spec) = cmdline.value("stack_at") {

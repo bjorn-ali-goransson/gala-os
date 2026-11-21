@@ -8299,7 +8299,7 @@ mod tests {
 }
 
 #[path = "registry_calls.rs"]
-mod registry_calls;
+pub(crate) mod registry_calls;
 
 fn is_keyed_event(o: &KObject) -> bool {
     matches!(o.body, ObjectBody::KeyedEvent(_))

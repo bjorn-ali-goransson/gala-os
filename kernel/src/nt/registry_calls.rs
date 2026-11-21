@@ -9,6 +9,7 @@
 //! size needed.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::super::object::{DELETE, Handle, KObject, ObjectBody, ObjectRef};
 use super::super::platform;
@@ -248,9 +249,9 @@ struct Valued<'a> {
     /// The index an enumerate asked for; a call by name has none.
     index: Option<usize>,
     /// What the value held, where the call had anything: its type, its
-    /// size and the first [`PEEK`] bytes of its data. An empty value is
-    /// a different answer from an absent one, and this is the
-    /// difference.
+    /// size and the first [`PEEK`] bytes of its data, or as many as
+    /// `events_data=` asked for. An empty value is a different answer
+    /// from an absent one, and this is the difference.
     held: Option<Peek>,
     status: NtStatus,
 }
@@ -276,31 +277,79 @@ const REG_DWORD_BIG_ENDIAN: u32 = 5;
 const REG_MULTI_SZ: u32 = 7;
 const REG_QWORD: u32 = 11;
 
-/// How much of a value's data a value event carries. A number of any
-/// width fits whole and a name or a short path very nearly; longer data
-/// is cut here, and the event's `bytes` says how much there was, so a
-/// cut needs no field of its own to be seen. The bound is what keeps a
-/// program that walks a hive of long values from turning the stream
-/// into a second copy of the hive.
+/// How much of a value's data a value event carries unless
+/// `events_data=` says otherwise. A number of any width fits whole and
+/// a name or a short path very nearly; longer data is cut here, and the
+/// event's `bytes` says how much there was, so a cut needs no field of
+/// its own to be seen. The default is small because a program that
+/// walks a hive of long values would otherwise turn the stream into a
+/// second copy of the hive.
 const PEEK: usize = 64;
 
+/// The most `events_data=` may ask for. A record a program writes about
+/// itself is what the raised peek is for -- Word's session record is
+/// 401 bytes of JSON -- and this is the room for one, bounded because
+/// the bytes are copied into a field of [`Peek`] and so onto the stack
+/// of every registry call that reads a value.
+const MAX_PEEK: usize = 512;
+
+/// Bytes of a value's data a value event carries (`events_data=`).
+static PEEK_BYTES: AtomicUsize = AtomicUsize::new(PEEK);
+
+/// Parses an `events_data=` value: a number of bytes up to [`MAX_PEEK`].
+fn parse_peek(text: &str) -> Option<usize> {
+    text.parse::<usize>().ok().filter(|n| (1..=MAX_PEEK).contains(n))
+}
+
+/// Sets how much of a value's data a value event carries (an
+/// `events_data=` value). A number that is none, or past the bound,
+/// leaves the default standing and says so: a peek that had quietly
+/// become the default would be read as the one that was asked for.
+pub fn peek_bytes(text: &str) {
+    let Some(n) = parse_peek(text) else {
+        warn!(
+            "events: events_data={text} is not a number from 1 to \
+             {MAX_PEEK}: the default {PEEK} bytes stand"
+        );
+        return;
+    };
+    if !crate::events::enabled(crate::events::Category::File) {
+        warn!("events: events_data={text} without events=file: no value event to carry it");
+        return;
+    }
+    PEEK_BYTES.store(n, Ordering::Relaxed);
+    info!("events: {n} bytes of each value's data are carried (events_data=)");
+}
+
 /// What a value held: its type, how much data there was, and the first
-/// [`PEEK`] bytes of it. The bytes are copied while the registry is
-/// still locked, because the event is written after the lock is let go.
+/// [`PEEK`] bytes of it, or as many as `events_data=` asked for. The
+/// bytes are copied while the registry is still locked, because the
+/// event is written after the lock is let go.
 #[derive(Clone, Copy)]
 struct Peek {
     kind: u32,
     bytes: usize,
-    head: [u8; PEEK],
-    /// How much of `head` the value filled: `bytes`, or [`PEEK`] where
-    /// it was cut.
+    head: [u8; MAX_PEEK],
+    /// How much of `head` the value filled: `bytes`, or the peek's size
+    /// where it was cut.
     len: usize,
 }
 
 impl Peek {
-    fn of(kind: u32, data: &[u8]) -> Self {
-        let len = data.len().min(PEEK);
-        let mut head = [0u8; PEEK];
+    /// What a value event will carry of this data, or `None` when no
+    /// stream is reading one: the copy is what the field costs, so a
+    /// read nothing is watching pays one relaxed load and nothing else.
+    fn of(kind: u32, data: &[u8]) -> Option<Self> {
+        if !crate::events::enabled(crate::events::Category::File) {
+            return None;
+        }
+        Some(Self::cut(kind, data, PEEK_BYTES.load(Ordering::Relaxed)))
+    }
+
+    /// The first `n` bytes of it, whatever is watching.
+    fn cut(kind: u32, data: &[u8], n: usize) -> Self {
+        let len = data.len().min(n).min(MAX_PEEK);
+        let mut head = [0u8; MAX_PEEK];
         head[..len].copy_from_slice(&data[..len]);
         Peek { kind, bytes: data.len(), head, len }
     }
@@ -327,7 +376,7 @@ impl Peek {
                 write!(f, "{}", u64::from_le_bytes(eight))
             }
             REG_SZ | REG_EXPAND_SZ | REG_MULTI_SZ => {
-                let mut units = [0u16; PEEK / 2];
+                let mut units = [0u16; MAX_PEEK / 2];
                 let mut n = head.len() / 2;
                 for (i, unit) in units.iter_mut().take(n).enumerate() {
                     *unit = u16::from_le_bytes([head[2 * i], head[2 * i + 1]]);
@@ -543,8 +592,7 @@ pub(super) fn nt_query_value_key(call: &mut Call<'_>) -> NtStatus {
         arg!(call, 4) as u32 as u64,
         arg!(call, 5),
     );
-    let said =
-        Valued { what: "value", key: id, name: &name, index: None, held: Some(held), status };
+    let said = Valued { what: "value", key: id, name: &name, index: None, held, status };
     emit_value(call, said);
     status
 }
@@ -586,14 +634,7 @@ pub(super) fn nt_enumerate_value_key(call: &mut Call<'_>) -> NtStatus {
         arg!(call, 4) as u32 as u64,
         arg!(call, 5),
     );
-    let said = Valued {
-        what: "value",
-        key: id,
-        name: &name,
-        index: Some(index),
-        held: Some(held),
-        status,
-    };
+    let said = Valued { what: "value", key: id, name: &name, index: Some(index), held, status };
     emit_value(call, said);
     status
 }
@@ -627,7 +668,7 @@ pub(super) fn nt_set_value_key(call: &mut Call<'_>) -> NtStatus {
         key: id,
         name: &name,
         index: None,
-        held: Some(Peek::of(kind, &data)),
+        held: Peek::of(kind, &data),
         status,
     };
     emit_value(call, said);
@@ -937,7 +978,7 @@ mod tests {
 
     /// What a value event writes for a value of this type and data.
     fn held(kind: u32, data: &[u8]) -> String {
-        format!("{}", Held(Some(Peek::of(kind, data))))
+        format!("{}", Held(Some(Peek::cut(kind, data, PEEK))))
     }
 
     /// UTF-16 bytes with the NUL a string value ends with.
@@ -1016,5 +1057,25 @@ mod tests {
         // PEEK is even, so the cut never lands inside a UTF-16 unit.
         assert!(written.starts_with(r#","kind":1,"bytes":162,"data":"abab"#), "{written}");
         assert_eq!(written.len(), r#","kind":1,"bytes":162,"data":"""#.len() + PEEK / 2);
+    }
+
+    #[test]
+    fn a_raised_peek_carries_more_of_the_same_value() {
+        let long: Vec<u8> = sz(&"ab".repeat(40));
+        // All 80 characters, where the default peek above shows 32 of them.
+        let whole = format!("{}", Held(Some(Peek::cut(REG_SZ, &long, 256))));
+        assert_eq!(whole, format!(r#","kind":1,"bytes":162,"data":"{}""#, "ab".repeat(40)));
+    }
+
+    #[test]
+    fn a_peek_past_the_bound_or_no_number_at_all_is_refused() {
+        assert_eq!(parse_peek("128"), Some(128));
+        assert_eq!(parse_peek(&format!("{MAX_PEEK}")), Some(MAX_PEEK));
+        // Past the bound the default stands: the bytes are copied onto the
+        // stack of every registry call that reads a value.
+        assert_eq!(parse_peek(&format!("{}", MAX_PEEK + 1)), None);
+        assert_eq!(parse_peek("0"), None);
+        assert_eq!(parse_peek("-1"), None);
+        assert_eq!(parse_peek("lots"), None);
     }
 }
