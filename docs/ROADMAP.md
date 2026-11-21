@@ -1933,12 +1933,13 @@ need gala's.
    run leaves, every one is the install's (SETUP, OFFICECL, INTEGRAT)
    and none is WINWORD's, and those eight probes of the absent
    `Word\Options\Debug` key are the likeliest place its own logging is
-   switched on. DXVK's two logs, dumped with the run, say the GPU stack
-   under the frame is live and name one divergence: `winword_d3d11.log`
-   has the D3D11 device created on llvmpipe with a 597 MiB
-   device-local heap, and `winword_dxgi.log` warns three times `DXGI:
-   Found monitors not associated with any adapter, using fallback` --
-   gala's monitors are not tied to the adapter DXVK enumerates. The
+   switched on. DXVK's two logs, dumped with the run, say the stack
+   under the frame is live and name nothing gala refuses:
+   `winword_d3d11.log` has the D3D11 device created on llvmpipe with a
+   597 MiB device-local heap, and the three `DXGI: Found monitors not
+   associated with any adapter, using fallback` warnings in
+   `winword_dxgi.log` are the absent Vulkan device LUID below, where
+   that warning is read line by line, and not a gap. The
    message itself is Word's own
    `user32!MessageBoxW` with `WWLIB.DLL` and `WWINTL.DLL` on the stack,
    which is what a stack capture of the write says
