@@ -341,7 +341,25 @@ extern "system" fn d_CheckMultisampleQualityLevels(
     // SAFETY: ID3D11Device::CheckMultisampleQualityLevels's signature.
     let f: extern "system" fn(Obj, u32, u32, *mut u32) -> HResult =
         unsafe { core::mem::transmute(slot(d.d3d11.0, DEV_CHECK_MULTISAMPLE)) };
-    f(d.d3d11.0, format, count, levels)
+    let hr = f(d.d3d11.0, format, count, levels);
+    // Offering no quality level for a sample count Direct3D allows is
+    // an answer a program acts on, and the call succeeds while giving
+    // it, so nothing else would record it. d3d10_1_test measures the
+    // counts against real Windows, where a quality level is offered
+    // for 1, 2, 4, 8 and 16 on B8G8R8A8_UNORM; the renderer under gala
+    // offers none for 2 or 16, and 2 is what Word asks for before it
+    // gives up (ROADMAP OF). The format and the count name the ask.
+    if hr >= 0 && (1..=32).contains(&count) && !levels.is_null() {
+        // SAFETY: the caller's out-pointer, written by the call above.
+        let got = unsafe { *levels };
+        if got == 0 {
+            crate::gap(
+                b"ID3D10Device::CheckMultisampleQualityLevels (none offered)",
+                u64::from(format) << 32 | u64::from(count),
+            );
+        }
+    }
+    hr
 }
 
 /// The methods this device does not answer: each records its own name,
