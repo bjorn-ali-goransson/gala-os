@@ -6672,8 +6672,8 @@ among the slowest hand-offs.
      would read as a program that stopped calling
      (`kernel/src/nt/tracecall.rs`, `user/trace_common.rs`, scenarios
      `trace_from_test`, `trace_from_budget_test`,
-     `trace_from_answer_test` and `trace_from_d3d10_test`,
-     OBSERVABILITY "Call tracing"). What a
+     `trace_from_answer_test`, `trace_from_d3d10_test` and
+     `trace_from_across_test`, OBSERVABILITY "Call tracing"). What a
      call answered is recorded with it: the generator knows which
      methods return something and puts a second record in those
      wrappers, so the answer is a `ret` event naming the same method,
@@ -6682,15 +6682,21 @@ among the slowest hand-offs.
      end between a call and its answer, never the other way about. It
      closes the blind spot the first reading of Word's window ran into,
      where six identical calls read the same whether each one succeeded
-     or each one failed. Its gaps: one armed method a run, and arming is per DLL per process,
-     so once armed every traced call that program makes into *that*
-     DLL is recorded, not only the method named, and none of the calls
-     it makes into another of gala's DLLs -- the Word reading ran into
-     that, where the d3d10_1 trace that recorded its three device
-     calls recorded none of the Direct2D calls after them, so two DLLs
-     are two runs until the one-shot asks the kernel whether a trace
-     is live (OBSERVABILITY "Call tracing"); the OpenTelemetry export does not map `call` or
-     `ret` events yet (the same gap `ledger:` rows have, OT5).
+     or each one failed. The arming is the process's, not one DLL's:
+     once armed, every traced call that program makes into a DLL gala
+     wrote is recorded, not only the method named and not only its
+     DLL. The flag stays each DLL's own static, so a traced call still
+     costs one relaxed load; what lets two DLLs' statics reach each
+     other is ntdll, where each offers its flag on its first wrapped
+     call and the DLL that arms sets them all (`GalaTraceJoin`,
+     `user/testntdll/src/trace.rs`), and the run's summary names the
+     DLLs the calls were made into. Armed per DLL it could not: the
+     Word reading lost every Direct2D call that followed the three
+     device calls it recorded, and a reading of one program's two DLLs
+     took two runs whose streams could not be interleaved. Its gaps:
+     one armed method a run; the OpenTelemetry export does not map
+     `call` or `ret` events yet (the same gap `ledger:` rows have,
+     OT5).
    - **The import slots, for the DLLs gala did not write.** Done.
      `imports=<program>[!<dll>][:<n>]` records the first call a program
      makes through each of its import slots, `n` at most (default

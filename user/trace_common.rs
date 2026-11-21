@@ -24,6 +24,15 @@
 //! happens once per slot, folded into the one-shot the wrapper was going
 //! to pay anyway, so a drawing loop that calls FillRectangle a thousand
 //! times compares no names at all.
+//!
+//! The flag that second load reads is this DLL's own static, and the
+//! arming is the process's: a trace armed at a method of one of gala's
+//! DLLs records the calls a program then makes into the others. What
+//! lets two DLLs' statics reach each other is ntdll, the one image a
+//! process has exactly one of -- each offers its flag there on its
+//! first wrapped call, and the DLL that arms sets them all
+//! (`GalaTraceJoin`, `user/testntdll/src/trace.rs`). One call per DLL
+//! per process in a run that traces at all, and nothing per call.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
@@ -132,9 +141,11 @@ const OP_ASK: u64 = 0;
 const OP_RECORD: u64 = 1;
 const OP_ANSWER: u64 = 2;
 
-/// Whether the armed method has been reached, and so whether every call
-/// is being recorded. One relaxed load a call; nothing else is paid
-/// until this is true.
+/// Whether calls are being recorded. Set when the armed method is
+/// first reached here, and by ntdll when another of gala's DLLs reaches
+/// its own (`GalaTraceJoin`, `user/testntdll/src/trace.rs`): the arming
+/// is the process's, not one DLL's. One relaxed load a call; nothing
+/// else is paid until this is true.
 static ON: AtomicBool = AtomicBool::new(false);
 
 /// Whether the `trace_from=` value has been asked for: 0 not yet, 1 the
@@ -154,6 +165,8 @@ static VALUE_LEN: AtomicUsize = AtomicUsize::new(0);
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GalaTrace(op: u64, a: u64, b: u64, c: u64) -> u32;
+    fn GalaTraceJoin(flag: *mut u8) -> u32;
+    fn GalaTraceArm();
 }
 
 /// Whether calls are being recorded (one relaxed load).
@@ -179,6 +192,12 @@ pub fn arm_if_named(what: &[u8]) {
         return;
     }
     ON.store(true, Ordering::Release);
+    // And every other traced DLL in this process, whose calls are what
+    // the trace was armed to read: the armed method is where recording
+    // starts, and what a program does after it is as likely to be
+    // another of gala's DLLs as this one.
+    // SAFETY: ntdll's own function, which reads nothing of ours.
+    unsafe { GalaTraceArm() };
 }
 
 /// Records one call. Only reached once [`on`] is true.
@@ -236,6 +255,7 @@ fn asked() -> bool {
                     if len != 0 {
                         VALUE_LEN.store(len, Ordering::Release);
                         ASKED.store(HAVE, Ordering::Release);
+                        join();
                         return true;
                     }
                     ASKED.store(NONE, Ordering::Release);
@@ -243,6 +263,20 @@ fn asked() -> bool {
                 }
             }
         }
+    }
+}
+
+/// Offers this DLL's flag to the other traced DLLs in this process, and
+/// takes from ntdll whether one of them has already armed. Once per
+/// process, beside the one ask for the value: a DLL that loads after
+/// the arming has no first call of its own left to arm it, and would
+/// otherwise record nothing at all.
+fn join() {
+    // SAFETY: the address of this DLL's own static, which lives as long
+    // as the DLL; ntdll stores a byte through it and reads nothing.
+    let armed = unsafe { GalaTraceJoin((&raw const ON).cast::<u8>().cast_mut()) };
+    if armed != 0 {
+        ON.store(true, Ordering::Release);
     }
 }
 

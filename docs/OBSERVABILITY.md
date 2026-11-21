@@ -1258,21 +1258,24 @@ method that answers records a second line a call:
   is still in the ledger (`<object> QueryInterface`, with the IID's first
   dword), so what the trace misses there is the order: which object was
   asked, between which other calls.
-  Arming is per DLL per process, because the flag lives in that DLL's
-  own data; the budget is the run's, shared by every DLL and process
-  that traces. Once armed, *every* traced call that program makes into
-  *that* DLL is recorded, not only the method named -- the method is
-  where recording starts, not what is recorded. A call into another of
-  gala's DLLs is not: armed at
-  `d3d10_1.dll!ID3D10Device::CheckMultisampleQualityLevels`, an
-  `office_word` run records the three Direct3D 10.1 calls Word makes
-  and none of the Direct2D calls that follow them, and arming a d2d1
-  method on such a run is answered `was never reached` instead. So two
-  questions about one program's two DLLs are two runs; ROADMAP OT3b's
-  next piece is for the slot's own one-shot to ask the kernel whether
-  a trace is live, which it already calls into to record its `reached`
-  row, so a trace would span every DLL gala wrote at no new cost per
-  call.
+  Arming is the process's, not one DLL's. Once armed, *every* traced
+  call that program makes into a DLL gala wrote is recorded -- not only
+  the method named, and not only its DLL: the method is where recording
+  starts, not what is recorded. The flag is still each DLL's own static,
+  so a traced call costs one relaxed load; what the DLLs share is ntdll,
+  the one image a process has exactly one of, where each offers its flag
+  on its first wrapped call and the DLL that arms sets them all
+  (`GalaTraceJoin`, `user/testntdll/src/trace.rs`). The budget is the
+  run's, shared by every DLL and process that traces.
+  The summary at the end of a run names the DLLs the recorded calls were
+  made into (`16 calls recorded from
+  d3d10_1.dll!ID3D10Device::CreateTexture2D, into d2d1.dll and
+  d3d10_1.dll`), because a reader cannot otherwise tell a program that
+  used one DLL from a trace that reached one of two. Scenario
+  `trace_from_across_test` is that: armed at the Direct3D 10.1 texture
+  `d3d10_1_test` makes, one run records the Direct2D render target the
+  program builds over it, which is the shape of ROADMAP item OF's
+  question about Word.
 
 ### Import tracing (`imports=`)
 

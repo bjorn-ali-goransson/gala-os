@@ -9006,6 +9006,36 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
     ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
     ("trace_from_d3d10_test", "user/bin/d3d10_1_test.exe", "gala"),
+    // trace_from_across_test: the same disk, with the trace armed in
+    // the other DLL of the two the program calls into.
+    ("trace_from_across_test", "ntdll.dll", "Windows/System32"),
+    ("trace_from_across_test", "kernel32.dll", "Windows/System32"),
+    ("trace_from_across_test", "msvcrt.dll", "Windows/System32"),
+    ("trace_from_across_test", "ucrtbase.dll", "Windows/System32"),
+    ("trace_from_across_test", "user32.dll", "Windows/System32"),
+    ("trace_from_across_test", "gdi32.dll", "Windows/System32"),
+    ("trace_from_across_test", "advapi32.dll", "Windows/System32"),
+    ("trace_from_across_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("trace_from_across_test", "version.dll", "Windows/System32"),
+    ("trace_from_across_test", "setupapi.dll", "Windows/System32"),
+    ("trace_from_across_test", "cfgmgr32.dll", "Windows/System32"),
+    ("trace_from_across_test", "dxgi.dll", "Windows/System32"),
+    ("trace_from_across_test", "shell32.dll", "Windows/System32"),
+    ("trace_from_across_test", "shlwapi.dll", "Windows/System32"),
+    ("trace_from_across_test", "ole32.dll", "Windows/System32"),
+    ("trace_from_across_test", "d2d1.dll", "Windows/System32"),
+    ("trace_from_across_test", "d3d10_1.dll", "Windows/System32"),
+    (
+        "trace_from_across_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("trace_from_across_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("trace_from_across_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("trace_from_across_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
+    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("trace_from_across_test", "user/bin/d3d10_1_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -19117,7 +19147,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "trace_from_test: ok",
             "exited with status 0x00000000",
             "trace: every call into that DLL from the first d2d1.dll!ID2D1Factory::GetDesktopDpi, 4096 at most (trace_from=)",
-            "trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=)",
+            "trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi, into \
+             d2d1.dll (trace_from=)",
         ],
     },
     Scenario {
@@ -19135,8 +19166,9 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "trace_from_test: ok",
             "exited with status 0x00000000",
-            "trace: 10 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=); the budget is spent, \
-             so the trace stops here, not the program",
+            "trace: 10 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi, into \
+             d2d1.dll (trace_from=); the budget is spent, so the trace stops here, \
+             not the program",
         ],
     },
     Scenario {
@@ -19155,7 +19187,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "trace_from_test: ok",
             "exited with status 0x00000000",
-            "trace: 30 calls recorded from d2d1.dll!ID2D1Factory::ReloadSystemMetrics (trace_from=)",
+            "trace: 30 calls recorded from d2d1.dll!ID2D1Factory::ReloadSystemMetrics, \
+             into d2d1.dll (trace_from=)",
             "trace: 5 of those calls recorded what they answered (trace_from=)",
         ],
     },
@@ -19179,8 +19212,35 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "d3d10_1_test: ok",
             "exited with status 0x00000000",
-            "trace: 3 calls recorded from d3d10_1.dll!ID3D10Device::CopyResource (trace_from=)",
+            "trace: 3 calls recorded from d3d10_1.dll!ID3D10Device::CopyResource, into \
+             d3d10_1.dll (trace_from=)",
             "trace: 1 of those calls recorded what they answered (trace_from=)",
+        ],
+    },
+    Scenario {
+        // A trace armed in one of gala's DLLs records the calls the
+        // program makes into the others (OBSERVABILITY "Call
+        // tracing"): the arming is the process's, not one DLL's, which
+        // is what the DLLs' flags find each other in ntdll for
+        // (`GalaTraceJoin`, `user/testntdll/src/trace.rs`). That is
+        // ROADMAP item OF's question about Word -- it reaches a
+        // Direct3D 10.1 method and what it does next is Direct2D --
+        // and d3d10_1_test takes the same path: a texture from
+        // ID3D10Device::CreateTexture2D, then
+        // ID2D1Factory::CreateDxgiSurfaceRenderTarget over it. Armed
+        // at the texture, one run records both DLLs' calls, which the
+        // summary's `into` names. Armed per DLL it named d3d10_1.dll
+        // alone and every Direct2D call after the texture was lost by
+        // construction, so a reading of Word's path needed two runs
+        // and could not interleave them.
+        name: "trace_from_across_test",
+        cmdline: "qemu_exit run=d3d10_1_test.exe events=call \
+                  trace_from=d3d10_1.dll!ID3D10Device::CreateTexture2D",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "d3d10_1_test: ok",
+            "exited with status 0x00000000",
+            ", into d2d1.dll and d3d10_1.dll (trace_from=)",
         ],
     },
     Scenario {
