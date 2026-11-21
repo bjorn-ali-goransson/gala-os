@@ -1996,9 +1996,18 @@ need gala's.
    63 ms later the box -- the box being built, as on the long path
    below, not what decided it. So the long path's 9.2 ms of user-mode
    work is not where the decision has to be: the short path gives up
-   before Direct2D, and neither run records anything failing. The
-   message itself is Word's own `user32!MessageBoxW`, and the stack at
-   its write names who asked for it: `Mso20win32client.dll`'s frame
+   before Direct2D, and neither run records anything failing.
+   Nor is it an add-in, a template or a user setting, which is the
+   class Word's own remedies for this message on Windows point at
+   (safe mode, disabling add-ins, renaming `Normal.dotm`). Started
+   with `/safe` in place of the scenario's template argument --
+   `XTASK_CMDLINE='args=%22C:\Program%20Files\Microsoft%20Office\root\Office16\WINWORD.EXE%22%20/safe'`,
+   which the kernel takes over the scenario's own `args=` (WORKFLOW's
+   boot-option table) -- Word runs with add-ins, the global template
+   and its customizations all off, and fails the same way to the
+   second: the same `(13)` box at 39.7 s, its own exit after 32.7 s.
+   The message itself is Word's own `user32!MessageBoxW`, and the stack
+   at its write names who asked for it: `Mso20win32client.dll`'s frame
    directly above user32's, then `MSO.DLL` and `Mso30win32client.dll`
    among WWLIB's own frames down to `WINWORD.EXE` itself, with
    `WWINTL.DLL` beside the write. Aim the capture at the module that is
