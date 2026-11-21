@@ -2536,10 +2536,16 @@ need gala's.
      up after. The only other thing under that key is a 4-byte value
      (`6`) that appears 57 ms after the box and whose last byte counts
      down by one over seven writes (`1e54e091`..`1e54e08b`) while the
-     box stands. So no record Word keeps says why, and the next
-     instrument is the box itself: a stack capture at the call that
-     puts it on the screen (`stack_from=` Word's own module,
-     OBSERVABILITY "Stack captures") names the caller that gave up.
+     box stands. So no record Word keeps says why, which closes the
+     last place a verdict could have been written down: the box is
+     reached, the exit is clean, and Word's own account of the session
+     is identity and clocks. What is left is the loop named above --
+     `#16040` answering the buffer it was handed, `#15239` and
+     `#59438` beside it -- and what that buffer holds, which
+     `imports_strings=` and `imports_bytes=` quote at a call and at a
+     trapped return (OBSERVABILITY "Import tracing"). The arming is
+     already narrow enough for it
+     (`imports=WINWORD.EXE!Mso20Win32Client.dll:8192`).
      What fails of the reading is keys a fresh Windows does not have
      either (`...\Office\16.0\Common\Graphics`,
      `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
