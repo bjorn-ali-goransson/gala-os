@@ -214,10 +214,10 @@ fn open_key(call: &mut Call<'_>) -> NtStatus {
     status
 }
 
-/// The `key` event of a key open (`events=file`): the key it is relative
-/// to (`base`, its full name), the name and the status, in order with the file opens (the ledger keeps only each
-/// absent key's first time: which open came last before a failure needs
-/// this).
+/// The `key` event of a key opened or created (`events=file`): the key
+/// it is relative to (`base`, its full name), the name and the status,
+/// in order with the file opens. The ledger keeps only each absent key's
+/// first time, so which open came last before a failure needs this.
 fn emit_key(call: &Call<'_>, start: KeyId, name: &[u16], status: NtStatus) {
     use crate::events::{Category, Utf16, emit, enabled};
     if !enabled(Category::File) {
@@ -233,6 +233,79 @@ fn emit_key(call: &Call<'_>, start: KeyId, name: &[u16], status: NtStatus) {
             Utf16(&base),
             Utf16(name),
             status.0
+        ),
+    );
+}
+
+/// What a value event says (`emit_value`).
+struct Valued<'a> {
+    /// The event's name: `value` read, `value set` written, `value
+    /// deleted` removed.
+    what: &'static str,
+    key: KeyId,
+    /// The name the call asked for, or the one an index held.
+    name: &'a [u16],
+    /// The index an enumerate asked for; a call by name has none.
+    index: Option<usize>,
+    /// The type and the size of the data the call read, wrote or meant
+    /// to write, where there was any: an empty value is a different
+    /// answer from an absent one, and this is the difference.
+    held: Option<(u32, usize)>,
+    status: NtStatus,
+}
+
+/// The index an enumerate asked for, written where there was one.
+struct At(Option<usize>);
+
+impl core::fmt::Display for At {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(index) => write!(f, r#","index":{index}"#),
+            None => Ok(()),
+        }
+    }
+}
+
+/// What a value held, written where the call had any.
+struct Held(Option<(u32, usize)>);
+
+impl core::fmt::Display for Held {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some((kind, bytes)) => write!(f, r#","kind":{kind},"bytes":{bytes}"#),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The event of a registry value read, written or deleted
+/// (`events=file`): the key it is in (its full name), the name asked
+/// for, what the value held where the call had it, and the status -- in
+/// order with the file opens and the `key` events.
+///
+/// The ledger cannot answer this. It keeps one row an absent key and
+/// nothing at all about values, so the value a program read last before
+/// it gave up is in this stream or nowhere. A call refused before its
+/// key is resolved -- a handle that is not a key, or one without the
+/// access right -- leaves no event here, only the system call's own
+/// status under `events=syscall`.
+fn emit_value(call: &Call<'_>, said: Valued<'_>) {
+    use crate::events::{Category, Utf16, emit, enabled};
+    if !enabled(Category::File) {
+        return;
+    }
+    let key = registry::with(|r| r.full_name(said.key)).unwrap_or_default();
+    emit(
+        Category::File,
+        said.what,
+        format_args!(
+            r#""pid":{},"key":{}{},"name":{}{},"status":{}"#,
+            call.process.id,
+            Utf16(&key),
+            At(said.index),
+            Utf16(said.name),
+            Held(said.held),
+            said.status.0
         ),
     );
 }
@@ -302,11 +375,18 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
             tri!(super::security_calls::check_key_create(call, parent));
         }
     }
-    let (id, created) = tri!(registry::with(|r| {
+    let made = registry::with(|r| {
         let (id, created) = r.create(start, &name, options, &class, now)?;
         r.retain(id);
         Ok((id, created))
-    }));
+    });
+    let (id, created) = match made {
+        Ok(made) => made,
+        Err(status) => {
+            emit_key(call, start, &name, status);
+            return status;
+        }
+    };
     if created {
         tri!(super::security_calls::assign_key(call, id, arg!(call, 2)));
     }
@@ -315,6 +395,7 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
     } else {
         call.return_checked_key(out, id, access, attributes, &spelled)
     };
+    emit_key(call, start, &name, status);
     if status == NtStatus::SUCCESS && disposition_ptr != 0 {
         let disposition = if created { REG_CREATED_NEW_KEY } else { REG_OPENED_EXISTING_KEY };
         tri!(call.write_u32(disposition_ptr, disposition));
@@ -359,9 +440,31 @@ pub(super) fn nt_query_value_key(call: &mut Call<'_>) -> NtStatus {
     let (_object, id) = tri!(call.key(arg!(call, 0), KEY_QUERY_VALUE));
     let name = tri!(call.value_name(arg!(call, 1)));
     let class = arg!(call, 2) as u32;
-    let (data, fixed) =
-        tri!(registry::with(|r| registry::value_information(r.value(id, &name)?, class)));
-    call.return_partial(&data, fixed, arg!(call, 3), arg!(call, 4) as u32 as u64, arg!(call, 5))
+    let found = registry::with(|r| {
+        let value = r.value(id, &name)?;
+        let held = (value.kind, value.data.len());
+        Ok((registry::value_information(value, class)?, held))
+    });
+    let ((data, fixed), held) = match found {
+        Ok(found) => found,
+        Err(status) => {
+            let said =
+                Valued { what: "value", key: id, name: &name, index: None, held: None, status };
+            emit_value(call, said);
+            return status;
+        }
+    };
+    let status = call.return_partial(
+        &data,
+        fixed,
+        arg!(call, 3),
+        arg!(call, 4) as u32 as u64,
+        arg!(call, 5),
+    );
+    let said =
+        Valued { what: "value", key: id, name: &name, index: None, held: Some(held), status };
+    emit_value(call, said);
+    status
 }
 
 /// NtEnumerateValueKey(KeyHandle, Index, KeyValueInformationClass,
@@ -369,9 +472,48 @@ pub(super) fn nt_query_value_key(call: &mut Call<'_>) -> NtStatus {
 pub(super) fn nt_enumerate_value_key(call: &mut Call<'_>) -> NtStatus {
     let (index, class) = (arg!(call, 1) as u32 as usize, arg!(call, 2) as u32);
     let (_object, id) = tri!(call.key(arg!(call, 0), KEY_QUERY_VALUE));
-    let (data, fixed) =
-        tri!(registry::with(|r| registry::value_information(r.value_at(id, index)?, class)));
-    call.return_partial(&data, fixed, arg!(call, 3), arg!(call, 4) as u32 as u64, arg!(call, 5))
+    // The name is the index's answer and not an argument, so the event
+    // needs a copy of it -- taken only when there is an event to write,
+    // for a program that walks a key to cost nothing more for this.
+    let naming = crate::events::enabled(crate::events::Category::File);
+    let found = registry::with(|r| {
+        let value = r.value_at(id, index)?;
+        let held = (value.kind, value.data.len());
+        let name = if naming { registry::copy_name(&value.name)? } else { Vec::new() };
+        Ok((registry::value_information(value, class)?, held, name))
+    });
+    let ((data, fixed), held, name) = match found {
+        Ok(found) => found,
+        Err(status) => {
+            let said = Valued {
+                what: "value",
+                key: id,
+                name: &[],
+                index: Some(index),
+                held: None,
+                status,
+            };
+            emit_value(call, said);
+            return status;
+        }
+    };
+    let status = call.return_partial(
+        &data,
+        fixed,
+        arg!(call, 3),
+        arg!(call, 4) as u32 as u64,
+        arg!(call, 5),
+    );
+    let said = Valued {
+        what: "value",
+        key: id,
+        name: &name,
+        index: Some(index),
+        held: Some(held),
+        status,
+    };
+    emit_value(call, said);
+    status
 }
 
 /// NtSetValueKey(KeyHandle, *ValueName, TitleIndex, Type, Data, DataSize)
@@ -392,8 +534,22 @@ pub(super) fn nt_set_value_key(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     let now = platform::system_time();
-    tri!(registry::with(|r| r.set_value(id, &name, kind, &data, now)));
-    NtStatus::SUCCESS
+    let status = match registry::with(|r| r.set_value(id, &name, kind, &data, now)) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(status) => status,
+    };
+    // What the program meant to write, whether or not it landed: the
+    // status says which.
+    let said = Valued {
+        what: "value set",
+        key: id,
+        name: &name,
+        index: None,
+        held: Some((kind, size)),
+        status,
+    };
+    emit_value(call, said);
+    status
 }
 
 /// NtDeleteKey(KeyHandle): the key must have no subkeys; handles to it
@@ -410,8 +566,14 @@ pub(super) fn nt_delete_value_key(call: &mut Call<'_>) -> NtStatus {
     let (_object, id) = tri!(call.key(arg!(call, 0), KEY_SET_VALUE));
     let name = tri!(call.value_name(arg!(call, 1)));
     let now = platform::system_time();
-    tri!(registry::with(|r| r.delete_value(id, &name, now)));
-    NtStatus::SUCCESS
+    let status = match registry::with(|r| r.delete_value(id, &name, now)) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(status) => status,
+    };
+    let said =
+        Valued { what: "value deleted", key: id, name: &name, index: None, held: None, status };
+    emit_value(call, said);
+    status
 }
 
 /// NtSetInformationKey(KeyHandle, KeySetInformationClass, KeySetInformation,

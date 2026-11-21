@@ -2353,7 +2353,16 @@ need gala's.
      Nor is anything refused in what little that thread does ask for
      in those seven seconds -- 44 NtProtectVirtualMemory, 27
      NtQueryPerformanceCounter, ten value reads, nine GalaScreenInfo
-     and no more. What fails of it is keys a fresh Windows does not
+     and no more. Those ten are named now: a `value` event says the
+     key, the value's name, its type and the size of its data, or the
+     status alone where there is no value (`events=file`,
+     OBSERVABILITY's `file` category, scenario `events_registry`),
+     where before this the stream named the key a program opened and
+     never the value it went on to read. The ledger cannot stand in
+     for it -- it keeps one row an absent key and nothing at all about
+     values -- so a read that is answered left no trace of itself
+     anywhere. Which ten they are and what Word was told is the next
+     reading. What fails of it is keys a fresh Windows does not
      have either (`...\Office\16.0\Common\Graphics`,
      `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
      own probe for a private `Microsoft.Windows.Common-Controls`
