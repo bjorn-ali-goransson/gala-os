@@ -10893,6 +10893,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("spi_test", "ntdll.dll", "Windows/System32"),
     ("spi_test", "kernel32.dll", "Windows/System32"),
     ("spi_test", "user32.dll", "Windows/System32"),
+    // The device capabilities (user/caps_test).
+    ("caps_test", "ntdll.dll", "Windows/System32"),
+    ("caps_test", "kernel32.dll", "Windows/System32"),
+    ("caps_test", "user32.dll", "Windows/System32"),
+    ("caps_test", "gdi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11308,6 +11313,7 @@ const USER_PROGRAMS: &[&str] = &[
     "display_test",
     "metrics_test",
     "spi_test",
+    "caps_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -16549,6 +16555,21 @@ const BASE_SCENARIOS: &[Scenario] = &[
             r#"ledger: {"service":"user32.dll!SystemParametersInfoW(0x1042)","what":"reached""#,
             r#"ledger: {"service":"user32.dll!SystemParametersInfoA(0x1042)","what":"reached""#,
             r#"ledger: {"service":"user32.dll!SystemParametersInfoW(action)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The device capabilities: what GetDeviceCaps answers a program
+        // that is about to lay text out, against what a real Windows
+        // answers for each, and the ledger row an index gala has no
+        // answer for leaves (user/caps_test).
+        name: "caps_test",
+        cmdline: "qemu_exit run=caps_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "caps_test: ok",
+            r#"ledger: {"service":"gdi32.dll!GetDeviceCaps(34)","what":"reached""#,
+            r#"ledger: {"service":"gdi32.dll!GetDeviceCaps(32767)","what":"unsupported""#,
             "exited with status 0x00000000",
         ],
     },

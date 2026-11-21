@@ -255,7 +255,7 @@ has a section under "Open items".
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on ID2D1DeviceContext::SetTarget, S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); the display is answered as far as Word and DXVK ask for it (EnumDisplayDevicesW's monitor level, a Plug and Play device tree setupapi reads out of the registry, and the panel's EDID the kernel writes into the monitor's device key at boot, which is what DXVK's `getMonitorEdid` wanted: `display_test`); the system metrics a program lays its windows out from are measured on Windows and answered, 73 indices having answered a silent 0 before, sixteen of them among the 34 Word reads (SM_MOUSEPRESENT, both scroll bars, all four frames, the double-click slop, the menu buttons and the window edge), and every index a program asks for leaving a reached row now (`metrics_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 30.7 s and no document drawn, the decision its own, in wwlib, by a stack capture over MessageBoxW (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on ID2D1DeviceContext::SetTarget, S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); the display is answered as far as Word and DXVK ask for it (EnumDisplayDevicesW's monitor level, a Plug and Play device tree setupapi reads out of the registry, and the panel's EDID the kernel writes into the monitor's device key at boot, which is what DXVK's `getMonitorEdid` wanted: `display_test`); the system metrics a program lays its windows out from are measured on Windows and answered, 73 indices having answered a silent 0 before, sixteen of them among the 34 Word reads (SM_MOUSEPRESENT, both scroll bars, all four frames, the double-click slop, the menu buttons and the window edge), and every index a program asks for leaving a reached row now (`metrics_test`); the device caps a program lays text out from are measured on Windows and answered, sixteen indices having answered a silent 0 before (TEXTCAPS, the curve, line and polygon caps and the pixel's aspect among them), one of them among the ten Word reads (RASTERCAPS, 10889 where Windows answers 32409), and every index a program asks for leaving a reached row now (`caps_test`); the settings a program asks the desktop for are measured on Windows and answered, nine of the answers having been values no Windows gives (every animation and fade off, UI effects off and client-area animation off, where a Windows desktop answers TRUE for all nine), two of them the first two settings Word reads, the non-client metrics now read from the system metrics so two copies of a desktop's sizes cannot drift (a caption button was 32 wide against the metric's 46), and every action a program is answered leaving a reached row now (`spi_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 32.3 s and no document drawn, the decision its own, in wwlib, by a stack capture over MessageBoxW (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -2751,7 +2751,27 @@ need gala's.
      the same box, the same status 0 after 30.8 s, no document drawn.
      The ledger carries no pid, so that attribution is the scenario's
      and not the row's: Word is the only process with a window in it.
-     The next gap of that shape is the settings themselves.
+     The second gap of that shape is closed, and this one Word read.
+     GetDeviceCaps answered fourteen index groups and 0 for every
+     other cap, sixteen of them diverging from Windows: TEXTCAPS 0
+     said this display draws no text at all, ASPECTX and ASPECTY 0
+     that a pixel is nothing wide, and CURVECAPS, LINECAPS,
+     POLYGONALCAPS and CLIPCAPS 0 that it draws no curve, line or
+     polygon and clips to nothing. `caps_test` measures every index
+     Windows documents on the Windows machine first and pins two
+     answers a caller depends on besides: a memory DC created from the
+     screen answers what the screen answers, the caps being the
+     device's and not the selected bitmap's, and a handle that is not
+     a DC answers 0 for every index with no error. Word asks for ten
+     caps: LOGPIXELSY at 28440 ms (twice), VERTRES at 36034 ms, then
+     LOGPIXELSX, HORZRES, HORZSIZE, VERTSIZE, NUMCOLORS, BITSPIXEL,
+     PLANES and RASTERCAPS together at 36137 ms, 1.2 s before the box.
+     One of the ten was wrong: RASTERCAPS answered 10889 where Windows
+     answers 32409, without RC_GDI20_OUTPUT, RC_BIGFONT, RC_FLOODFILL
+     or RC_OP_DX_OUTPUT. It is right now and the run is unchanged (the
+     same box, status 0 after 30.3 s, no document drawn), so the caps
+     are not the cause either; Word never asks for TEXTCAPS.
+     The third gap of that shape is the settings themselves.
      SystemParametersInfoW answered 31 actions and refused the rest,
      and nine of its answers were values no Windows gives: every
      animation and fade off, UI effects off and client-area animation
@@ -2770,7 +2790,19 @@ need gala's.
      cannot drift again (the metrics once answered 0 for a scroll bar
      where this structure said 17). 24 more actions Windows answers are
      answered, and every action a program is answered leaves a reached
-     row. Word asks for eight of them, all in the last three seconds of its life: client-area animation at 36255 ms and UI effects at 36633 ms, the two that were wrong, then high contrast and the non-client metrics beside the 34 system metrics at 36637 ms, the screen reader at 37629 ms, and font smoothing and the caret's width at 39033 ms, 150 ms before the box. With the nine answers right Word lives 1.5 s longer (32.3 s against 30.8 s) and gets 0.7 s further before the box (39187 ms against 38509 ms), reading the two text settings it did not reach before -- but the box is the same one, with the same (13), and no document is drawn. So the settings were a real divergence on the deciding path and not its cause; what Word does in the 150 ms between the caret's width and the box is where that path ends.
+     row. Word asks for eight of them, all in the last three seconds of
+     its life: client-area animation at 36255 ms and UI effects at 36633
+     ms, the two that were wrong, then high contrast and the non-client
+     metrics beside the 34 system metrics at 36637 ms, the screen reader
+     at 37629 ms, and font smoothing and the caret's width at 39033 ms,
+     150 ms before the box. With the nine answers right Word lives 1.5 s
+     longer (32.3 s against 30.8 s) and gets 0.7 s further before the
+     box (39187 ms against 38509 ms), reading the two text settings it
+     did not reach before -- but the box is the same one, with the same
+     (13), and no document is drawn. So the settings were a real
+     divergence on the deciding path and not its cause; what Word does
+     in the 150 ms between the caret's width and the box is where that
+     path ends.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
