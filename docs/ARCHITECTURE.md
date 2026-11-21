@@ -16172,8 +16172,43 @@ What user32 provides for this (`user/user32`):
   user32's SendMessageW answers it itself; its 28-byte request
   (hwnd-after, x, y, cx, cy, flags) is marshaled in; it cannot be
   posted), so Move/Resize work across processes.
-- GetSystemMetrics gives the caption buttons' SM_CXSIZE (46) and
-  SM_CYSIZE.
+- GetSystemMetrics answers in three kinds (`window.rs`,
+  `metrics_test`, which measures every index Windows documents on
+  Windows first). The sizes a theme decides are Windows' own at 96 dpi:
+  a scroll bar and its thumb 17, an icon 32 and a small one 16, a menu
+  bar 20 with 19-pixel buttons and a 15-pixel check mark, the
+  double-click and drag slop 4, a window edge 2, a focus border 1, a
+  minimized window 160 x 28, desktop icons 75 apart. The sizes a window
+  frame decides are this desktop's own frame (a one-pixel border, a
+  32-pixel caption with 46-pixel buttons, no padded border) in the
+  relations Windows holds them in, so that a program sizing itself from
+  SM_CXMAXIMIZED or SM_CYMINTRACK gets a window that fits gala's frame:
+  a maximized window is the work area and two frames and two padded
+  borders, the greatest tracking size the screen and those and four
+  more, the smallest window a caption and those high and three caption
+  buttons wide. The switches are what gala has -- a three-button mouse
+  with a wheel and no horizontal wheel, an IME, a blinking caret, one
+  display format, a network -- and no to the rest, SM_CLEANBOOT among
+  them.
+- An index with no answer of gala's own leaves a ledger row naming it
+  (`user32.dll!GetSystemMetrics(<index>)`, "unsupported", the index as
+  the detail) and returns 0, which is what SM_MIDEASTENABLED (74, whose
+  RTL support Windows always has and gala has none of) and the
+  undocumented 93 do. A 0 for an index Windows answers a size for is a
+  guess no caller can tell from a measurement, so the row is the
+  question: what a real Windows answers for that index decides whether
+  it is a divergence. This is the rule for a value a program is handed
+  rather than refused ("Gaps are never silent").
+- Every index a program asks for leaves a "reached" row the first time
+  it is asked (`note_metric`): one row and one kernel call an index for
+  the life of the process, at most 134 of them, so a layout loop pays
+  nothing for it. This is how a divergence in a value gala answers
+  successfully is found at all. A wrong size is not refused and leaves
+  nothing behind -- the caller lays its windows out from it and goes on
+  -- so the only way to ask whether a metric mattered to a program is to
+  know that it read it, how often (the row's `hits`) and when (`first`,
+  `last`) against the rest of the run. What Word reads is 34 indices,
+  all of them in the last two seconds of its life (ROADMAP OF).
 - GetDesktopWindow is a handle below the window table (0xfff0,
   `tree::DESKTOP`) that IsWindow accepts and whose GetWindowRect is the
   screen. It is not a real parent: top-level windows have parent 0, and

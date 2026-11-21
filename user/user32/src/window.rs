@@ -6,12 +6,14 @@
 //! posted messages (each tagged with its thread); GetMessage takes the
 //! calling thread's, else makes WM_PAINT for one of its invalid windows,
 //! else waits on the queue's event. SendMessage calls the window
-//! procedure directly. Metrics: a 1-pixel border and a 30-pixel caption
-//! (kernel/src/nt/desktop.rs).
+//! procedure directly. Metrics: the desktop's frame is BORDER and
+//! CAPTION here and in kernel/src/nt/desktop.rs; GetSystemMetrics
+//! answers from them (ARCHITECTURE "Window, Transform and title
+//! bars").
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) type Handle = *mut c_void;
 pub(crate) type Hwnd = usize;
@@ -71,6 +73,8 @@ unsafe extern "system" {
 
 pub const BORDER: i32 = 1;
 pub const CAPTION: i32 = 32;
+/// The width of a caption button (SM_CXSIZE).
+const CAPTION_BUTTON: i32 = 46;
 /// A menu bar's height (SM_CYMENU).
 pub const MENU_BAR: i32 = 20;
 /// The size of a menu item's check mark (SM_CXMENUCHECK, SM_CYMENUCHECK).
@@ -3597,28 +3601,171 @@ pub extern "system" fn GetDoubleClickTime() -> u32 {
     500
 }
 
-/// GetSystemMetrics: the desktop's frame (SM_CYCAPTION, SM_CXBORDER,
-/// SM_CYBORDER, the caption buttons' SM_CXSIZE and SM_CYSIZE) and the
-/// screen (crate::monitor).
+/// GetSystemMetrics: the sizes and switches a program lays its windows
+/// out from, in three kinds.
+///
+/// The sizes a theme decides are the same on any Windows 11 at 96 dpi
+/// and are Windows' own, measured (`metrics_test`): a scroll bar 17, an
+/// icon 32 and a small one 16, a menu bar 20 with 19-pixel buttons and
+/// a 15-pixel check mark, the double-click and drag slop 4, a window
+/// edge 2, a focus border 1, a minimized window 160 x 28, desktop
+/// icons 75 apart.
+///
+/// The sizes a window frame decides are gala's desktop's own frame (a
+/// one-pixel border, a 32-pixel caption with 46-pixel buttons, no
+/// padded border), in the relations Windows holds them in: a maximized
+/// window is the work area and two frames and two padded borders, the
+/// greatest tracking size is the screen and those and four more, the
+/// smallest window is a caption and those high and three buttons wide.
+/// A program that sizes itself from these gets a window that fits
+/// gala's frame, which is what the relations are for.
+///
+/// The switches are what gala has: a three-button mouse with a wheel
+/// and no horizontal wheel, an IME, a blinking caret, one display
+/// format, a network; and no to the rest -- SM_CLEANBOOT above all,
+/// which a Click-to-Run Office refuses to start for.
+///
+/// What is left to `unknown_metric` is what gala has no answer of its
+/// own for: SM_MIDEASTENABLED (74), which this Windows answers yes to
+/// because its RTL support is always there and gala has none to speak
+/// of, and 93, which Windows does not document. Each leaves a ledger
+/// row every run rather than a 0 no caller can tell from a measurement
+/// (ROADMAP OF).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
+    note_metric(index);
     let (screen, work) = crate::monitor::screen();
     match index {
+        // The screen, the work area and the monitors.
         0 | 78 => screen[2],     // SM_CXSCREEN, SM_CXVIRTUALSCREEN
         1 | 79 => screen[3],     // SM_CYSCREEN, SM_CYVIRTUALSCREEN
+        76 | 77 => 0,            // SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN
         16 => work[2],           // SM_CXFULLSCREEN
         17 => work[3] - CAPTION, // SM_CYFULLSCREEN
         80 => 1,                 // SM_CMONITORS
-        4 => CAPTION,
-        15 => MENU_BAR,        // SM_CYMENU
-        71 | 72 => MENU_CHECK, // SM_CXMENUCHECK, SM_CYMENUCHECK
-        5 | 6 => BORDER,
-        30 => 46,      // SM_CXSIZE: the desktop's caption buttons
-        31 => CAPTION, // SM_CYSIZE
-        11..=14 => 32, // SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR
-        49 | 50 => 16, // SM_CXSMICON, SM_CYSMICON
-        _ => 0,
+        81 => 1,                 // SM_SAMEDISPLAYFORMAT: one screen
+        // gala's desktop's frame.
+        4 | 51 => CAPTION,         // SM_CYCAPTION, SM_CYSMCAPTION
+        5 | 6 => BORDER,           // SM_CXBORDER, SM_CYBORDER
+        7 | 8 | 32 | 33 => BORDER, // SM_CX/CYDLGFRAME, SM_CX/CYFRAME
+        92 => 0,                   // SM_CXPADDEDBORDER: none
+        30 | 52 => CAPTION_BUTTON, // SM_CXSIZE, SM_CXSMSIZE
+        31 | 53 => CAPTION,        // SM_CYSIZE, SM_CYSMSIZE
+        15 => MENU_BAR,            // SM_CYMENU
+        54 | 55 => 19,             // SM_CXMENUSIZE, SM_CYMENUSIZE
+        71 | 72 => MENU_CHECK,     // SM_CXMENUCHECK, SM_CYMENUCHECK
+        // The sizes that frame gives a window, as Windows derives them.
+        28 | 34 => 3 * CAPTION_BUTTON + 2 * BORDER, // SM_CXMIN, SM_CXMINTRACK
+        29 | 35 => CAPTION + 2 * BORDER,            // SM_CYMIN, SM_CYMINTRACK
+        59 => screen[2] + 2 * BORDER + 4,           // SM_CXMAXTRACK
+        60 => screen[3] + 2 * BORDER + 4,           // SM_CYMAXTRACK
+        61 => screen[2] + 2 * BORDER,               // SM_CXMAXIMIZED
+        62 => work[3] + 2 * BORDER,                 // SM_CYMAXIMIZED
+        // A minimized window, the icons and the cursor.
+        47 | 57 => 160, // SM_CXMINSPACING, SM_CXMINIMIZED
+        48 | 58 => 28,  // SM_CYMINSPACING, SM_CYMINIMIZED
+        56 => 8,        // SM_ARRANGE: ARW_HIDE
+        38 | 39 => 75,  // SM_CXICONSPACING, SM_CYICONSPACING
+        11..=14 => 32,  // SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR
+        49 | 50 => 16,  // SM_CXSMICON, SM_CYSMICON
+        // The scroll bars, and the slop a drag and a double click have.
+        2 | 3 | 9 | 10 | 20 | 21 => 17, // SM_CX/CYVSCROLL, HSCROLL, HTHUMB, VTHUMB
+        36 | 37 => 4,                   // SM_CXDOUBLECLK, SM_CYDOUBLECLK
+        68 | 69 => 4,                   // SM_CXDRAG, SM_CYDRAG
+        45 | 46 => 2,                   // SM_CXEDGE, SM_CYEDGE
+        83 | 84 => 1,                   // SM_CXFOCUSBORDER, SM_CYFOCUSBORDER
+        // What gala has.
+        19 => 1,     // SM_MOUSEPRESENT
+        43 => 3,     // SM_CMOUSEBUTTONS
+        75 => 1,     // SM_MOUSEWHEELPRESENT
+        82 => 1,     // SM_IMMENABLED: crate imm32
+        0x2002 => 1, // SM_CARETBLINKINGENABLED
+        63 => 1,     // SM_NETWORK: bit 0, a network is present
+        // What it has not: SM_DEBUG, SM_SWAPBUTTON,
+        // SM_MENUDROPALIGNMENT, SM_PENWINDOWS, SM_DBCSENABLED,
+        // SM_SECURE, SM_SHOWSOUNDS, SM_CLEANBOOT, SM_SLOWMACHINE,
+        // SM_TABLETPC .. SM_MOUSEHORIZONTALWHEELPRESENT, a digitizer,
+        // a remote session, a slate and a dock.
+        18 | 22 | 23 | 40 | 41 | 42 | 44 | 67 | 70 | 73 => 0,
+        86..=91 | 94 | 95 => 0,
+        0x1000 | 0x2000 | 0x2001 | 0x2003 | 0x2004 => 0,
+        _ => unknown_metric(index),
     }
+}
+
+/// `user32.dll!GetSystemMetrics(<index>)` in `name`, its length back.
+fn metric_name(index: i32, name: &mut [u8; 48]) -> usize {
+    let mut n = 0;
+    for &b in b"user32.dll!GetSystemMetrics(" {
+        name[n] = b;
+        n += 1;
+    }
+    let mut digits = [0u8; 10];
+    let mut at = digits.len();
+    let mut left = index as u32;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (left % 10) as u8;
+        left /= 10;
+        if left == 0 {
+            break;
+        }
+    }
+    while at < digits.len() {
+        name[n] = digits[at];
+        n += 1;
+        at += 1;
+    }
+    name[n] = b')';
+    n + 1
+}
+
+/// Every index a program asks for, once: the first call for an index
+/// leaves a "reached" ledger row naming it, and nothing after it does.
+///
+/// This is what finds a divergence in a value gala answers
+/// successfully. A wrong size is not refused and leaves nothing behind
+/// -- the caller lays its windows out from it and goes on -- so the
+/// only way to ask whether a metric mattered to a program is to know
+/// that it read it. The ledger's own `hits` then says how often, and
+/// its `first` and `last` when, against the rest of the run.
+///
+/// Bounded by construction, which is what makes it affordable in a
+/// layout loop: one row and one kernel call an index for the life of
+/// the process, at most 134 of them, whatever a program asks. An index
+/// Windows does not document has no bit here and is left to
+/// `unknown_metric`, which records it as a gap instead.
+fn note_metric(index: i32) {
+    static ASKED: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    let bit = match index {
+        0..=127 => index as u32,
+        0x1000 => 128,
+        0x2000..=0x2004 => 129 + (index - 0x2000) as u32,
+        _ => return,
+    };
+    let (word, mask) = ((bit / 64) as usize, 1u64 << (bit % 64));
+    if ASKED[word].fetch_or(mask, Ordering::Relaxed) & mask != 0 {
+        return;
+    }
+    let mut name = [0u8; 48];
+    let n = metric_name(index, &mut name);
+    // SAFETY: our string.
+    unsafe { GalaRecordMissing(name.as_ptr(), n, 9, u64::from(index as u32)) };
+}
+
+/// An index GetSystemMetrics has no answer of gala's own for: 0, and a
+/// ledger row naming it (`user32.dll!GetSystemMetrics(<index>)`,
+/// "unsupported", the index as the detail). Windows answers a size or a
+/// flag for every index it documents and 0 for almost none of them, so
+/// a 0 here is a guess that no caller can tell from a measurement --
+/// which is what makes it worth a row: the row is the question, and
+/// what a real Windows answers for that index decides whether it is a
+/// divergence (`metrics_test`, ROADMAP OF).
+fn unknown_metric(index: i32) -> i32 {
+    let mut name = [0u8; 48];
+    let n = metric_name(index, &mut name);
+    unsupported(&name[..n], u64::from(index as u32));
+    0
 }
 
 /// AdjustWindowRectEx(rect, style, menu, ex_style): the window rectangle

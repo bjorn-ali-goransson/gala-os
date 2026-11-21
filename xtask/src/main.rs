@@ -10885,6 +10885,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("display_test", "gdi32.dll", "Windows/System32"),
     ("display_test", "setupapi.dll", "Windows/System32"),
     ("display_test", "advapi32.dll", "Windows/System32"),
+    // The system metrics (user/metrics_test).
+    ("metrics_test", "ntdll.dll", "Windows/System32"),
+    ("metrics_test", "kernel32.dll", "Windows/System32"),
+    ("metrics_test", "user32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11298,6 +11302,7 @@ const USER_PROGRAMS: &[&str] = &[
     "gdiplus_test",
     "uisettings_test",
     "display_test",
+    "metrics_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -16509,6 +16514,21 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=display_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["display_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The system metrics: the sizes and switches GetSystemMetrics
+        // answers, against what a real Windows answers for each, and
+        // the ledger row an index gala has no answer for leaves
+        // (user/metrics_test).
+        name: "metrics_test",
+        cmdline: "qemu_exit run=metrics_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "metrics_test: ok",
+            r#"ledger: {"service":"user32.dll!GetSystemMetrics(0)","what":"reached""#,
+            r#"ledger: {"service":"user32.dll!GetSystemMetrics(32767)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // Windows.UI.ViewManagement.UISettings: its factory and objects,
