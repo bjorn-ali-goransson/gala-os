@@ -127,7 +127,7 @@ pub fn create(
         return DXGI_ERROR_UNSUPPORTED;
     }
     // SAFETY: a NUL-terminated symbol name and a loaded module.
-    let entry = unsafe { GetProcAddress(module, b"D3D11CreateDevice\0".as_ptr()) };
+    let entry = unsafe { GetProcAddress(module, c"D3D11CreateDevice".as_ptr().cast()) };
     if entry.is_null() {
         answered(b"D3D10CreateDevice1 (no D3D11CreateDevice)", DXGI_ERROR_UNSUPPORTED);
         return DXGI_ERROR_UNSUPPORTED;
@@ -350,18 +350,30 @@ extern "system" fn d_CheckMultisampleQualityLevels(
 /// be called through one of these: the arguments it was given stay in
 /// the caller's own frame, and a method whose answer is nothing or a
 /// number has its answer ignored or reads as a failure.
+///
+/// A stub reports its call to an armed trace as well
+/// (`traced_recorded!`, OBSERVABILITY "Call tracing"), so a run shows
+/// in what order a program asked for these and not only how often:
+/// a method added here is traced by having been added, which is why
+/// the generator leaves these slots alone.
 macro_rules! recorders {
     ($($name:ident),* $(,)?) => {
         $(
             pub extern "system" fn $name(_this: crate::Obj) -> crate::HResult {
-                crate::not_implemented(
-                    concat!("ID3D10Device1::", stringify!($name)).as_bytes(),
-                )
+                const NAME: &[u8] = concat!("ID3D10Device1::", stringify!($name)).as_bytes();
+                crate::traced_recorded!(NAME, [_this]);
+                let answer = crate::not_implemented(NAME);
+                crate::answered_call!(NAME, answer);
+                answer
             }
         )*
     };
 }
 
+// The slots of this module record every call of their own
+// (`recorders!` above), so `cargo xtask gen-trace` has nothing to
+// add to them and does not wrap them.
+// gen-trace records rec
 mod rec {
     recorders!(
         VSSetConstantBuffers,
@@ -454,88 +466,96 @@ mod rec {
     );
 }
 
+// The interfaces this module's vtable slots belong to, which name the
+// wrappers `cargo xtask gen-trace` generates (xtask/src/gentrace.rs).
+// One object answers ID3D10Device and ID3D10Device1 alike, so each
+// slot is named by the interface that declares it, the way the
+// ledger's own rows of these methods are spelled -- which is what a
+// `trace_from=` value is read off.
+// gen-trace prefix d_ ID3D10Device
+// gen-trace fn d_GetFeatureLevel ID3D10Device1::GetFeatureLevel
 static DEVICE_VTBL: VTable<101> = VTable([
-    d_QueryInterface as *const (),              // 0 QueryInterface
-    crate::add_ref as *const (),                // 1 AddRef
-    d_Release as *const (),                     // 2 Release
-    rec::VSSetConstantBuffers as *const (),     // 3 VSSetConstantBuffers
-    rec::PSSetShaderResources as *const (),     // 4 PSSetShaderResources
-    rec::PSSetShader as *const (),              // 5 PSSetShader
-    rec::PSSetSamplers as *const (),            // 6 PSSetSamplers
-    rec::VSSetShader as *const (),              // 7 VSSetShader
-    rec::DrawIndexed as *const (),              // 8 DrawIndexed
-    rec::Draw as *const (),                     // 9 Draw
-    rec::PSSetConstantBuffers as *const (),     // 10 PSSetConstantBuffers
-    rec::IASetInputLayout as *const (),         // 11 IASetInputLayout
-    rec::IASetVertexBuffers as *const (),       // 12 IASetVertexBuffers
-    rec::IASetIndexBuffer as *const (),         // 13 IASetIndexBuffer
-    rec::DrawIndexedInstanced as *const (),     // 14 DrawIndexedInstanced
-    rec::DrawInstanced as *const (),            // 15 DrawInstanced
-    rec::GSSetConstantBuffers as *const (),     // 16 GSSetConstantBuffers
-    rec::GSSetShader as *const (),              // 17 GSSetShader
-    rec::IASetPrimitiveTopology as *const (),   // 18 IASetPrimitiveTopology
-    rec::VSSetShaderResources as *const (),     // 19 VSSetShaderResources
-    rec::VSSetSamplers as *const (),            // 20 VSSetSamplers
-    rec::SetPredication as *const (),           // 21 SetPredication
-    rec::GSSetShaderResources as *const (),     // 22 GSSetShaderResources
-    rec::GSSetSamplers as *const (),            // 23 GSSetSamplers
-    rec::OMSetRenderTargets as *const (),       // 24 OMSetRenderTargets
-    rec::OMSetBlendState as *const (),          // 25 OMSetBlendState
-    rec::OMSetDepthStencilState as *const (),   // 26 OMSetDepthStencilState
-    rec::SOSetTargets as *const (),             // 27 SOSetTargets
-    rec::DrawAuto as *const (),                 // 28 DrawAuto
-    rec::RSSetState as *const (),               // 29 RSSetState
-    rec::RSSetViewports as *const (),           // 30 RSSetViewports
-    rec::RSSetScissorRects as *const (),        // 31 RSSetScissorRects
-    rec::CopySubresourceRegion as *const (),    // 32 CopySubresourceRegion
-    d_CopyResource as *const (),                // 33 CopyResource
-    rec::UpdateSubresource as *const (),        // 34 UpdateSubresource
-    rec::ClearRenderTargetView as *const (),    // 35 ClearRenderTargetView
-    rec::ClearDepthStencilView as *const (),    // 36 ClearDepthStencilView
-    rec::GenerateMips as *const (),             // 37 GenerateMips
-    rec::ResolveSubresource as *const (),       // 38 ResolveSubresource
-    rec::VSGetConstantBuffers as *const (),     // 39 VSGetConstantBuffers
-    rec::PSGetShaderResources as *const (),     // 40 PSGetShaderResources
-    rec::PSGetShader as *const (),              // 41 PSGetShader
-    rec::PSGetSamplers as *const (),            // 42 PSGetSamplers
-    rec::VSGetShader as *const (),              // 43 VSGetShader
-    rec::PSGetConstantBuffers as *const (),     // 44 PSGetConstantBuffers
-    rec::IAGetInputLayout as *const (),         // 45 IAGetInputLayout
-    rec::IAGetVertexBuffers as *const (),       // 46 IAGetVertexBuffers
-    rec::IAGetIndexBuffer as *const (),         // 47 IAGetIndexBuffer
-    rec::GSGetConstantBuffers as *const (),     // 48 GSGetConstantBuffers
-    rec::GSGetShader as *const (),              // 49 GSGetShader
-    rec::IAGetPrimitiveTopology as *const (),   // 50 IAGetPrimitiveTopology
-    rec::VSGetShaderResources as *const (),     // 51 VSGetShaderResources
-    rec::VSGetSamplers as *const (),            // 52 VSGetSamplers
-    rec::GetPredication as *const (),           // 53 GetPredication
-    rec::GSGetShaderResources as *const (),     // 54 GSGetShaderResources
-    rec::GSGetSamplers as *const (),            // 55 GSGetSamplers
-    rec::OMGetRenderTargets as *const (),       // 56 OMGetRenderTargets
-    rec::OMGetBlendState as *const (),          // 57 OMGetBlendState
-    rec::OMGetDepthStencilState as *const (),   // 58 OMGetDepthStencilState
-    rec::SOGetTargets as *const (),             // 59 SOGetTargets
-    rec::RSGetState as *const (),               // 60 RSGetState
-    rec::RSGetViewports as *const (),           // 61 RSGetViewports
-    rec::RSGetScissorRects as *const (),        // 62 RSGetScissorRects
-    d_GetDeviceRemovedReason as *const (),      // 63 GetDeviceRemovedReason
-    rec::SetExceptionMode as *const (),         // 64 SetExceptionMode
-    rec::GetExceptionMode as *const (),         // 65 GetExceptionMode
-    d_GetPrivateData as *const (),              // 66 GetPrivateData
-    d_SetPrivateData as *const (),              // 67 SetPrivateData
-    d_SetPrivateDataInterface as *const (),     // 68 SetPrivateDataInterface
-    rec::ClearState as *const (),               // 69 ClearState
-    d_Flush as *const (),                       // 70 Flush
-    rec::CreateBuffer as *const (),             // 71 CreateBuffer
-    rec::CreateTexture1D as *const (),          // 72 CreateTexture1D
-    d_CreateTexture2D as *const (),             // 73 CreateTexture2D
-    rec::CreateTexture3D as *const (),          // 74 CreateTexture3D
-    rec::CreateShaderResourceView as *const (), // 75 CreateShaderResourceView
-    rec::CreateRenderTargetView as *const (),   // 76 CreateRenderTargetView
-    rec::CreateDepthStencilView as *const (),   // 77 CreateDepthStencilView
-    rec::CreateInputLayout as *const (),        // 78 CreateInputLayout
-    rec::CreateVertexShader as *const (),       // 79 CreateVertexShader
-    rec::CreateGeometryShader as *const (),     // 80 CreateGeometryShader
+    d_QueryInterface as *const (),                  // 0 QueryInterface
+    crate::add_ref as *const (),                    // 1 AddRef
+    d_Release as *const (),                         // 2 Release
+    rec::VSSetConstantBuffers as *const (),         // 3 VSSetConstantBuffers
+    rec::PSSetShaderResources as *const (),         // 4 PSSetShaderResources
+    rec::PSSetShader as *const (),                  // 5 PSSetShader
+    rec::PSSetSamplers as *const (),                // 6 PSSetSamplers
+    rec::VSSetShader as *const (),                  // 7 VSSetShader
+    rec::DrawIndexed as *const (),                  // 8 DrawIndexed
+    rec::Draw as *const (),                         // 9 Draw
+    rec::PSSetConstantBuffers as *const (),         // 10 PSSetConstantBuffers
+    rec::IASetInputLayout as *const (),             // 11 IASetInputLayout
+    rec::IASetVertexBuffers as *const (),           // 12 IASetVertexBuffers
+    rec::IASetIndexBuffer as *const (),             // 13 IASetIndexBuffer
+    rec::DrawIndexedInstanced as *const (),         // 14 DrawIndexedInstanced
+    rec::DrawInstanced as *const (),                // 15 DrawInstanced
+    rec::GSSetConstantBuffers as *const (),         // 16 GSSetConstantBuffers
+    rec::GSSetShader as *const (),                  // 17 GSSetShader
+    rec::IASetPrimitiveTopology as *const (),       // 18 IASetPrimitiveTopology
+    rec::VSSetShaderResources as *const (),         // 19 VSSetShaderResources
+    rec::VSSetSamplers as *const (),                // 20 VSSetSamplers
+    rec::SetPredication as *const (),               // 21 SetPredication
+    rec::GSSetShaderResources as *const (),         // 22 GSSetShaderResources
+    rec::GSSetSamplers as *const (),                // 23 GSSetSamplers
+    rec::OMSetRenderTargets as *const (),           // 24 OMSetRenderTargets
+    rec::OMSetBlendState as *const (),              // 25 OMSetBlendState
+    rec::OMSetDepthStencilState as *const (),       // 26 OMSetDepthStencilState
+    rec::SOSetTargets as *const (),                 // 27 SOSetTargets
+    rec::DrawAuto as *const (),                     // 28 DrawAuto
+    rec::RSSetState as *const (),                   // 29 RSSetState
+    rec::RSSetViewports as *const (),               // 30 RSSetViewports
+    rec::RSSetScissorRects as *const (),            // 31 RSSetScissorRects
+    rec::CopySubresourceRegion as *const (),        // 32 CopySubresourceRegion
+    traced::d_CopyResource as *const (),            // 33 CopyResource
+    rec::UpdateSubresource as *const (),            // 34 UpdateSubresource
+    rec::ClearRenderTargetView as *const (),        // 35 ClearRenderTargetView
+    rec::ClearDepthStencilView as *const (),        // 36 ClearDepthStencilView
+    rec::GenerateMips as *const (),                 // 37 GenerateMips
+    rec::ResolveSubresource as *const (),           // 38 ResolveSubresource
+    rec::VSGetConstantBuffers as *const (),         // 39 VSGetConstantBuffers
+    rec::PSGetShaderResources as *const (),         // 40 PSGetShaderResources
+    rec::PSGetShader as *const (),                  // 41 PSGetShader
+    rec::PSGetSamplers as *const (),                // 42 PSGetSamplers
+    rec::VSGetShader as *const (),                  // 43 VSGetShader
+    rec::PSGetConstantBuffers as *const (),         // 44 PSGetConstantBuffers
+    rec::IAGetInputLayout as *const (),             // 45 IAGetInputLayout
+    rec::IAGetVertexBuffers as *const (),           // 46 IAGetVertexBuffers
+    rec::IAGetIndexBuffer as *const (),             // 47 IAGetIndexBuffer
+    rec::GSGetConstantBuffers as *const (),         // 48 GSGetConstantBuffers
+    rec::GSGetShader as *const (),                  // 49 GSGetShader
+    rec::IAGetPrimitiveTopology as *const (),       // 50 IAGetPrimitiveTopology
+    rec::VSGetShaderResources as *const (),         // 51 VSGetShaderResources
+    rec::VSGetSamplers as *const (),                // 52 VSGetSamplers
+    rec::GetPredication as *const (),               // 53 GetPredication
+    rec::GSGetShaderResources as *const (),         // 54 GSGetShaderResources
+    rec::GSGetSamplers as *const (),                // 55 GSGetSamplers
+    rec::OMGetRenderTargets as *const (),           // 56 OMGetRenderTargets
+    rec::OMGetBlendState as *const (),              // 57 OMGetBlendState
+    rec::OMGetDepthStencilState as *const (),       // 58 OMGetDepthStencilState
+    rec::SOGetTargets as *const (),                 // 59 SOGetTargets
+    rec::RSGetState as *const (),                   // 60 RSGetState
+    rec::RSGetViewports as *const (),               // 61 RSGetViewports
+    rec::RSGetScissorRects as *const (),            // 62 RSGetScissorRects
+    traced::d_GetDeviceRemovedReason as *const (),  // 63 GetDeviceRemovedReason
+    rec::SetExceptionMode as *const (),             // 64 SetExceptionMode
+    rec::GetExceptionMode as *const (),             // 65 GetExceptionMode
+    traced::d_GetPrivateData as *const (),          // 66 GetPrivateData
+    traced::d_SetPrivateData as *const (),          // 67 SetPrivateData
+    traced::d_SetPrivateDataInterface as *const (), // 68 SetPrivateDataInterface
+    rec::ClearState as *const (),                   // 69 ClearState
+    traced::d_Flush as *const (),                   // 70 Flush
+    rec::CreateBuffer as *const (),                 // 71 CreateBuffer
+    rec::CreateTexture1D as *const (),              // 72 CreateTexture1D
+    traced::d_CreateTexture2D as *const (),         // 73 CreateTexture2D
+    rec::CreateTexture3D as *const (),              // 74 CreateTexture3D
+    rec::CreateShaderResourceView as *const (),     // 75 CreateShaderResourceView
+    rec::CreateRenderTargetView as *const (),       // 76 CreateRenderTargetView
+    rec::CreateDepthStencilView as *const (),       // 77 CreateDepthStencilView
+    rec::CreateInputLayout as *const (),            // 78 CreateInputLayout
+    rec::CreateVertexShader as *const (),           // 79 CreateVertexShader
+    rec::CreateGeometryShader as *const (),         // 80 CreateGeometryShader
     rec::CreateGeometryShaderWithStreamOutput as *const (), // 81 CreateGeometryShaderWithStreamOutput
     rec::CreatePixelShader as *const (),                    // 82 CreatePixelShader
     rec::CreateBlendState as *const (),                     // 83 CreateBlendState
@@ -545,15 +565,127 @@ static DEVICE_VTBL: VTable<101> = VTable([
     rec::CreateQuery as *const (),                          // 87 CreateQuery
     rec::CreatePredicate as *const (),                      // 88 CreatePredicate
     rec::CreateCounter as *const (),                        // 89 CreateCounter
-    d_CheckFormatSupport as *const (),                      // 90 CheckFormatSupport
-    d_CheckMultisampleQualityLevels as *const (),           // 91 CheckMultisampleQualityLevels
+    traced::d_CheckFormatSupport as *const (),              // 90 CheckFormatSupport
+    traced::d_CheckMultisampleQualityLevels as *const (),   // 91 CheckMultisampleQualityLevels
     rec::CheckCounterInfo as *const (),                     // 92 CheckCounterInfo
     rec::CheckCounter as *const (),                         // 93 CheckCounter
-    d_GetCreationFlags as *const (),                        // 94 GetCreationFlags
+    traced::d_GetCreationFlags as *const (),                // 94 GetCreationFlags
     rec::OpenSharedResource as *const (),                   // 95 OpenSharedResource
     rec::SetTextFilterSize as *const (),                    // 96 SetTextFilterSize
     rec::GetTextFilterSize as *const (),                    // 97 GetTextFilterSize
     rec::CreateShaderResourceView1 as *const (),            // 98 CreateShaderResourceView1
     rec::CreateBlendState1 as *const (),                    // 99 CreateBlendState1
-    d_GetFeatureLevel as *const (),                         // 100 GetFeatureLevel
+    traced::d_GetFeatureLevel as *const (),                 // 100 GetFeatureLevel
 ]);
+
+// ==== generated by `cargo xtask gen-trace`: do not edit ====
+/// The wrapper of every vtable slot of this module: each records
+/// the first call that reaches its method, and every call at all
+/// once `trace_from=` has armed one (`cargo xtask gen-trace`).
+pub(crate) mod traced {
+    use super::*;
+    /// ID3D10Device::CheckFormatSupport, traced.
+    pub(super) extern "system" fn d_CheckFormatSupport(
+        this: Obj,
+        format: u32,
+        support: *mut u32,
+    ) -> HResult {
+        crate::traced!(b"ID3D10Device::CheckFormatSupport", [this, format, support]);
+        let answer = super::d_CheckFormatSupport(this, format, support);
+        crate::answered_call!(b"ID3D10Device::CheckFormatSupport", answer);
+        answer
+    }
+    /// ID3D10Device::CheckMultisampleQualityLevels, traced.
+    pub(super) extern "system" fn d_CheckMultisampleQualityLevels(
+        this: Obj,
+        format: u32,
+        count: u32,
+        levels: *mut u32,
+    ) -> HResult {
+        crate::traced!(
+            b"ID3D10Device::CheckMultisampleQualityLevels",
+            [this, format, count, levels]
+        );
+        let answer = super::d_CheckMultisampleQualityLevels(this, format, count, levels);
+        crate::answered_call!(b"ID3D10Device::CheckMultisampleQualityLevels", answer);
+        answer
+    }
+    /// ID3D10Device::CopyResource, traced.
+    pub(super) extern "system" fn d_CopyResource(this: Obj, dst: Obj, src: Obj) {
+        crate::traced!(b"ID3D10Device::CopyResource", [this, dst, src]);
+        super::d_CopyResource(this, dst, src)
+    }
+    /// ID3D10Device::CreateTexture2D, traced.
+    pub(super) extern "system" fn d_CreateTexture2D(
+        this: Obj,
+        desc: *const c_void,
+        data: *const c_void,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::traced!(b"ID3D10Device::CreateTexture2D", [this, desc, data, out]);
+        let answer = super::d_CreateTexture2D(this, desc, data, out);
+        crate::answered_call!(b"ID3D10Device::CreateTexture2D", answer);
+        answer
+    }
+    /// ID3D10Device::Flush, traced.
+    pub(super) extern "system" fn d_Flush(this: Obj) {
+        crate::traced!(b"ID3D10Device::Flush", [this]);
+        super::d_Flush(this)
+    }
+    /// ID3D10Device::GetCreationFlags, traced.
+    pub(super) extern "system" fn d_GetCreationFlags(this: Obj) -> u32 {
+        crate::traced!(b"ID3D10Device::GetCreationFlags", [this]);
+        let answer = super::d_GetCreationFlags(this);
+        crate::answered_call!(b"ID3D10Device::GetCreationFlags", answer);
+        answer
+    }
+    /// ID3D10Device::GetDeviceRemovedReason, traced.
+    pub(super) extern "system" fn d_GetDeviceRemovedReason(this: Obj) -> HResult {
+        crate::traced!(b"ID3D10Device::GetDeviceRemovedReason", [this]);
+        let answer = super::d_GetDeviceRemovedReason(this);
+        crate::answered_call!(b"ID3D10Device::GetDeviceRemovedReason", answer);
+        answer
+    }
+    /// ID3D10Device1::GetFeatureLevel, traced.
+    pub(super) extern "system" fn d_GetFeatureLevel(this: Obj) -> u32 {
+        crate::traced!(b"ID3D10Device1::GetFeatureLevel", [this]);
+        let answer = super::d_GetFeatureLevel(this);
+        crate::answered_call!(b"ID3D10Device1::GetFeatureLevel", answer);
+        answer
+    }
+    /// ID3D10Device::GetPrivateData, traced.
+    pub(super) extern "system" fn d_GetPrivateData(
+        this: Obj,
+        guid: *const Guid,
+        size: *mut u32,
+        data: *mut c_void,
+    ) -> HResult {
+        crate::traced!(b"ID3D10Device::GetPrivateData", [this, guid, size, data]);
+        let answer = super::d_GetPrivateData(this, guid, size, data);
+        crate::answered_call!(b"ID3D10Device::GetPrivateData", answer);
+        answer
+    }
+    /// ID3D10Device::SetPrivateData, traced.
+    pub(super) extern "system" fn d_SetPrivateData(
+        this: Obj,
+        guid: *const Guid,
+        size: u32,
+        data: *const c_void,
+    ) -> HResult {
+        crate::traced!(b"ID3D10Device::SetPrivateData", [this, guid, size, data]);
+        let answer = super::d_SetPrivateData(this, guid, size, data);
+        crate::answered_call!(b"ID3D10Device::SetPrivateData", answer);
+        answer
+    }
+    /// ID3D10Device::SetPrivateDataInterface, traced.
+    pub(super) extern "system" fn d_SetPrivateDataInterface(
+        this: Obj,
+        guid: *const Guid,
+        data: Obj,
+    ) -> HResult {
+        crate::traced!(b"ID3D10Device::SetPrivateDataInterface", [this, guid, data]);
+        let answer = super::d_SetPrivateDataInterface(this, guid, data);
+        crate::answered_call!(b"ID3D10Device::SetPrivateDataInterface", answer);
+        answer
+    }
+}

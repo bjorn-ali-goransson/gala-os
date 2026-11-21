@@ -37,6 +37,12 @@ use gala_heap as _;
 
 include!("../../gpu_common.rs");
 
+// The DLL half of `trace_from=` and the records a generated vtable
+// wrapper leaves, one file shared with gala's other traced DLLs
+// (`user/trace_common.rs`, OBSERVABILITY "Call tracing").
+#[path = "../../trace_common.rs"]
+pub mod trace;
+
 // The memory routines come from gala's ntdll (as other DLLs on `alloc`
 // take them).
 #[allow(dead_code)]
@@ -67,11 +73,16 @@ pub const E_OUTOFMEMORY: HResult = 0x8007_000e_u32 as i32;
 const LEDGER_UNSUPPORTED: u32 = 2;
 const LEDGER_NOT_IMPLEMENTED: u32 = 3;
 const LEDGER_OTHER: u32 = 5;
+const LEDGER_REACHED: u32 = 9;
+
+/// This DLL's name as the ledger spells it: the prefix of every row
+/// it writes and of every name a trace reports (`trace_common.rs`).
+const DLL_NAME: &[u8] = b"d3d10_1.dll!";
 
 fn record_kind(what: &[u8], kind: u32, detail: u64) {
     let mut name = [0u8; 96];
     let mut n = 0;
-    for &b in b"d3d10_1.dll!".iter().chain(what) {
+    for &b in DLL_NAME.iter().chain(what) {
         if n == name.len() {
             break;
         }

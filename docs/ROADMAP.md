@@ -1968,9 +1968,11 @@ need gala's.
    thing to read, and the ledger cannot say: it holds no
    `d3d10_1.dll!ID3D10Device1::` row at all, so every method Word
    called is one gala answers, and which they were and in what order is
-   what `trace_from=` records (OBSERVABILITY "Call tracing"; `cargo
-   xtask gen-trace` wraps d2d1's slots today, so wrapping d3d10_1's is
-   the step). The
+   what `trace_from=` records: d3d10_1's slots are wrapped now, the
+   device's implemented methods and its eighty-seven E_NOTIMPL stubs
+   alike (`cargo xtask gen-trace`, scenario `trace_from_d3d10_test`,
+   OBSERVABILITY "Call tracing"), so the reading is a run with the
+   trace armed at the last method the ledger shows Word reaching. The
    message itself is Word's own `user32!MessageBoxW`, and the stack at
    its write names who asked for it: `Mso20win32client.dll`'s frame
    directly above user32's, then `MSO.DLL` and `Mso30win32client.dll`
@@ -6590,7 +6592,8 @@ among the slowest hand-offs.
    program's own address space: the kernel cannot see it, and the
    `reached` records that found Word's last call are typed by hand, so
    the gap is always the method nobody instrumented. Three pieces:
-   - **A wrapper per vtable slot, generated.** Done for d2d1:
+   - **A wrapper per vtable slot, generated.** Done for d2d1 and
+     d3d10_1:
      `cargo xtask gen-trace` reads each slot list and the interface each
      slot belongs to (`// gen-trace` directives beside the list), and
      writes a wrapper per slot into the DLL's own source -- a generated
@@ -6604,7 +6607,15 @@ among the slowest hand-offs.
      the function it wraps, and a wrapper that knows its arguments can
      record them when asked to. 225 slots of d2d1 are wrapped, against
      the 204 that were written by hand; the hand-written records are
-     gone. Next: dwrite, whose functions are named in snake_case
+     gone. d3d10_1 followed, 21 slots of its device and texture
+     vtables, and its other eighty-seven -- the stubs one `recorders!`
+     macro writes, each already recording a row under its own name --
+     report to an armed trace without a second record, which a
+     `records <module>` directive is how the generator is told
+     (OBSERVABILITY "Call tracing"). The runtime both DLLs report
+     through is one file, `user/trace_common.rs`, declared as each DLL's
+     own `trace` module; a DLL brings its ledger name and its own `Arg`
+     impls to it. Next: dwrite, whose functions are named in snake_case
      (`collection_family_count`), so they are renamed to d2d1's
      `<prefix>_<Method>` convention first and the generator then derives
      their names like the rest.
@@ -6626,9 +6637,10 @@ among the slowest hand-offs.
      DLL, which stops making the call, and the closing line says the
      trace ended rather than the program -- a stream that simply stopped
      would read as a program that stopped calling
-     (`kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs`, scenarios
-     `trace_from_test`, `trace_from_budget_test` and
-     `trace_from_answer_test`, OBSERVABILITY "Call tracing"). What a
+     (`kernel/src/nt/tracecall.rs`, `user/trace_common.rs`, scenarios
+     `trace_from_test`, `trace_from_budget_test`,
+     `trace_from_answer_test` and `trace_from_d3d10_test`,
+     OBSERVABILITY "Call tracing"). What a
      call answered is recorded with it: the generator knows which
      methods return something and puts a second record in those
      wrappers, so the answer is a `ret` event naming the same method,
