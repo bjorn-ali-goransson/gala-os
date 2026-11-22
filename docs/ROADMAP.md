@@ -2237,11 +2237,16 @@ need gala's.
      SetSystemFileCacheSize over ntdll's NtSetSystemInformation (six
      times), HeapQueryInformation's class, and the interface gala's
      dxgi refuses CreateDXGIFactory1 (three times). gdi32's
-     D3DKMTEnumAdapters2 and D3DKMTQueryAdapterInfo (sixteen each,
-     which the Vulkan loader tries before the registry's list of
-     drivers) are measured and answered: no adapters, and no handle
-     ever issued to ask about (`user/d3dkmt_test`,
-     `user/gdi32/src/d3dkmt.rs`).
+     D3DKMTEnumAdapters2 and D3DKMTQueryAdapterInfo, which the Vulkan
+     loader tries before the registry's list of drivers, are measured
+     and answered: no adapters, and no handle ever issued to ask about
+     (`user/d3dkmt_test`, `user/gdi32/src/d3dkmt.rs`). The sixteen
+     lookups of each that the ledger used to name are a found export
+     now, and the run makes one call: Word asks how many adapters
+     there are, hears none, and never asks an adapter anything
+     (`D3DKMTEnumAdapters2(no adapters)`, one hit, the room it offered
+     0). Word stops where it did -- "(13)", status 0 after 32.8 s --
+     so this was a gap and not the cause.
      A run with every system call traced from boot takes a different
      path, not a slower one: it stops in `MsoSplash`, asking
      RoGetActivationFactory for
