@@ -31,6 +31,7 @@ dpapi_test
 dwrite_test
 etw_test
 etwarm_test
+etwfields_test
 exception_test
 file_test
 filemap_test

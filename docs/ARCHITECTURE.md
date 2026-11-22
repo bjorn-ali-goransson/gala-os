@@ -4857,8 +4857,9 @@ definition for both layouts, "Plan: WOW64").
   runs with no lock held, because it is the program's own code and may
   register a provider of its own. An event in reach is kept in the
   session's buffers as its provider, descriptor and payload bytes
-  (nothing decodes them yet, ROADMAP OT4); one that does not fit counts
-  towards the EventsLost a query reports. Two answers are gala's
+  (nothing in gala consumes a buffering session's events; what reads
+  an event is the session gala starts, below); one that does not fit
+  counts towards the EventsLost a query reports. Two answers are gala's
   reading where Windows is not measured: what MatchAllKeyword means
   when several sessions ask for one (a session that demands no
   particular bits frees the provider of the other's demand), and how
@@ -4891,8 +4892,18 @@ definition for both layouts, "Plan: WOW64").
   empty one) cannot find it, and its handle is never handed out, so it
   can be neither queried nor stopped. It keeps no buffers either --
   each event in reach goes to the kernel as it is written (`GalaEtw`
-  op 1: the provider id, the event descriptor as the program built it,
-  and the payload's length) and is one `etw:` line. The kernel answers
+  op 1) and is one `etw:` line. What goes over is the provider id, the
+  event descriptor as the program built it, the whole payload's length,
+  and then the event in three pieces: the provider's metadata, the
+  event's, and the values. Three and not one buffer, because the first
+  two are what make the third readable -- TraceLogging marks them as
+  descriptors of their own (types 2 and 1), and they hold the names of
+  the event and of every field in it, which the kernel's
+  `etw::tracelogging` reads. An event with neither is a manifest
+  provider's, whose names are in no part of it, and the record says
+  that rather than leaving the kernel to guess from the bytes; one
+  longer than a record holds is cut, and says that too, so that a line
+  cut to fit is never read as an event that ended. The kernel answers
   that write STATUS_NO_MORE_ENTRIES once the run's event budget is
   spent, and advapi32 then tells every provider the session asked for
   that it is gone, by the path a ControlTraceW stop uses: a program
@@ -4904,7 +4915,13 @@ definition for both layouts, "Plan: WOW64").
   `TraceLoggingProvider.h` gives the algorithm and an example, which
   `nt::etw::name_guid`'s host test checks against). `etw=*` asks for
   every provider the program registers, which is one enable per
-  registration and so needs nothing of the union rule above.
+  registration and so needs nothing of the union rule above. A run
+  may also spend the session on one program: `etw_from=<text>` is
+  answered in the ask itself (op 0), and a process whose name does not
+  have the text in it is refused there exactly as one with no session
+  at all is -- so its TraceLogging builds no payload either, and a
+  service's chatter never reaches the budget instead of being dropped
+  once it has been counted.
 - **Performance counters** (`perf.rs`): the PerfLib V2 provider functions
   keep providers, counter-set templates and instances
   (PERF_COUNTERSET_INSTANCE, the data block at the counters' offsets, the
@@ -16971,7 +16988,12 @@ New code follows them; old code is brought in line (ROADMAP R1).
    depend on it. Under clock control `time.rs` has two faces: the
    programs' clock (`ticks`, `monotonic_ns`, `system_time`: virtual when
    `clock=` is given) and the raw one (`raw_ticks`, `raw_monotonic_ns`)
-   for the kernel's own diagnostics and sleeps.
+   for the kernel's own diagnostics and sleeps. The calendar
+   (`kernel/src/calendar.rs`) is not a second clock and is not behind
+   the seam: it turns a count it is handed into a date and reads
+   nothing, which is why `nt/` uses it directly -- the taskbar's clock
+   and a date in a program's own telemetry print the same day because
+   it is the kernel's one copy of the conversion.
 
 ### Safety nets
 

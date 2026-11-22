@@ -18,6 +18,7 @@ extern crate std;
 pub mod arch;
 #[allow(unsafe_code)]
 pub mod boot;
+pub mod calendar;
 pub mod clockcal;
 pub mod clockctl;
 pub mod cmdline;
@@ -406,6 +407,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // reaches that method (nt::tracecall). Needs `events=call`.
     if let Some(spec) = cmdline.value("trace_from") {
         nt::tracecall::set_from(spec);
+    }
+    // `etw_from=<text>`: of the events that session would keep, only
+    // those a process whose name has the text in it wrote. Read before
+    // `etw=`, so the line that says what the session is for says this
+    // too (nt::etw).
+    if let Some(text) = cmdline.value("etw_from") {
+        nt::etw::only_from(text);
     }
     // `etw=<provider or name>[:<level>[:<keyword>[:<n>]]]`: the trace
     // session gala starts on a program's behalf, so that a run reads the

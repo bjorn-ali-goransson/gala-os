@@ -1827,7 +1827,8 @@ data first, which disarms the slot (below), so that one leaves a
 session on a program's behalf, so that a run reads what a program says
 about its own work without the program asking for it (the kernel's half
 in `kernel/src/nt/etw/mod.rs`, advapi32's in `trace.rs`, ARCHITECTURE
-"advapi32"; scenarios `etwarm_test`, `etw_armed` and `etw_armed_all`).
+"advapi32"; scenarios `etwarm_test`, `etw_armed`, `etw_armed_all`,
+`etw_from` and `etw_from_elsewhere`).
 Without it a program's telemetry leaves nothing behind but its
 registrations, because **a provider no session enabled writes nothing at
 all** -- TraceLogging does not even build the payload. That is measured
@@ -1846,28 +1847,72 @@ does not read leaves a `warn:` line saying what it should have been and
 starts no session, because an option misspelt must not look like a
 program that never traces.
 
+`etw_from=<text>` spends the session on the program the run is about:
+only a process whose name has the text in it is given the session,
+upper and lower case being the same letter (a process is `WINWORD.EXE`
+to the kernel and `winword` to the run that asked for it).
+
+```
+etw: a session for Gala.Test.Arm (2542af41-3d78-596e-ff31-017dbbeacc32), level 5 and every keyword, 256 events at most, and only for a process whose name has etwarm in it (etw=)
+```
+
+The filter is in the ask and not only in the line a kept event leaves:
+a process the run is not about is told nobody is listening, so its
+TraceLogging builds no payload at all and its events never reach the
+budget. That is what the option is for, and it is measured rather than
+supposed -- an `office_word` run armed for every provider gave 1834 of
+its 2048 lines to OfficeClickToRun.exe, the service Word starts and
+nobody was reading, while Word's own providers registered (at 59.1 s)
+after the budget was gone, ten seconds before the startup failure the
+run was about. `etw_from=` given without `etw=` starts no session and
+says so, because a filter with nothing to filter must not read as a
+program that wrote nothing.
+
 ```
 etw: a session for Gala.Test.Arm (2542af41-3d78-596e-ff31-017dbbeacc32), level 5 and every keyword, 256 events at most (etw=)
-etw: etwarm_test.exe 2542af41-3d78-596e-ff31-017dbbeacc32 level 4 keyword 0x0, 49 bytes
+etw: provider Gala.Test.Arm is 2542af41-3d78-596e-ff31-017dbbeacc32
+etw: etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why="armed"
 etw: 1 event written to the session, from 1 provider (etw=)
 ```
 
 - The first line says what was asked for, with the id a name hashed to:
   a run whose provider never appears can then be told from one whose
   name hashed to something the program does not register.
-- A line per event: the process that wrote it, the provider, the level
-  and keyword of the event's own descriptor, and how many bytes of
-  payload it carried. Nothing is decoded yet -- the payload's pieces
-  come with the types that say what they are only once the metadata
-  decoder exists (ROADMAP OT4), and a count of bytes is what a line can
-  honestly say until then.
+- A line per provider, at its first event, giving the name it calls
+  itself by for the id in the lines after it: a run that asked for `*`
+  has nothing else to read those ids by.
+- A line per event: the process that wrote it, the provider and the
+  event by the names the program gave them, the level and keyword of
+  the event's own descriptor, and every field with its own name and
+  value (`kernel/src/nt/etw/tracelogging.rs`, the metadata
+  TraceLogging ships beside each event). What a field looks like is
+  what the program asked for: a string quoted, a FILETIME as a date, a
+  GUID as a GUID, an out-type of hex as hex, an array in brackets and
+  a struct in braces.
+- A line that cannot go on stops where it stopped and says why in
+  brackets -- the values ended, a type the decoder does not know, a
+  custom type whose length only its own description gives, metadata
+  ending mid-field -- and `(the rest was cut to fit)` where it was
+  gala's own record size that ended it rather than anything wrong with
+  the event. Bytes no field claimed are said too
+  (`(+N byte(s) no field claims)`): a length read wrongly must not
+  pass as a line that read.
+- An event with no TraceLogging metadata is a manifest provider's,
+  whose field names live in a manifest outside the program and are in
+  no part of the event. Its line is the provider's id, the level and
+  keyword, and the payload's size, with which of the two it was
+  (`no field metadata: a manifest provider's event`, or `its field
+  metadata does not read`) -- so a reader knows whether to look.
 - The closing line counts what the session got, and says so when the
   budget ended the session before the program ended: a run must not read
   as a program that stopped writing when it was the session that stopped
-  listening. A session that got nothing says that too, with the two
-  reasons it can have -- no provider the session asked for, or no write
-  in reach of the level and keyword -- rather than leaving a reader with
-  silence to interpret.
+  listening. A session that got nothing says that too, with the reasons
+  it can have -- no process under the name `etw_from=` named, no
+  provider the session asked for, or no write in reach of the level and
+  keyword -- rather than leaving a reader with silence to interpret. The
+  filter is named first among them and by the text that was typed,
+  because a process that never ran under that name looks exactly like a
+  program that wrote nothing.
 
 The program is told of this session the way it would be told of one it
 started itself, in the enable callback of each registration, and of

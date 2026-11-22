@@ -784,10 +784,25 @@ const OP_RECORD: usize = 1;
 const ASK_LEN: usize = 32;
 /// Bit 0 of that flags byte: every provider the program registers.
 const ASK_EVERY: u8 = 1;
-/// The record op 1 takes (`etw::RECORD_LEN`): the provider id, the event
-/// descriptor as the program built it, and the payload's length.
-const KERNEL_RECORD: usize = 36;
+/// The header op 1 takes (`etw::RECORD_HEAD`): the provider id, the
+/// event descriptor as the program built it, the whole payload's length,
+/// then the lengths of the provider's metadata, the event's metadata and
+/// the values, and the flags below.
+const KERNEL_HEAD: usize = 44;
+/// The most one record holds, header and blobs (`etw::RECORD_MAX`).
+const KERNEL_MAX: usize = 2048;
+/// The values did not fit and were cut (`etw::RECORD_CUT`).
+const KERNEL_CUT: u16 = 1;
+/// The event carried no TraceLogging metadata (`etw::RECORD_NO_META`).
+const KERNEL_NO_META: u16 = 2;
+/// What TraceLogging marks its two metadata pieces with
+/// (EVENT_DATA_DESCRIPTOR_TYPE_PROVIDER_METADATA and _EVENT_METADATA).
+const META_PROVIDER: u32 = 2;
+const META_EVENT: u32 = 1;
 
+/// How long a record a session keeps: the header, the descriptor and
+/// the payload. An event longer than this is counted lost rather than
+/// cut in half, because half a TraceLogging event decodes as nothing.
 const RECORD_MAX: usize = 4096;
 
 /// What a kept event costs besides its payload: its length, the
@@ -899,8 +914,22 @@ pub(crate) fn arm(guid: &[u8; 16]) {
 /// One event handed to the session gala started (`GalaEtw` op 1). False
 /// once its budget is spent, which is what ends that session: nothing is
 /// gained by building payloads for a reader that has stopped reading.
-fn to_kernel(guid: &[u8; 16], descriptor: *const u8, payload: usize) -> bool {
-    let mut record = [0u8; KERNEL_RECORD];
+///
+/// The pieces go over as three blobs, because that is what makes the
+/// event readable: TraceLogging marks the first two of its descriptors
+/// as the provider's metadata and the event's, and those hold the names
+/// of the event and of every field in it (the kernel's
+/// `etw::tracelogging`). An event with neither is a manifest provider's,
+/// whose names are in no part of it, and the record says so rather than
+/// leaving the kernel to guess from the bytes.
+fn to_kernel(
+    guid: &[u8; 16],
+    descriptor: *const u8,
+    count: u32,
+    data: *const u8,
+    payload: usize,
+) -> bool {
+    let mut record = [0u8; KERNEL_MAX];
     record[..16].copy_from_slice(guid);
     if !descriptor.is_null() {
         // SAFETY: the caller's EVENT_DESCRIPTOR, sixteen bytes by
@@ -908,8 +937,43 @@ fn to_kernel(guid: &[u8; 16], descriptor: *const u8, payload: usize) -> bool {
         unsafe { core::ptr::copy_nonoverlapping(descriptor, record.as_mut_ptr().add(16), 16) };
     }
     record[32..36].copy_from_slice(&(payload as u32).to_le_bytes());
+    let pieces = if data.is_null() { 0 } else { count as usize };
+    let piece = |i: usize| {
+        // SAFETY: the caller's array of `count` descriptors, within it.
+        unsafe { &*(data as *const DataDescriptor).add(i) }
+    };
+    let metadata = pieces >= 2 && piece(0).kind == META_PROVIDER && piece(1).kind == META_EVENT;
+    let mut flags = if metadata { 0 } else { KERNEL_NO_META };
+    let mut lengths = [0usize; 3];
+    let mut at = KERNEL_HEAD;
+    for i in 0..pieces {
+        let d = piece(i);
+        // The two metadata pieces are their own blobs; everything else
+        // is the values, in the order the program wrote them.
+        let which = if metadata && i < 2 { i } else { 2 };
+        let mut n = if d.data == 0 { 0 } else { d.size as usize };
+        if n > KERNEL_MAX - at {
+            n = KERNEL_MAX - at;
+            // Said in the record, so that the line says the values were
+            // cut to fit rather than that the event ended there.
+            flags |= KERNEL_CUT;
+        }
+        if n != 0 {
+            // SAFETY: `n` bytes of the piece the caller gave, into this
+            // frame's own buffer with that much room left in it.
+            unsafe {
+                core::ptr::copy_nonoverlapping(d.data as *const u8, record.as_mut_ptr().add(at), n)
+            };
+        }
+        at += n;
+        lengths[which] += n;
+    }
+    for (i, &length) in lengths.iter().enumerate() {
+        record[36 + i * 2..38 + i * 2].copy_from_slice(&(length as u16).to_le_bytes());
+    }
+    record[42..44].copy_from_slice(&flags.to_le_bytes());
     // SAFETY: a buffer this frame owns, of the length given.
-    let status = unsafe { crate::GalaEtw(OP_RECORD, record.as_ptr() as usize, record.len(), 0) };
+    let status = unsafe { crate::GalaEtw(OP_RECORD, record.as_ptr() as usize, at, 0) };
     status == 0
 }
 
@@ -949,7 +1013,7 @@ pub(crate) fn keep(
             // the kernel as it is written, and its budget running out is
             // what ends the session.
             if s.to_kernel {
-                if !to_kernel(guid, descriptor, payload) {
+                if !to_kernel(guid, descriptor, count, data, payload) {
                     s.live = false;
                     over = Some(s.handle);
                 }

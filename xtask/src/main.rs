@@ -10976,6 +10976,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("etwarm_test", "ntdll.dll", "Windows/System32"),
     ("etwarm_test", "kernel32.dll", "Windows/System32"),
     ("etwarm_test", "advapi32.dll", "Windows/System32"),
+    ("etwfields_test", "ntdll.dll", "Windows/System32"),
+    ("etwfields_test", "kernel32.dll", "Windows/System32"),
+    ("etwfields_test", "advapi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11396,6 +11399,7 @@ const USER_PROGRAMS: &[&str] = &[
     "caps_test",
     "etw_test",
     "etwarm_test",
+    "etwfields_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -16869,7 +16873,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "etwarm_test: Gala.Test.Quiet: no session",
             "etwarm_test: Gala.Test.Arm: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=11 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=11",
             "etwarm_test: Gala.Test.Quiet: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
-            "etw: etwarm_test.exe 2542af41-3d78-596e-ff31-017dbbeacc32 level 4 keyword 0x0, 49 bytes",
+            "etw: provider Gala.Test.Arm is 2542af41-3d78-596e-ff31-017dbbeacc32",
+            "etw: etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why=\"armed\"",
             "etwarm_test: ok",
             "etw: 1 event written to the session, from 1 provider (etw=)",
             "exited with status 0x00000000",
@@ -16889,10 +16894,98 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "etwarm_test: Gala.Test.Quiet: calls=1 enabled=1 level=4 any=0x10 all=0x0 ctx=0x5102",
             "etwarm_test: Gala.Test.Arm: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=00",
             "etwarm_test: Gala.Test.Quiet: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=00",
-            "etw: etwarm_test.exe 2542af41-3d78-596e-ff31-017dbbeacc32 level 4 keyword 0x0, 49 bytes",
-            "etw: etwarm_test.exe c7be3843-7267-5b9d-1d9c-ebe8fe08d1fd level 4 keyword 0x0, 51 bytes",
+            "etw: provider Gala.Test.Arm is 2542af41-3d78-596e-ff31-017dbbeacc32",
+            "etw: etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why=\"armed\"",
+            "etw: provider Gala.Test.Quiet is c7be3843-7267-5b9d-1d9c-ebe8fe08d1fd",
+            "etw: etwarm_test.exe Gala.Test.Quiet/Started level 4 keyword 0x0, count=7, why=\"armed\"",
             "etwarm_test: ok",
             "etw: 2 events written to the session, from 2 providers (etw=)",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // etw_from=<process>: the session spends its budget on the
+        // program the run is about. Measured, not supposed: an
+        // office_word run armed for every provider gave 1834 of its
+        // 2048 lines to OfficeClickToRun.exe, a service Word starts
+        // and nobody was reading, and Word's own providers registered
+        // (59.1s) after the budget was gone. Here the name matches, so
+        // the session is the one `etw_armed` gets.
+        name: "etw_from",
+        cmdline: "qemu_exit run=etwarm_test.exe etw=Gala.Test.Arm etw_from=etwarm",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for Gala.Test.Arm (2542af41-3d78-596e-ff31-017dbbeacc32), level 5 and every keyword, 256 events at most, and only for a process whose name has etwarm in it (etw=)",
+            "etwarm_test: Gala.Test.Arm: calls=1 enabled=1 level=5 any=0xffffffffffffffff all=0x0 ctx=0x5101",
+            "etw: etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why=\"armed\"",
+            "etw: 1 event written to the session, from 1 provider (etw=)",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same session for a process this run is not about: the
+        // program registers the provider the option names and is still
+        // told nobody is listening, because the ask itself is refused
+        // (op 0) -- TraceLogging then builds no payload, which is the
+        // whole point of the filter and not merely a line left out.
+        name: "etw_from_elsewhere",
+        cmdline: "qemu_exit run=etwarm_test.exe etw=Gala.Test.Arm etw_from=winword",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "and only for a process whose name has winword in it (etw=)",
+            "etwarm_test: Gala.Test.Arm: no session",
+            "etwarm_test: Gala.Test.Quiet: no session",
+            "etwarm_test: Gala.Test.Arm: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
+            "etwarm_test: wrote 4",
+            "etwarm_test: ok",
+            "etw: not one event was written to the session (etw=): no process whose name has winword in it wrote one",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Every field shape TraceLogging can put in an event, written by
+        // a program nobody is listening to: the half that must stay real
+        // Windows' line for line, so the decoded lines below can be read
+        // as the same values (user/etwfields_test).
+        name: "etwfields_test",
+        cmdline: "qemu_exit run=etwfields_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etwfields_test: Gala.Test.Fields registered, nobody is listening",
+            "etwfields_test: Scalars i8=-8, u8=200, i16=-1600, u16=60000, i32=-32000, u32=4000000000, i64=-6400000000, u64=18000000000000000000",
+            "etwfields_test: Numbers f32=1.5, f64=-2.25, yes=true, no=false",
+            "etwfields_test: Texts wide=\"wide string\", ansi=\"ansi string\", cwide=\"counted wide\", cansi=\"counted ansi\"",
+            "etwfields_test: Bytes blob=deadbeef, id=11112222-3333-4444-5555-666677778888, when=134398485030000000 (2026-11-22 19:15:03), hex32=0xdeadbeef, hex64=0x123456789abcdef",
+            "etwfields_test: Shapes three=[10, 20, 30], list=[1, 2, 3, 4], rect={left=-1, top=2}, tagged=99, ashex=0xc0ffee, aserror=5",
+            "etwfields_test: Nothing",
+            "etwfields_test: 6 events written, all accepted",
+            "etwfields_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The decoder: the same six events read back out of the
+        // metadata the program wrote them with, field by field. Every
+        // line here is the one above it in the program's own voice,
+        // which is what makes a decoded value wrong visibly wrong --
+        // and the shapes that carry no value of their own (a struct, a
+        // tagged field, an array's count) are checked by the fields
+        // that follow them coming out right.
+        name: "etwfields_armed",
+        cmdline: "qemu_exit run=etwfields_test.exe etw=Gala.Test.Fields",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for Gala.Test.Fields (d0b5081d-9af0-5ab0-5d8b-82289048fa05), level 5",
+            "etwfields_test: Gala.Test.Fields registered, 1 callback(s), enabled 1 level 5 any 0xffffffffffffffff all 0x0",
+            "etw: provider Gala.Test.Fields is d0b5081d-9af0-5ab0-5d8b-82289048fa05",
+            "etw: etwfields_test.exe Gala.Test.Fields/Scalars level 4 keyword 0x1, i8=-8, u8=200, i16=-1600, u16=60000, i32=-32000, u32=4000000000, i64=-6400000000, u64=18000000000000000000",
+            "etw: etwfields_test.exe Gala.Test.Fields/Numbers level 4 keyword 0x2, f32=1.5, f64=-2.25, yes=true, no=false",
+            "etw: etwfields_test.exe Gala.Test.Fields/Texts level 4 keyword 0x4, wide=\"wide string\", ansi=\"ansi string\", cwide=\"counted wide\", cansi=\"counted ansi\"",
+            "etw: etwfields_test.exe Gala.Test.Fields/Bytes level 4 keyword 0x8, blob=deadbeef, id=11112222-3333-4444-5555-666677778888, when=2026-11-22 19:15:03, hex32=0xdeadbeef, hex64=0x123456789abcdef",
+            "etw: etwfields_test.exe Gala.Test.Fields/Shapes level 4 keyword 0x10, three=[10, 20, 30], list=[1, 2, 3, 4], rect={left=-1, top=2}, tagged=99, ashex=0xc0ffee, aserror=5",
+            "etw: etwfields_test.exe Gala.Test.Fields/Nothing level 4 keyword 0x20",
+            "etwfields_test: ok",
+            "etw: 6 events written to the session, from 1 provider (etw=)",
             "exited with status 0x00000000",
         ],
     },
@@ -21639,6 +21732,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("import_answer_text", "import_strings_test"),
     ("import_answer_bytes", "import_strings_test"),
     ("etw_armed", "etwarm_test"),
+    ("etw_from", "etwarm_test"),
+    ("etw_from_elsewhere", "etwarm_test"),
+    ("etwfields_armed", "etwfields_test"),
     ("etw_armed_all", "etwarm_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
@@ -27927,7 +28023,7 @@ fn dump_and_check(
                 let all = rw as usize * rh as usize;
                 if n * 100 < all * percent as usize {
                     return Err(format!(
-                        "{n} of the {all} pixels in ({x}, {y}, {rw}, {rh}) are {want:06x}, not                          the {percent}% asked for"
+                        "{n} of the {all} pixels in ({x}, {y}, {rw}, {rh}) are {want:06x}, not the {percent}% asked for"
                     ));
                 }
             }
@@ -32844,6 +32940,123 @@ mod constants {
             }
         }
         assert!(found.is_empty(), "use nt::platform instead:\n{}", found.join("\n"));
+    }
+
+    /// A message carrying a run of spaces nobody typed. rustfmt in
+    /// this repository rewrites a `\`-newline continuation inside a
+    /// string literal by joining the lines and keeping the
+    /// indentation, so a sentence written over three source lines
+    /// prints with eighteen spaces in the middle of it. A log line is
+    /// the product here, so that is a defect; and it is one nothing
+    /// else catches, because the message is usually on a path no test
+    /// takes -- three had been in the tree for some time when this
+    /// test was written (the start menu's unwatched install, an lx
+    /// signal statedump, and an `etw:` summary). Write a long message
+    /// on one source line instead: a literal rustfmt cannot rewrap is
+    /// one it cannot mangle (WORKFLOW "Rules for every change").
+    #[test]
+    fn no_message_carries_spaces_rustfmt_left_behind() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src");
+        let mut files = Vec::new();
+        let mut dirs = vec![dir];
+        while let Some(d) = dirs.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        // Eight spaces or fewer are typed on purpose: a log line that
+        // indents a sub-line under its heading ("crash report:   ").
+        const RUN: usize = 9;
+        let mut found = Vec::new();
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                if longest_run_of_spaces_in_a_string(line) >= RUN {
+                    found.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "a run of {RUN} spaces inside a string, which rustfmt left there; write the message on one source line\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// The longest run of spaces inside a `"` literal on this line. A
+    /// byte string is skipped (the dunes of the start menu's wallpaper
+    /// are drawn in spaces, and are not a sentence), as is anything
+    /// after a `//`.
+    fn longest_run_of_spaces_in_a_string(line: &str) -> usize {
+        let b = line.as_bytes();
+        let mut at = 0;
+        let mut inside = false;
+        let mut counting = false;
+        let mut run = 0usize;
+        let mut longest = 0usize;
+        while at < b.len() {
+            match b[at] {
+                // An escape takes the next byte with it, so an escaped
+                // quote does not end the literal.
+                b'\\' if inside => at += 1,
+                // The one character literal that would otherwise read
+                // as the start of a string.
+                b'\''
+                    if !inside && b.get(at + 1) == Some(&b'"') && b.get(at + 2) == Some(&b'\'') =>
+                {
+                    at += 2;
+                }
+                b'"' => {
+                    counting = !inside && !(at > 0 && b[at - 1] == b'b');
+                    inside = !inside;
+                    run = 0;
+                }
+                b'/' if !inside && b.get(at + 1) == Some(&b'/') => break,
+                b' ' if counting => {
+                    run += 1;
+                    longest = longest.max(run);
+                }
+                _ => run = 0,
+            }
+            at += 1;
+        }
+        longest
+    }
+
+    /// The calendar is not a clock: it turns a count it is handed into a
+    /// date (`kernel/src/calendar.rs`) and reads nothing, which is what
+    /// lets the NT layer use it without the platform seam
+    /// (`nt_uses_the_machine_only_through_platform`, docs/GALA_UM.md).
+    /// So it names nothing of the kernel at all -- the day someone
+    /// reaches for the clock in here, that seam has a hole in it.
+    #[test]
+    fn the_calendar_is_not_a_clock() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/calendar.rs");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let found: Vec<_> = text
+            .lines()
+            .enumerate()
+            // What the code reaches, not what the module doc says about
+            // it: naming `crate::time` to explain why the calendar does
+            // not use it is the point of the file's own doc.
+            .filter(|(_, line)| !line.trim_start().starts_with("//") && line.contains("crate::"))
+            .map(|(i, line)| format!("{}: {}", i + 1, line.trim()))
+            .collect();
+        assert!(
+            found.is_empty(),
+            "the calendar reaches into the kernel:
+{}",
+            found.join(
+                "
+"
+            )
+        );
     }
 
     /// `net` is core, below every personality: it reaches threads and time

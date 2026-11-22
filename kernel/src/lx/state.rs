@@ -1005,7 +1005,7 @@ pub fn dump() {
             for tid in sigs.thread_ids() {
                 if let Some(t) = sigs.thread(tid) {
                     crate::info!(
-                        "lx: pid {} thread {} (core {tid}): mask {:#x} pending {:#x}                          process pending {:#x} {}",
+                        "lx: pid {} thread {} (core {tid}): mask {:#x} pending {:#x} process pending {:#x} {}",
                         p.pid,
                         p.linux_tid(tid),
                         t.mask.0,

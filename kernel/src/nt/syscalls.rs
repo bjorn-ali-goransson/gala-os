@@ -4126,8 +4126,8 @@ fn gala_trace(call: &mut Call<'_>) -> NtStatus {
 /// takes the length written as a `u64` (0: no session was asked for, and
 /// the DLL asks nothing more for the life of the process). Op 1 hands
 /// over one event a session kept: A is the record and B its length
-/// (`etw::RECORD_LEN`: the provider id, the event descriptor, and the
-/// payload's length).
+/// (`etw::RECORD_HEAD` and the three blobs it gives the lengths of: the
+/// provider's metadata, the event's, and the values).
 ///
 /// The answer to op 1 is what ends a session: NO_MORE_ENTRIES once the
 /// budget is spent, so a program whose events nobody is reading any more
@@ -4137,7 +4137,11 @@ fn gala_etw(call: &mut Call<'_>) -> NtStatus {
         0 => {
             let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
             let mut ask = [0u8; super::etw::ASK_LEN];
-            let written = if len >= ask.len() && super::etw::ask(&mut ask) { ask.len() } else { 0 };
+            let written = if len >= ask.len() && super::etw::ask(&mut ask, call.process.name) {
+                ask.len()
+            } else {
+                0
+            };
             if call.process.write(arg!(call, 3), &(written as u64).to_ne_bytes()).is_err() {
                 return NtStatus::ACCESS_VIOLATION;
             }
@@ -4147,12 +4151,17 @@ fn gala_etw(call: &mut Call<'_>) -> NtStatus {
             NtStatus::SUCCESS
         }
         1 => {
+            const HEAD: usize = super::etw::RECORD_HEAD;
             let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
-            if len < super::etw::RECORD_LEN {
+            if !(HEAD..=super::etw::RECORD_MAX).contains(&len) {
                 return NtStatus::INVALID_PARAMETER;
             }
-            let mut record = [0u8; super::etw::RECORD_LEN];
-            if call.process.read(ptr, &mut record).is_err() {
+            // The whole record on this frame: the decoder reads it
+            // without a lock held and without the program's memory
+            // under it, so nothing a program does while its line is
+            // written can change what the line says.
+            let mut record = [0u8; super::etw::RECORD_MAX];
+            if call.process.read(ptr, &mut record[..len]).is_err() {
                 return NtStatus::ACCESS_VIOLATION;
             }
             let mut guid = [0u8; 16];
@@ -4163,7 +4172,34 @@ fn gala_etw(call: &mut Call<'_>) -> NtStatus {
             let keyword =
                 u64::from_le_bytes(record[16 + 8..16 + 16].try_into().unwrap_or_default());
             let bytes = u32::from_le_bytes(record[32..36].try_into().unwrap_or_default());
-            let keep = super::etw::record(call.process.name, &guid, level, keyword, bytes);
+            let length = |at: usize| usize::from(u16::from_le_bytes([record[at], record[at + 1]]));
+            let (provider_len, event_len, data_len) = (length(36), length(38), length(40));
+            let flags = u16::from_le_bytes([record[42], record[43]]);
+            // The DLL's lengths and the length it gave must agree: they
+            // are written by one function from one buffer, so a record
+            // where they do not is a bug in that function and not an
+            // event to report.
+            let Some(end) = HEAD
+                .checked_add(provider_len)
+                .and_then(|n| n.checked_add(event_len))
+                .and_then(|n| n.checked_add(data_len))
+                .filter(|&n| n <= len)
+            else {
+                return NtStatus::INVALID_PARAMETER;
+            };
+            let (provider_meta, rest) = record[HEAD..end].split_at(provider_len);
+            let (event_meta, data) = rest.split_at(event_len);
+            let keep = super::etw::record(&super::etw::Written {
+                process: call.process.name,
+                guid: &guid,
+                level,
+                keyword,
+                bytes,
+                provider_meta,
+                event_meta,
+                data,
+                flags,
+            });
             if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
         }
         _ => NtStatus::INVALID_PARAMETER,

@@ -1,5 +1,5 @@
 //! The trace session gala starts on a program's behalf (`etw=`,
-//! nt::etw; OBSERVABILITY "Trace sessions gala starts"): what a program
+//! nt::etw; OBSERVABILITY "A session gala starts"): what a program
 //! that starts no session of its own and asks nobody to listen -- which
 //! is every real program, a Word startup registering 20 providers and
 //! starting nothing -- sees when something else enables it.
@@ -31,7 +31,7 @@
 //!
 //! So the lines say which world the run was in, and the demands gala's
 //! own session asked for are the scenario's business to pin down (the
-//! `etw_arm`, `etw_arm_all` and `etw_arm_none` scenarios).
+//! `etwarm_test`, `etw_armed` and `etw_armed_all` scenarios).
 //!
 //! Prints what it read and `etwarm_test: ok`, or
 //! `etwarm_test: check N got X (line L)` and exits with N.

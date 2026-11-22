@@ -161,6 +161,15 @@ away. Change the function it wraps, or the directives, instead.
   `.github/workflows/ci.yml` (add a crate's line there and the hook
   runs it too). It names the commands that failed; fix them rather than
   pushing with `--no-verify`.
+- **A long message goes on one source line.** rustfmt here rewrites a
+  `\`-newline continuation inside a string literal by joining the
+  lines and keeping the indentation, so a sentence written over three
+  source lines prints with eighteen spaces in the middle of it. Three
+  messages carried one for some time, because each is on a path no
+  test takes. Write the literal on one line, however long: one
+  rustfmt cannot rewrap is one it cannot mangle. `cargo test -p
+  xtask`'s `no_message_carries_spaces_rustfmt_left_behind` fails on a
+  run of nine spaces inside a string anywhere in `kernel/src`.
 
 - **Observability is part of every change** (OBSERVABILITY.md): a new
   subsystem, driver, boot stage, format or test comes with its

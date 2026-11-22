@@ -5714,8 +5714,10 @@ the next breakthroughs).
    pipe. Seen once more, in CI on a host at load 5.9 for 4 CPUs: that
    time two plug-ins at once, file-png and script-fu, each of which had
    taken far longer than on an idle host (521 ms and 1670 ms), while
-   gimp-console was still running (it exited 5.7 s later). Both sightings
-   are a slow plug-in on a loaded host, which puts the question at the
+   gimp-console was still running (it exited 5.7 s later). A third
+   sighting, again in CI (host load 5.6 for 4 CPUs), was file-png alone,
+   so two plug-ins at once is not what it takes. Every sighting is a
+   slow plug-in on a loaded host, which puts the question at the
    plug-in's last write and not at a reader that had gone; the cause is
    not found yet.
 10. Inkscape (the owner): Ubuntu 26.04's Inkscape 1.4.3 (LINUX_ROOTS
@@ -7244,15 +7246,33 @@ among the slowest hand-offs.
    (nothing armed, so the program's own answers, which are real
    Windows'), `etw_armed` and `etw_armed_all`.
 
-   Next, in order:
-   1. The TraceLogging metadata decoder in the kernel (provider
-      metadata, type 2, and event metadata, type 1, as
-      `TraceLoggingProvider.h` builds them; host unit tests), writing
-      decoded `etw:` lines under a budget. The records a session keeps
-      are the decoder's input, which is why they hold the descriptor
-      and payload bytes rather than a summary.
-   2. Then OTel: the decoded events as logs and spans, by the mapping
-      OT5 uses for everything else.
+   The session is spent on the program the run is about:
+   `etw_from=<text>` gives it only to a process whose name has the text
+   in it, in either case, and the filter is in the ask, so a process the
+   run is not about is told nobody is listening and builds no payload.
+   Measured, not supposed -- an `office_word` run armed for every
+   provider gave 1834 of its 2048 lines to OfficeClickToRun.exe, the
+   service Word starts and nobody was reading, and Word's own providers
+   registered ten seconds after the budget was gone. Scenarios
+   `etw_from` and `etw_from_elsewhere`.
+
+   The decoder is done (`kernel/src/nt/etw/tracelogging.rs`, host unit
+   tests): a line carries the event's own name and every field with the
+   name the program gave it, read out of the provider metadata (type 2)
+   and the event metadata (type 1) that `TraceLoggingProvider.h` builds
+   beside each event. Every in-type and out-type that header declares
+   is read, nested structs and both kinds of array among them; a line
+   that cannot go on says where it stopped and why, and tells an event
+   cut to fit gala's record from one whose description does not read.
+   An event whose metadata is not TraceLogging's -- a manifest
+   provider's, whose field names are in no part of it -- leaves the
+   line it can, with its size and which of the two it was. Scenarios
+   `etwfields_test` (the program's own account of every field shape it
+   wrote, which is real Windows') and `etwfields_armed` (those same
+   events decoded).
+
+   Next: OTel, the decoded events as logs and spans, by the mapping
+   OT5 uses for everything else.
 
    Why this order: a Word startup registers 20 providers and writes
    not one event, so the first thing the bridge needed was the session
