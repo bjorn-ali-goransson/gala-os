@@ -9713,10 +9713,19 @@ then riched20.dll).
   not implemented), GdiComment, and the kernel-mode display thunks
   DXVK imports (19 `D3DKMT*` functions: STATUS_NOT_SUPPORTED, recorded;
   DXVK calls them only for resources shared between devices).
-  `D3DKMTEnumAdapters2` and `D3DKMTQueryAdapterInfo` are deliberately
-  not among them: the Vulkan loader asks for them by GetProcAddress and
-  skips that path when the answer is NULL ("The loader needs a DXGI
-  factory"), which it would not do if they existed and failed.
+  `D3DKMTEnumAdapters2` and `D3DKMTQueryAdapterInfo` are not among them
+  but answered (`d3dkmt.rs`) the way a Windows with no display adapter
+  answers them: the enumeration succeeds and writes no adapters
+  (`NumAdapters` 0, whether it was asked for room or given an array),
+  and a query refuses every handle offered it with
+  STATUS_INVALID_PARAMETER, because no handle here was ever issued and
+  that is what Windows answers for one of those. Measured on Windows
+  before it was answered, on a machine with three adapters and on one
+  with none (`user/d3dkmt_test`, which passes on both). The Vulkan
+  loader asks the two before it reads the registry's list of drivers,
+  hears that there are no adapters, and finds lavapipe in the registry
+  after it -- `vk_test` expects the row that says it heard so beside
+  the device it then used.
 
 ### shell32, ole32, dbghelp and normaliz helpers
 
@@ -15846,10 +15855,12 @@ GPU or a screen (`presenter=test`).
   wglUseFontOutlines; not implemented: GDI_ERROR and the ledger). Probes
   that are not failures show in the ledger too: Mesa's LoadLibrary of
   `d3d12.dll`, `vulkan-1.dll` and
-  `api-ms-win-appmodel-runtime-l1-1-2.dll` (`missing dll`), the loader's
-  GetProcAddress of gdi32's `D3DKMTEnumAdapters2` and
-  `D3DKMTQueryAdapterInfo` and its IDXGIFactory6 (`CreateDXGIFactory1
-  (interface)`, IID c1b6694f-...), and LLVM's search of every module for
+  `api-ms-win-appmodel-runtime-l1-1-2.dll` (`missing dll`), the
+  loader's question to the display driver for its adapters, which gala
+  answers with none (`gdi32.dll!D3DKMTEnumAdapters2(no adapters)`,
+  `reached`, the room offered as its detail; `user/gdi32/src/d3dkmt.rs`),
+  its IDXGIFactory6 (`CreateDXGIFactory1 (interface)`, IID
+  c1b6694f-...), and LLVM's search of every module for
   `__register_frame` (`missing export`).
 - **Observability**: Mesa's own messages go to standard error, which is
   the serial log (`MESA: error: ...`); unsupported paths and probes are

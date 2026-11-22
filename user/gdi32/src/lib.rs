@@ -20,6 +20,7 @@ extern crate alloc;
 
 mod absent;
 mod blend;
+mod d3dkmt;
 mod dib;
 mod draw;
 mod font;
@@ -467,6 +468,13 @@ pub(crate) fn unsupported(what: &[u8], detail: u64) {
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
 }
 
+/// A row saying a program got this far: an answer gala gave, which the
+/// caller cannot tell from a measurement (`note_cap`, `d3dkmt`).
+pub(crate) fn reached(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; "reached" (9).
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 9, detail) };
+}
+
 /// The screen's size (1280 x 800 without one, as user32 assumes).
 pub(crate) fn screen() -> (i32, i32) {
     let mut info = [0i32; 8];
@@ -791,8 +799,7 @@ fn note_cap(index: i32) {
     }
     let mut name = [0u8; 48];
     let n = caps_name(index, &mut name);
-    // SAFETY: our string; "reached" (9).
-    unsafe { GalaRecordMissing(name.as_ptr(), n, 9, u64::from(index as u32)) };
+    reached(&name[..n], u64::from(index as u32));
 }
 
 /// An index with no answer here: 0, as Windows answers one it does not
