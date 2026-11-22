@@ -407,6 +407,15 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("trace_from") {
         nt::tracecall::set_from(spec);
     }
+    // `etw=<provider or name>[:<level>[:<keyword>[:<n>]]]`: the trace
+    // session gala starts on a program's behalf, so that a run reads the
+    // program's own telemetry without the program asking for it
+    // (nt::etw). TraceLogging builds no payload for a provider no
+    // session enabled, so without this a program's providers are
+    // registered and silent.
+    if let Some(spec) = cmdline.value("etw") {
+        nt::etw::set(spec);
+    }
     // `imports=<program>[!<dll>][:<n>]`: the first call a program makes
     // through each of its import slots, which is the only way to see a
     // call into a DLL gala did not write (nt::traceimports). Needs
@@ -666,6 +675,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     nt::desktop::log_clock_stats();
     nt::stack_at::log_stats();
     nt::tracecall::log_stats();
+    nt::etw::log_stats();
     nt::traceimports::log_stats();
     info!("nt: {}", nt::stats::Summary);
     if nt::persist::has_area() {

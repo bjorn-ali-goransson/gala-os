@@ -10,6 +10,7 @@ pub mod conhost;
 pub mod crashreport;
 pub mod desktop;
 pub mod disk;
+pub mod etw;
 pub mod file;
 pub mod gpt;
 pub mod hotswap_probe;

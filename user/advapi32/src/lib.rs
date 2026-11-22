@@ -18,6 +18,9 @@ use core::ffi::c_void;
 #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
+    // The trace session gala starts on a program's behalf (`etw=`,
+    // nt::etw): what the run asks for, and the events it is given.
+    pub(crate) fn GalaEtw(op: usize, a: usize, b: usize, c: usize) -> u32;
 }
 
 // rpcrt4.dll, which Windows' advapi32 imports (RpcStringFreeW,

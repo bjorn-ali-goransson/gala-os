@@ -4858,6 +4858,34 @@ definition for both layouts, "Plan: WOW64").
   GetTraceLoggerHandle fails ERROR_INVALID_PARAMETER with no buffer
   and ERROR_BAD_LENGTH with a buffer that is no session's (Windows'
   own two answers).
+- **The session gala starts** (`etw=`; `trace.rs` and the kernel's
+  `nt::etw`, OBSERVABILITY "A session gala starts"): a run can ask for
+  a program's telemetry without the program asking for it, which is
+  what makes a program that starts no session of its own build its
+  events at all. advapi32 asks the kernel once, at the first
+  EventRegister of the process (`GalaEtw` op 0), and what comes back is
+  a session in the same list as the program's own -- a registration is
+  the only moment a provider learns anything, so the enable is made
+  there and the callback that follows is the one a session the program
+  started would have fired. The program is never told of it: the
+  session has no name, so a lookup by name (which never matches an
+  empty one) cannot find it, and its handle is never handed out, so it
+  can be neither queried nor stopped. It keeps no buffers either --
+  each event in reach goes to the kernel as it is written (`GalaEtw`
+  op 1: the provider id, the event descriptor as the program built it,
+  and the payload's length) and is one `etw:` line. The kernel answers
+  that write STATUS_NO_MORE_ENTRIES once the run's event budget is
+  spent, and advapi32 then tells every provider the session asked for
+  that it is gone, by the path a ControlTraceW stop uses: a program
+  whose events nobody reads any more should not go on building
+  payloads for them. A provider is matched by id; a name in `etw=` is
+  hashed to one the way Windows hashes a TraceLogging provider's name
+  (SHA-1 over a fixed signature and the uppercased name in UTF-16BE,
+  truncated to sixteen bytes with the version nibble set to 5 --
+  `TraceLoggingProvider.h` gives the algorithm and an example, which
+  `nt::etw::name_guid`'s host test checks against). `etw=*` asks for
+  every provider the program registers, which is one enable per
+  registration and so needs nothing of the union rule above.
 - **Performance counters** (`perf.rs`): the PerfLib V2 provider functions
   keep providers, counter-set templates and instances
   (PERF_COUNTERSET_INSTANCE, the data block at the counters' offsets, the

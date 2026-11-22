@@ -41,6 +41,7 @@ rather than free text.
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/trace_common.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
 | Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_bytes=<n>` for the bytes at the places that read as none, `imports_except=<text>[,<text>...]` for the imports to leave unarmed, `imports_in=<image>` for the one image whose slots are armed) with `events=call`; `import` and `ret` events, each with `from`, the image whose import slot the call went through; `imports:` lines |
+| A program's own telemetry (ETW) | `kernel/src/nt/etw/mod.rs`, `user/advapi32/src/trace.rs` | `etw=<provider or name>[:<level>[:<keyword>[:<n>]]]`; `etw:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -778,6 +779,11 @@ that row is in the dump only when the filter freed the slot it took.
   (`EnableTraceEx2(filter)`) and a control code gala does not have
   (`ControlTraceW(code)`, with the code as the detail) are
   "unsupported" (ARCHITECTURE "advapi32", ROADMAP OT4).
+  A session gala started on the program's behalf (`etw=`, "A session
+  gala starts") shows in these rows as any session does, with the two
+  exceptions that it is not the program's: there is no `StartTraceW`
+  row and no `EnableTraceEx2` row, because the program asked for
+  neither.
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
 - The Linux personality records with the same call: `linux syscall
@@ -1814,6 +1820,61 @@ data first, which disarms the slot (below), so that one leaves a
   (`<dll>!<export>`, from `import_name`, which the ledger's own rows
   use), so a reading and a ledger row name the same import the same
   way.
+
+### A session gala starts (`etw=`)
+
+`etw=<provider or name>[:<level>[:<keyword>[:<n>]]]` starts a trace
+session on a program's behalf, so that a run reads what a program says
+about its own work without the program asking for it (the kernel's half
+in `kernel/src/nt/etw/mod.rs`, advapi32's in `trace.rs`, ARCHITECTURE
+"advapi32"; scenarios `etwarm_test`, `etw_armed` and `etw_armed_all`).
+Without it a program's telemetry leaves nothing behind but its
+registrations, because **a provider no session enabled writes nothing at
+all** -- TraceLogging does not even build the payload. That is measured
+and not assumed: a Word startup registers 20 providers and writes not
+one event.
+
+The provider is named by its id
+(`etw=2542af41-3d78-596e-ff31-017dbbeacc32`, braces optional), or by its
+name (`etw=Microsoft.Office.Word`), which is hashed to an id the way
+Windows hashes a TraceLogging provider's name, or by `*` for every
+provider the program registers. The level is 1 (critical) to 5 (verbose,
+the default), or 255 for every level; the keyword is `0x<hex>` or
+decimal, and 0 (the default) means every keyword; `<n>` is how many
+events to write at most (default 256, at most 1048576). A value that
+does not read leaves a `warn:` line saying what it should have been and
+starts no session, because an option misspelt must not look like a
+program that never traces.
+
+```
+etw: a session for Gala.Test.Arm (2542af41-3d78-596e-ff31-017dbbeacc32), level 5 and every keyword, 256 events at most (etw=)
+etw: etwarm_test.exe 2542af41-3d78-596e-ff31-017dbbeacc32 level 4 keyword 0x0, 49 bytes
+etw: 1 event written to the session, from 1 provider (etw=)
+```
+
+- The first line says what was asked for, with the id a name hashed to:
+  a run whose provider never appears can then be told from one whose
+  name hashed to something the program does not register.
+- A line per event: the process that wrote it, the provider, the level
+  and keyword of the event's own descriptor, and how many bytes of
+  payload it carried. Nothing is decoded yet -- the payload's pieces
+  come with the types that say what they are only once the metadata
+  decoder exists (ROADMAP OT4), and a count of bytes is what a line can
+  honestly say until then.
+- The closing line counts what the session got, and says so when the
+  budget ended the session before the program ended: a run must not read
+  as a program that stopped writing when it was the session that stopped
+  listening. A session that got nothing says that too, with the two
+  reasons it can have -- no provider the session asked for, or no write
+  in reach of the level and keyword -- rather than leaving a reader with
+  silence to interpret.
+
+The program is told of this session the way it would be told of one it
+started itself, in the enable callback of each registration, and of
+nothing else: the session has no name and its handle is never handed
+out, so the program can neither query nor stop it, and a session of its
+own is unaffected (a provider's demands are the union of every running
+session's, which is what the ledger's rows and `user/etw_test` check).
 
 ### Guest files (`dump=`)
 
