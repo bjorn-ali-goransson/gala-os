@@ -6063,7 +6063,7 @@ of their own, clients of it) is the yardstick.
   objects and counters are recorded and fail as on a machine without
   them; handles carry a generation (`pdh_test`; Chromium's CPU probe).
   **setupapi**: device information sets over the Plug and Play device
-  tree the registry holds, which `devices.rs` walks through advapi32
+  tree the registry holds, which `user/gala_pnp` walks through advapi32
   (whose HKEY is a key handle, so the DLL needs nothing of the kernel's
   that a program could not reach itself): devices under
   `SYSTEM\CurrentControlSet\Enum\<enumerator>\<hardware id>\<instance>`,
@@ -6090,6 +6090,49 @@ of their own, clients of it) is the yardstick.
   every device in the tree so it does not depend on which set asked
   (`setupapi_test`, `display_test`; Chromium's battery-level provider,
   DXVK's `getMonitorEdid`).
+  **cfgmgr32** is the configuration manager's side of that same tree,
+  out of the same crate, as Windows' setupapi answers both through its
+  cfgmgr32: one tree and one devnode numbering, so a DEVINST from
+  either names the same device, the root taking 1 and the devices the
+  numbers above it as on Windows. The device lists
+  (CM_Get_Device_ID_List_SizeW and CM_Get_Device_ID_ListW, the
+  two-call size probe) honour the three filters the registry can
+  answer -- the class by its GUID text, the enumerator (an id's first
+  component, or any prefix of it ending at a backslash) and the
+  service (a device's `Service` value) -- and every device in gala's
+  tree is present, so CM_GETIDLIST_FILTER_PRESENT is the whole list.
+  CM_Locate_DevNodeW finds a device by its instance id (NULL or `""`
+  is the root, whose id is `HTREE\ROOT\0` and whose status is
+  started), CM_Get_DevNode_Status answers started for a device the
+  tree has, CM_Get_DevNode_Registry_PropertyW reads a CM_DRP_*
+  property as the value of that name under the device's key (the
+  mapping measured against 372 device keys on a Windows machine), and
+  CM_Open_DevNode_Key gives the device's `Device Parameters` or, with
+  CM_REGISTRY_SOFTWARE, its driver key. A filter string that is not a
+  GUID is CR_INVALID_DATA, a NULL one CR_INVALID_POINTER, a flag
+  outside the set CR_INVALID_FLAG, a devnode no device has
+  CR_INVALID_DEVNODE and an instance id the tree does not hold
+  CR_NO_SUCH_DEVNODE, each measured on Windows (`cfgmgr32_test`, which
+  passes there and in gala).
+  **What the tree cannot answer is its own shape.** `Enum`'s three
+  levels are the enumerator, the hardware id and the instance, which
+  are not the parent and the child a devnode has, so CM_Get_Child,
+  CM_Get_Sibling and the relation filters (eject, removal, power, bus,
+  transport) have nothing to walk: they answer CR_NO_SUCH_DEVNODE and
+  an empty list, and each leaves a ledger row saying which it was.
+  Those rows say the shape is what the caller that matters is after:
+  in `office_word` the display class is asked for sixteen times and
+  each answer is followed by CM_Get_Child on the adapter's devnode,
+  sixteen refusals, which is a monitor asked for as the adapter's
+  child -- the same relation DXVK's "Found monitors not associated
+  with any adapter, using fallback" is about. Windows does not keep
+  that relation in the registry either: its PnP manager holds the tree
+  its bus drivers enumerated. So the shape wants a device tree the
+  kernel keeps, with gala's monitor a child of its adapter, which is
+  ROADMAP item USB's step 5 and the next piece of this. Every list asked for leaves a row naming what was
+  asked -- the class by its GUID, otherwise the filter by name -- with
+  the number of devices answered as its detail, so a program looking
+  for hardware gala has none of shows up with the class it wanted.
   SetupIterateCabinetW (`cab.rs`, `setupcab_test`, `wow64_setupcab_test`;
   ODT's setup.exe unpacks its version descriptor with it): the cabinet
   read whole and parsed by galapkg's reader (MSZIP, LZX: "Installing
@@ -15859,10 +15902,12 @@ GPU or a screen (`presenter=test`).
   `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` (`user/mesa/lavapipe.regseed`,
   a scenario's `registry` module: what an installer writes). The loader
   finds drivers two ways on Windows: through the display adapters'
-  devnodes (cfgmgr32) and through that key. gala has no Plug and Play
-  device tree, so gala's `cfgmgr32.dll` has only the root devnode and
-  empty device lists (`cfgmgr32_test`; each list asked for is in the
-  ledger), and the key is what finds lavapipe. Presenting
+  devnodes (cfgmgr32) and through that key. gala's `cfgmgr32.dll`
+  answers the registry's device tree ("setupapi" above), which holds
+  the display's adapter and its monitor, and no devnode there carries
+  the `VulkanDriverName` value a vendor's installer writes, so the
+  loader finds no driver that way and the key is what finds lavapipe.
+  The class it asked for is in the ledger (`cfgmgr32_test`). Presenting
   (VK_KHR_win32_surface) is lavapipe's software swapchain: GetDC of the
   window kept for the swapchain's life, StretchBlt from a DIB section
   per present, which user32 shows as a kept DC's drawing (above).
@@ -15921,7 +15966,8 @@ GPU or a screen (`presenter=test`).
   CRT is the UCRT through the `api-ms-win-crt-*` sets (gala's
   ucrtbase), and it reads the display's devnode through setupapi,
   which answers from the registry's device tree (**setupapi** above),
-  and through cfgmgr32, which has none to show; everything else it
+  and through cfgmgr32, which answers out of that same tree;
+  everything else it
   imports gala had already, beyond gdi32's `D3DKMT*` thunks (above).
   `d3d9`, `d3d8` and `d3d10core` are in the same release and follow
   with the programs that want them; DXVK ships no `d3d10`/`d3d10_1`

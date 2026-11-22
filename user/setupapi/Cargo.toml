@@ -13,6 +13,8 @@ bench = false
 
 [dependencies]
 gala_heap = { path = "../gala_heap" }
+# The device tree in the registry, which gala's cfgmgr32.dll reads too.
+gala_pnp = { path = "../gala_pnp" }
 # Its cabinet reader (MSZIP, LZX) for SetupIterateCabinetW.
 galapkg = { path = "../galapkg" }
 

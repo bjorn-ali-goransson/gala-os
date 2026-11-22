@@ -1,9 +1,18 @@
-//! The device tree, read where Windows keeps it: the registry. A device
-//! is a key under `SYSTEM\CurrentControlSet\Enum\<enumerator>\<hardware
-//! id>\<instance>` carrying its class and its `Device Parameters`, and a
-//! device interface is a key under `Control\DeviceClasses\{class}`,
-//! named after the interface's device path, pointing back at its device
-//! and linked while that device is present.
+//! The Plug and Play device tree, read where Windows keeps it: the
+//! registry. A device is a key under `SYSTEM\CurrentControlSet\Enum\
+//! <enumerator>\<hardware id>\<instance>` carrying its class and its
+//! `Device Parameters`, and a device interface is a key under
+//! `Control\DeviceClasses\{class}`, named after the interface's device
+//! path, pointing back at its device and linked while that device is
+//! present.
+//!
+//! One tree, two DLLs: gala's setupapi.dll answers device information
+//! sets out of it, and gala's cfgmgr32.dll the configuration manager's
+//! device lists -- as Windows' setupapi.dll answers both through
+//! cfgmgr32.dll. The devnode id a device is given here is the number
+//! both of them hand out, so a DEVINST from one names the same device
+//! in the other, and the root of the tree is numbered 1 with the
+//! devices above it, as Windows numbers them.
 //!
 //! gala's display is the only device there so far
 //! (`kernel/src/nt/registry.seed`): one monitor on one adapter, with the
@@ -12,9 +21,22 @@
 //! DXVK's `getMonitorEdid`, and Word under it -- finds the same device
 //! path the CCD and EnumDisplayDevicesW give (`user/user32/src/ccd.rs`).
 //!
+//! Every device the tree describes is present: gala's devices are its
+//! own drivers' and are there as long as the system is, so no key says
+//! otherwise and a present-only list is the whole list.
+//!
+//! What the tree does not record is its shape. `Enum`'s three levels
+//! are the enumerator, the hardware id and the instance, which is not
+//! the parent and child a devnode has, so there is nothing here to
+//! answer CM_Get_Child or CM_Get_Parent out of (ARCHITECTURE
+//! "setupapi"; ROADMAP item USB's step 5 is where a tree the kernel
+//! keeps is wanted).
+//!
 //! Nothing is cached: every call reads the tree again, through advapi32
 //! as Windows' setupapi does, and nothing here allocates (a device
 //! instance id has a bounded length, so the walk's buffers are fixed).
+
+#![no_std]
 
 #[cfg_attr(
     target_arch = "x86",
@@ -54,6 +76,11 @@ const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
 const KEY_READ: u32 = 0x2_0019;
 const SUCCESS: i32 = 0;
 const REG_DWORD: u32 = 4;
+
+/// The root devnode's id (DEVINST), which is 1 on Windows: the devices
+/// are numbered above it, so that one number names one devnode whether
+/// the caller asked cfgmgr32 or setupapi for it.
+pub const ROOT_DEVINST: u32 = 1;
 
 /// The root of the walk below, and the two keys beside it.
 const ENUM: &[u8] = br"SYSTEM\CurrentControlSet\Enum";
@@ -113,6 +140,10 @@ impl Wide {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn ptr(&self) -> *const u16 {
         self.units.as_ptr()
     }
@@ -134,6 +165,16 @@ impl Wide {
                 .iter()
                 .zip(text)
                 .all(|(&u, &c)| fold(u) == fold(u16::from(c)))
+    }
+
+    /// The same test against wide text, which is what
+    /// CM_GETIDLIST_FILTER_ENUMERATOR's filter is: `PCI` and
+    /// `PCI\VEN_8086&DEV_1234` are both the start of
+    /// `PCI\VEN_8086&DEV_1234\3&11583659&0&10`.
+    pub fn under_wide(&self, text: &[u16]) -> bool {
+        self.len > text.len()
+            && self.units[text.len()] == u16::from(b'\\')
+            && self.units[..text.len()].iter().zip(text).all(|(&u, &t)| fold(u) == fold(t))
     }
 }
 
@@ -165,7 +206,7 @@ fn open_below(path: &Wide, below: &[u16]) -> Option<usize> {
     open(&p)
 }
 
-fn close(key: usize) {
+pub fn close(key: usize) {
     // SAFETY: a key this module opened.
     unsafe { RegCloseKey(key) };
 }
@@ -196,7 +237,7 @@ fn subkey(key: usize, index: u32) -> Option<Wide> {
 }
 
 /// A string value of a key, with its terminator dropped.
-fn string_value(key: usize, name: &[u8]) -> Option<Wide> {
+pub fn string_value(key: usize, name: &[u8]) -> Option<Wide> {
     let name = Wide::of(name);
     let mut data = [0u16; MAX_WIDE];
     let mut size = (2 * MAX_WIDE) as u32;
@@ -341,10 +382,10 @@ fn class_at(instance: &Wide) -> Option<[u8; 16]> {
 /// `Enum` is three levels deep -- the enumerator, the hardware id and
 /// the instance -- and a device is a key at the third. The devnode ids
 /// this hands out count every device, so they do not depend on a filter.
-fn walk(mut keep: impl FnMut(&Device) -> bool) {
+pub fn walk(mut keep: impl FnMut(&Device) -> bool) {
     let root = Wide::of(ENUM);
     let Some(top) = open(&root) else { return };
-    let mut devinst = 0;
+    let mut devinst = ROOT_DEVINST;
     let mut going = true;
     for a in 0.. {
         let Some(first) = subkey(top, a) else { break };
@@ -474,6 +515,71 @@ pub fn by_path(path: &Wide) -> Option<Interface> {
     let units = path.units();
     let class = guid_bytes(units.get(units.len().checked_sub(38)?..)?)?;
     find_interface(&class, 0, |candidate| candidate.path.same(path))
+}
+
+/// A device's own key under `Enum`, whose values are the properties a
+/// CM_DRP_* number asks for ([`property_value`]). The caller owns the
+/// handle.
+pub fn instance_key(device: &Device) -> Option<usize> {
+    open(&enum_path(&device.instance))
+}
+
+/// The value a device's key keeps a CM_DRP_* property in (cfgmgr32.h):
+/// on Windows a device's properties are those values, which is why
+/// reading them by name is the whole of it. The numbers left out ask
+/// about something no key here records -- the bus behind the device, its
+/// device object's name, its security descriptor as text -- and the
+/// caller is told it has no such value, which is Windows' own answer for
+/// a device whose key does not hold it.
+pub fn property_value(property: u32) -> Option<&'static [u8]> {
+    Some(match property {
+        0x01 => b"DeviceDesc".as_slice(),
+        0x02 => b"HardwareID",
+        0x03 => b"CompatibleIDs",
+        0x05 => b"Service",
+        0x08 => b"Class",
+        0x09 => b"ClassGUID",
+        0x0a => b"Driver",
+        0x0b => b"ConfigFlags",
+        0x0c => b"Mfg",
+        0x0d => b"FriendlyName",
+        0x0e => b"LocationInformation",
+        0x10 => b"Capabilities",
+        0x11 => b"UINumber",
+        0x12 => b"UpperFilters",
+        0x13 => b"LowerFilters",
+        0x1a => b"DeviceType",
+        0x1b => b"Exclusive",
+        0x1c => b"DeviceCharacteristics",
+        0x1d => b"Address",
+        0x1e => b"UINumberDescFormat",
+        _ => return None,
+    })
+}
+
+/// One value of a key into the caller's own buffer, which is what a
+/// property call hands through: its kind, its bytes and, where there
+/// was not room, how many there would have been. The registry's own
+/// return code comes back (0 for success, ERROR_MORE_DATA for a buffer
+/// too small, ERROR_FILE_NOT_FOUND for no such value), for the caller to
+/// read as its own API spells those.
+///
+/// # Safety
+///
+/// `kind`, `data` and `len` are the caller's: `len` holds the room in
+/// `data` in bytes and is written with what was used, and either of
+/// `kind` and `data` may be null, as RegQueryValueExW allows.
+pub unsafe fn query_value(
+    key: usize,
+    name: &[u8],
+    kind: *mut u32,
+    data: *mut u8,
+    len: *mut u32,
+) -> i32 {
+    let name = Wide::of(name);
+    // SAFETY: our NUL-ended name, and the caller's outputs as its own
+    // API gave them (the contract above).
+    unsafe { RegQueryValueExW(key, name.ptr(), core::ptr::null_mut(), kind, data, len) }
 }
 
 /// A device's own registry key: its `Device Parameters` (DIREG_DEV), or

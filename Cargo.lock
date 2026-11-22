@@ -275,6 +275,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 name = "cfgmgr32"
 version = "0.1.0"
 dependencies = [
+ "gala_pnp",
  "ntrt",
 ]
 
@@ -927,6 +928,10 @@ version = "0.1.0"
 
 [[package]]
 name = "gala_heap"
+version = "0.1.0"
+
+[[package]]
+name = "gala_pnp"
 version = "0.1.0"
 
 [[package]]
@@ -2387,6 +2392,7 @@ name = "setupapi"
 version = "0.1.0"
 dependencies = [
  "gala_heap",
+ "gala_pnp",
  "galapkg",
  "ntrt",
 ]
