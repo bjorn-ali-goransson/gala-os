@@ -70,14 +70,15 @@ pub enum Command {
     Terminal,
 }
 
-/// The command bar's commands, labels and widths.
+/// The command bar's commands: what each does, its label and width (its icon, 16 px,
+/// and a gap of 8 before the label: [`command_icon`]).
 pub const COMMANDS: [(Command, &str, i32); 6] = [
-    (Command::NewFolder, "New folder", 104),
-    (Command::Copy, "Copy", 64),
-    (Command::Paste, "Paste", 64),
-    (Command::Delete, "Delete", 70),
-    (Command::Properties, "Properties", 96),
-    (Command::Terminal, "Open in Terminal", 146),
+    (Command::NewFolder, "New folder", 128),
+    (Command::Copy, "Copy", 88),
+    (Command::Paste, "Paste", 88),
+    (Command::Delete, "Delete", 94),
+    (Command::Properties, "Properties", 120),
+    (Command::Terminal, "Open in Terminal", 170),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -87,7 +88,69 @@ pub enum View {
 }
 
 pub const VIEW_BUTTONS: [(View, &str, i32); 2] =
-    [(View::Details, "Details", 80), (View::Icons, "Icons", 64)];
+    [(View::Details, "Details", 104), (View::Icons, "Icons", 88)];
+
+/// What a command bar button shows before its label.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CommandIcon {
+    Run(Command),
+    View(View),
+}
+
+/// The line art of the command bar's icons (Windows 11's are drawn in
+/// one dark tone with an accent where it says what changes).
+const GLYPH: u32 = 0x424242;
+
+/// A command bar button's icon: 16 x 16, drawn of rectangles in
+/// [`GLYPH`], the folder's colours and the accent.
+pub fn command_icon(which: CommandIcon) -> Node<Msg> {
+    let at = |x: i32, y: i32, w: i32, h: i32, c: u32| column().pin(x, y).width(w).height(h).bg(c);
+    let frame = |x: i32, y: i32, w: i32, h: i32, fill: u32| {
+        column().pin(x, y).width(w).height(h).bg(fill).border(GLYPH).radius(1)
+    };
+    let shape = column().width(16).height(16);
+    match which {
+        // Open (the context menu's, not on the bar): a page and an arrow.
+        CommandIcon::Run(Command::Open) => shape
+            .child(frame(0, 0, 11, 14, CONTENT))
+            .child(at(7, 11, 9, 2, ACCENT))
+            .child(at(13, 9, 2, 6, ACCENT)),
+        CommandIcon::Run(Command::NewFolder) => shape
+            .child(at(0, 3, 6, 2, FOLDER_TAB))
+            .child(at(0, 4, 14, 10, FOLDER_COLOR))
+            // The plus: what is made.
+            .child(at(9, 10, 7, 2, ACCENT))
+            .child(at(11, 8, 2, 7, ACCENT)),
+        CommandIcon::Run(Command::Copy) => {
+            shape.child(frame(0, 0, 10, 12, CONTENT)).child(frame(5, 4, 10, 12, CONTENT))
+        }
+        CommandIcon::Run(Command::Paste) => shape
+            .child(frame(1, 2, 13, 14, CONTENT))
+            .child(at(4, 0, 7, 4, ACCENT))
+            .children((0..3).map(|k| at(4, 7 + 3 * k, 7, 1, GLYPH))),
+        CommandIcon::Run(Command::Delete) => shape
+            .child(at(1, 2, 14, 2, GLYPH))
+            .child(at(6, 0, 4, 2, GLYPH))
+            .child(frame(3, 4, 10, 12, CONTENT))
+            .children((0..2).map(|k| at(6 + 3 * k, 7, 1, 6, GLYPH))),
+        CommandIcon::Run(Command::Properties) => shape
+            .child(frame(1, 0, 14, 16, CONTENT))
+            .children((0..3).map(|k| at(4, 4 + 3 * k, 2, 2, ACCENT)))
+            .children((0..3).map(|k| at(7, 4 + 3 * k, 5, 2, GLYPH))),
+        CommandIcon::Run(Command::Terminal) => shape
+            .child(at(0, 1, 16, 14, 0x1f1f1f).radius(2))
+            // ">" and "_" in white.
+            .child(at(3, 5, 2, 2, CONTENT))
+            .child(at(5, 7, 2, 2, CONTENT))
+            .child(at(3, 9, 2, 2, CONTENT))
+            .child(at(8, 10, 5, 2, CONTENT)),
+        CommandIcon::View(View::Details) => shape.children(
+            (0..4).flat_map(|k| [at(0, 1 + 4 * k, 2, 2, ACCENT), at(4, 1 + 4 * k, 12, 2, GLYPH)]),
+        ),
+        CommandIcon::View(View::Icons) => shape
+            .children([(0, 0), (9, 0), (0, 9), (9, 9)].map(|(x, y)| frame(x, y, 7, 7, CONTENT))),
+    }
+}
 
 /// A navigation pane row: its text, what it opens, its depth, its icon.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -270,14 +333,17 @@ fn top_bar(l: &Look) -> Node<Msg> {
         .child(field("SearchBox", SEARCH_W, search, !l.search.is_empty()))
 }
 
-fn command(id: String, label: &str, width: i32, on: bool, m: Msg) -> Node<Msg> {
+fn command(id: String, icon: CommandIcon, label: &str, width: i32, on: bool, m: Msg) -> Node<Msg> {
     let b = row()
         .id(id)
         .width(width)
         .height(CMD_H)
         .align(Align::Center)
+        .gap(8)
         .padding((0, 6, 0, 10))
+        .radius(4)
         .on_click(m)
+        .child(command_icon(icon))
         .child(text(label).ellipsis());
     if on { b.bg(NAV_SELECTED) } else { b }
 }
@@ -289,11 +355,13 @@ fn command_bar(l: &Look) -> Node<Msg> {
         .height(CMD_H)
         .gap(4)
         .children(COMMANDS.iter().map(|&(c, label, w)| {
-            command(named_id("CommandBar", label), label, w, false, Msg::Command(c))
+            let id = named_id("CommandBar", label);
+            command(id, CommandIcon::Run(c), label, w, false, Msg::Command(c))
         }))
         .child(column().grow(1))
         .children(VIEW_BUTTONS.iter().map(|&(v, label, w)| {
-            command(named_id("ViewButton", label), label, w, v == l.view, Msg::View(v))
+            let id = named_id("ViewButton", label);
+            command(id, CommandIcon::View(v), label, w, v == l.view, Msg::View(v))
         }))
 }
 
@@ -668,17 +736,41 @@ mod tests {
         assert_eq!(at(&p, "UpButton").rect, [44, BAR_Y, 32, BAR_H]);
         assert_eq!(at(&p, "AddressBar").rect, [84, BAR_Y, W - 84 - SEARCH_W - 20, BAR_H]);
         assert_eq!(at(&p, "SearchBox").rect, [W - SEARCH_W - 12, BAR_Y, SEARCH_W, BAR_H]);
-        assert_eq!(at(&p, "CommandBar.Newfolder").rect, [8, 44, 104, CMD_H]);
-        assert_eq!(at(&p, "CommandBar.Copy").rect, [116, 44, 64, CMD_H]);
-        assert_eq!(at(&p, "ViewButton.Icons").rect, [W - 12 - 64, 44, 64, CMD_H]);
-        assert_eq!(at(&p, "ViewButton.Details").rect, [W - 12 - 64 - 4 - 80, 44, 80, CMD_H]);
+        assert_eq!(at(&p, "CommandBar.Newfolder").rect, [8, 44, 128, CMD_H]);
+        assert_eq!(at(&p, "CommandBar.Copy").rect, [140, 44, 88, CMD_H]);
+        assert_eq!(at(&p, "ViewButton.Icons").rect, [W - 12 - 88, 44, 88, CMD_H]);
+        assert_eq!(at(&p, "ViewButton.Details").rect, [W - 12 - 88 - 4 - 104, 44, 104, CMD_H]);
         assert_eq!(at(&p, "StatusBar").rect, [0, H - STATUS_H, W, STATUS_H]);
         assert_eq!(gala_ui::click(&p, 20, 20), Some(("BackButton", Msg::Back)));
         assert_eq!(gala_ui::click(&p, 300, 20), Some(("AddressBar", Msg::Address)));
         assert_eq!(
-            gala_ui::click(&p, 130, 60),
+            gala_ui::click(&p, 150, 60),
             Some(("CommandBar.Copy", Msg::Command(Command::Copy)))
         );
+    }
+
+    #[test]
+    fn each_command_shows_its_icon_before_its_label() {
+        let d = data();
+        let p = lay(&look(&d));
+        let ids = COMMANDS
+            .iter()
+            .map(|c| named_id("CommandBar", c.1))
+            .chain(VIEW_BUTTONS.iter().map(|v| named_id("ViewButton", v.1)));
+        for id in ids {
+            let b = p.iter().position(|e| e.id.as_deref() == Some(id.as_str())).unwrap();
+            let kids: Vec<_> = p.iter().filter(|e| e.parent == Some(b)).collect();
+            // The icon, 16 square and drawn (shapes inside it), then the label.
+            let [ix, iy, iw, ih] = kids[0].rect;
+            assert_eq!((iw, ih), (16, 16), "{id}");
+            assert_eq!(iy, 44 + (CMD_H - 16) / 2, "{id}");
+            let i = p.iter().position(|e| core::ptr::eq(e, kids[0])).unwrap();
+            assert!(p.iter().filter(|e| e.parent == Some(i)).count() >= 2, "{id}");
+            let label = kids[1];
+            assert_eq!(label.rect[0], ix + 16 + 8, "{id}");
+            // The label fits: not cut (7 px a character in the test measure).
+            assert!(label.rect[2] >= label.text.chars().count() as i32 * 7, "{id}");
+        }
     }
 
     #[test]

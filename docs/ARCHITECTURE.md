@@ -15812,7 +15812,11 @@ explorer`; `main.rs` the window's program), shasha (Win+E), `nt::desktop` (the s
   ViewButton.<view>, NavigationPane and NavigationPane.<row>,
   ColumnHeaders and ColumnHeader.<column>, ItemsView and
   ItemsView.Item.<name>, StatusBar, Menu and Menu.<item>, Properties;
-  a name met twice gets `.2`, `.3`, ...). `main.rs` paints the laid-out
+  a name met twice gets `.2`, `.3`, ...). Each command bar button
+  shows a 16 px icon before its label (`window::command_icon`, drawn
+  of rectangles: a folder with an accent plus, two pages, a
+  clipboard, a bin, a list, a dark console tile; the view buttons a
+  list and four tiles). `main.rs` paints the laid-out
   view with `gala_ui::win::Gdi`; a click lays the view out again for
   the state as it is and goes through `gala_ui::click` (logged
   `explorer: click <id>`) to the window's message (`window::Msg`).

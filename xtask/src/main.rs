@@ -24957,6 +24957,8 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::At(201, 174, 0xe3e3e3),            // This PC, selected
                 PixelCheck::AnyIn(330, 185, 30, 24, 0x7a8694), // C:'s drive icon
                 PixelCheck::AnyIn(130, 76, 300, 30, 0x1b1b1b), // the caption's title
+                // The command bar's icons: Open in Terminal's dark tile.
+                PixelCheck::Most(667, 126, 5, 4, 0x1f1f1f, 90),
             ],
         },
         ScreenStep {
