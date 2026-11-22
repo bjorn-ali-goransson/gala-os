@@ -752,11 +752,32 @@ that row is in the dump only when the filter freed the slot it took.
   measured and not assumed: a Word startup registers 20 providers and
   writes not one event, no write of any form leaving a row. The forms
   are recorded when they do happen, once each --
-  `advapi32.dll!EventWrite(no session)`, `EventWriteTransfer`,
-  `EventWriteEx`, `EventWriteString` -- as are the answers a provider
-  is given, `EventEnabled(no session)` and `EventProviderEnabled(no
-  session)`, an enablement answered no being a payload the program then
-  does not build (ARCHITECTURE "advapi32", ROADMAP OF).
+  `advapi32.dll!EventWrite(no session)` and the same for
+  `EventWriteTransfer`, `EventWriteEx` and `EventWriteString` -- as are
+  the answers a provider is given, `EventEnabled(no session)` and
+  `EventProviderEnabled(no session)`, an enablement answered no being a
+  payload the program then does not build.
+  A program's own trace session (advapi32's `trace.rs`) changes which
+  of those rows appear, and that is the point of them: a session it
+  started is `advapi32.dll!StartTraceW(<name>)` (the name is what the
+  program calls what it is about to watch) and
+  `advapi32.dll!ControlTraceW(query)` or `(stopped)`; a provider it
+  asked for is `advapi32.dll!EnableTraceEx2(<guid>)`, in the same
+  spelling the registration's row uses, so the two can be read
+  together; a registration made while a session is already asking is
+  `advapi32.dll!EventRegister(a session is asking)`, the one case where
+  a program is told in its callback before it has written anything.
+  With a session running, `EventEnabled(enabled)` and
+  `EventEnabled(out of reach)` take the place of `(no session)` -- the
+  first is a payload the program goes on to build, the last a level or
+  keyword no running session asked for -- and a write the session keeps
+  is `advapi32.dll!EventWrite(session)` (and so for the other three
+  forms). What gala cannot be is a row too: a system-wide session
+  (`StartTraceW(system-wide)`), one that wants an ETL file
+  (`StartTraceW(log file)`), a scope filter that is not kept
+  (`EnableTraceEx2(filter)`) and a control code gala does not have
+  (`ControlTraceW(code)`, with the code as the detail) are
+  "unsupported" (ARCHITECTURE "advapi32", ROADMAP OT4).
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
 - The Linux personality records with the same call: `linux syscall

@@ -10969,6 +10969,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("caps_test", "kernel32.dll", "Windows/System32"),
     ("caps_test", "user32.dll", "Windows/System32"),
     ("caps_test", "gdi32.dll", "Windows/System32"),
+    // A trace session of the program's own (user/etw_test).
+    ("etw_test", "ntdll.dll", "Windows/System32"),
+    ("etw_test", "kernel32.dll", "Windows/System32"),
+    ("etw_test", "advapi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11387,6 +11391,7 @@ const USER_PROGRAMS: &[&str] = &[
     "metrics_test",
     "spi_test",
     "caps_test",
+    "etw_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -16804,6 +16809,27 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "caps_test: ok",
             r#"ledger: {"service":"gdi32.dll!GetDeviceCaps(34)","what":"reached""#,
             r#"ledger: {"service":"gdi32.dll!GetDeviceCaps(32767)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // A trace session of the program's own: what a session asks a
+        // provider for, how the provider is told, and which of its
+        // events are then in reach -- the contract that decides whether
+        // a program assembles an event at all (user/etw_test).
+        name: "etw_test",
+        cmdline: "qemu_exit run=etw_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw_test: ok",
+            "advapi32.dll!StartTraceW(gala-etw-test)",
+            "advapi32.dll!EnableTraceEx2(7f3a1d58-2c64-4b9e-8f05-6a1b3c7d9e20)",
+            "advapi32.dll!EnableTraceEx2(6f1b0c47-21d8-4e5a-9c3f-0a7b2d8e6411)",
+            "advapi32.dll!EventEnabled(enabled)",
+            "advapi32.dll!EventEnabled(out of reach)",
+            "advapi32.dll!EventWrite(session)",
+            "advapi32.dll!EventRegister(a session is asking)",
+            "advapi32.dll!ControlTraceW(stopped)",
             "exited with status 0x00000000",
         ],
     },

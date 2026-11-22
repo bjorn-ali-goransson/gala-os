@@ -1,8 +1,15 @@
 //! Event Tracing for Windows, the provider side (EventRegister and
-//! friends, as documented in "Writing Manifest-based Events"): gala has no
-//! trace sessions, so no provider is ever enabled. Registration succeeds
-//! and events go nowhere, successfully - what Windows does for a provider
-//! no session listens to.
+//! friends, as documented in "Writing Manifest-based Events"): the
+//! registrations a program makes, what each one is told a session wants
+//! of it, and where its events go. The session side is `trace`, which
+//! owns what every running session asks for; this half is the list of
+//! registrations and the answers a program gets on them.
+//!
+//! A provider no session enabled is not enabled, which is the usual
+//! case: its events go nowhere, successfully, as they do on Windows.
+//! One a session asked for is told so in its callback, answers
+//! `EventEnabled` yes for the events in reach, and hands those to the
+//! session, which keeps them.
 //!
 //! Every one of those answers leaves a `reached` row, because a program's
 //! events are the one account of its own work it writes down: a provider
@@ -61,6 +68,15 @@ struct Provider {
     /// Whether this provider's traits have been set: Windows answers a
     /// second EventProviderSetTraits ERROR_GEN_FAILURE.
     traits: bool,
+    /// The provider the registration is for: what a session names when
+    /// it enables one, and what an event is then weighed against.
+    guid: [u8; 16],
+    /// The program's enable callback and the context it registered
+    /// with, 0 for a registration that gave none. Held as addresses
+    /// because a block is plain memory under a lock the callback must
+    /// not run beneath.
+    callback: usize,
+    context: usize,
 }
 
 /// The newest block (0: none yet).
@@ -101,7 +117,7 @@ fn with_provider<R>(handle: u64, f: impl FnOnce(&mut Provider) -> R) -> Option<R
 
 /// A block for a new registration: one a program let go of, else a fresh
 /// one on the list. 0 when there is no memory for it.
-fn take_block() -> usize {
+fn take_block(guid: &[u8; 16], callback: usize, context: usize) -> usize {
     with_list(|| {
         let mut at = HEAD.load(Ordering::Relaxed);
         while at != 0 {
@@ -110,6 +126,9 @@ fn take_block() -> usize {
             if !p.live {
                 p.live = true;
                 p.traits = false;
+                p.guid = *guid;
+                p.callback = callback;
+                p.context = context;
                 return at;
             }
             at = p.next as usize;
@@ -125,45 +144,122 @@ fn take_block() -> usize {
             (*fresh).next = HEAD.load(Ordering::Relaxed) as *mut Provider;
             (*fresh).live = true;
             (*fresh).traits = false;
+            (*fresh).guid = *guid;
+            (*fresh).callback = callback;
+            (*fresh).context = context;
         }
         HEAD.store(fresh as usize, Ordering::Relaxed);
         fresh as usize
     })
 }
 
+/// EventRegister. A registration made while a session already asks for
+/// the provider is told so in its callback right away (measured on the
+/// pinned build): a program that registers late is not left thinking
+/// nobody listens.
 #[unsafe(no_mangle)]
 pub extern "system" fn EventRegister(
     provider: *const [u8; 16],
-    _callback: *const core::ffi::c_void,
-    _context: *mut core::ffi::c_void,
+    callback: *const core::ffi::c_void,
+    context: *mut core::ffi::c_void,
     handle: *mut u64,
 ) -> u32 {
     if provider.is_null() || handle.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    let block = take_block();
+    // SAFETY: the caller's provider id.
+    let guid = unsafe { *provider };
+    let block = take_block(&guid, callback as usize, context as usize);
     if block == 0 {
         crate::missing(b"advapi32.dll!EventRegister(no memory)");
         return ERROR_NOT_ENOUGH_MEMORY;
     }
-    // SAFETY: the caller's provider id.
-    note_provider(unsafe { &*provider });
+    note_provider(b"advapi32.dll!EventRegister(", &guid);
     // SAFETY: the caller's output.
     unsafe { *handle = block as u64 };
+    if let Some(demands) = crate::trace::demands(&guid) {
+        crate::reached(b"advapi32.dll!EventRegister(a session is asking)", 0);
+        call_back(callback as usize, context as usize, 1, demands);
+    }
     0
 }
 
-/// `advapi32.dll!EventRegister(<guid>)`: the provider a program is about
-/// to write events for, one row each, in the spelling a trace session
-/// would be given to enable it.
-fn note_provider(id: &[u8; 16]) {
-    const PREFIX: &[u8] = b"advapi32.dll!EventRegister(";
-    let mut row = [0u8; PREFIX.len() + 36 + 1];
-    row[..PREFIX.len()].copy_from_slice(PREFIX);
-    let mut at = PREFIX.len();
+/// What a session asks of `guid`, told to every live registration for
+/// it, newest first. The list is only ever added to and a block's
+/// `next` never changes once set, so the walk needs the lock only to
+/// read a block's own fields -- and the callback, which is the
+/// program's code and may register a provider of its own, runs with no
+/// lock held.
+pub(crate) fn tell(guid: &[u8; 16], is_enabled: u32, demands: crate::trace::Demands) {
+    let mut at = HEAD.load(Ordering::Relaxed);
+    while at != 0 {
+        let (next, told) = with_list(|| {
+            // SAFETY: ours, never freed.
+            let p = unsafe { &mut *(at as *mut Provider) };
+            let mine = p.live && p.guid == *guid && p.callback != 0;
+            (p.next as usize, if mine { Some((p.callback, p.context)) } else { None })
+        });
+        if let Some((callback, context)) = told {
+            call_back(callback, context, is_enabled, demands);
+        }
+        at = next;
+    }
+}
+
+/// PENABLECALLBACK: what a provider's callback is given. The source id
+/// is all zeros for a private session (measured), and gala passes no
+/// filter -- a session's scope filters are not kept, which
+/// `EnableTraceEx2` says in a row of its own.
+type EnableCallback = unsafe extern "system" fn(
+    source: *const [u8; 16],
+    is_enabled: u32,
+    level: u8,
+    any: u64,
+    all: u64,
+    filter: *const core::ffi::c_void,
+    context: *mut core::ffi::c_void,
+);
+
+/// One call into a program's enable callback, outside every lock.
+fn call_back(callback: usize, context: usize, is_enabled: u32, demands: crate::trace::Demands) {
+    if callback == 0 {
+        return;
+    }
+    const NO_SOURCE: [u8; 16] = [0; 16];
+    // SAFETY: the address the program passed EventRegister, called with
+    // the arguments PENABLECALLBACK documents. A program that passes an
+    // address that is not its callback has already broken its own
+    // registration, which is as true on Windows.
+    unsafe {
+        let f: EnableCallback = core::mem::transmute(callback);
+        f(
+            &NO_SOURCE,
+            is_enabled,
+            demands.level,
+            demands.any,
+            demands.all,
+            core::ptr::null(),
+            context as *mut core::ffi::c_void,
+        );
+    }
+}
+
+/// `advapi32.dll!<call>(<guid>)`: a provider a program registered, or
+/// one a session asked for, one row each, in the spelling a trace
+/// session would be given to enable it.
+pub(crate) fn note_provider(prefix: &[u8], id: &[u8; 16]) {
+    /// Room for the longest prefix either caller passes, which is
+    /// `EnableTraceEx2`'s.
+    const ROOM: usize = 32;
+    if prefix.len() > ROOM {
+        return;
+    }
+    let mut row = [0u8; ROOM + 36 + 1];
+    row[..prefix.len()].copy_from_slice(prefix);
+    let mut at = prefix.len();
     // A GUID's first three fields are little-endian, the rest bytes.
     for group in [&[3u8, 2, 1, 0][..], &[5, 4], &[7, 6], &[8, 9], &[10, 11, 12, 13, 14, 15]] {
-        if at > PREFIX.len() {
+        if at > prefix.len() {
             row[at] = b'-';
             at += 1;
         }
@@ -190,40 +286,121 @@ pub extern "system" fn EventUnregister(handle: u64) -> u32 {
     }
 }
 
-/// EventEnabled / EventProviderEnabled: no session enables anything, for
-/// a registration of this process's or anything else (Windows answers
-/// FALSE for a handle it does not know, and for a null descriptor). The
-/// row is the payload the program then does not build.
-#[unsafe(no_mangle)]
-pub extern "system" fn EventEnabled(_handle: u64, _descriptor: *const u8) -> u8 {
-    crate::reached(b"advapi32.dll!EventEnabled(no session)", 0);
-    0
+/// Whether an event of this level and keyword is in reach of a running
+/// session, and the row that says why -- which is the payload the
+/// program then builds, or does not. A handle no live registration has
+/// is FALSE with no row, which is what Windows answers, and so is a
+/// handle a program has let go of.
+fn answer(handle: u64, level: u8, keyword: u64, rows: [&[u8]; 3]) -> u8 {
+    let Some(guid) = with_provider(handle, |p| p.guid) else {
+        return 0;
+    };
+    match crate::trace::demands(&guid) {
+        None => {
+            crate::reached(rows[0], 0);
+            0
+        }
+        Some(demands) if demands.admits(level, keyword) => {
+            crate::reached(rows[1], 0);
+            1
+        }
+        Some(_) => {
+            crate::reached(rows[2], 0);
+            0
+        }
+    }
 }
 
+/// EventEnabled: the level and keyword out of the event's descriptor
+/// (EVENT_DESCRIPTOR: Id, Version, Channel, then Level at 4 and Keyword
+/// at 8). Windows answers FALSE for a null descriptor and for a handle
+/// it does not know, and so does this.
 #[unsafe(no_mangle)]
-pub extern "system" fn EventProviderEnabled(_handle: u64, _level: u8, _keyword: u64) -> u8 {
-    crate::reached(b"advapi32.dll!EventProviderEnabled(no session)", 0);
-    0
+pub extern "system" fn EventEnabled(handle: u64, descriptor: *const u8) -> u8 {
+    if descriptor.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's descriptor, which is 16 bytes by definition;
+    // the keyword is read unaligned because the caller's may be.
+    let (level, keyword) =
+        unsafe { (*descriptor.add(4), descriptor.add(8).cast::<u64>().read_unaligned()) };
+    answer(
+        handle,
+        level,
+        keyword,
+        [
+            b"advapi32.dll!EventEnabled(no session)",
+            b"advapi32.dll!EventEnabled(enabled)",
+            b"advapi32.dll!EventEnabled(out of reach)",
+        ],
+    )
+}
+
+/// EventProviderEnabled: the same question with the level and keyword
+/// passed outright, which is what a program asks before it has built a
+/// descriptor.
+#[unsafe(no_mangle)]
+pub extern "system" fn EventProviderEnabled(handle: u64, level: u8, keyword: u64) -> u8 {
+    answer(
+        handle,
+        level,
+        keyword,
+        [
+            b"advapi32.dll!EventProviderEnabled(no session)",
+            b"advapi32.dll!EventProviderEnabled(enabled)",
+            b"advapi32.dll!EventProviderEnabled(out of reach)",
+        ],
+    )
 }
 
 /// What a write answers: the descriptor first (Windows answers
 /// ERROR_INVALID_PARAMETER for a null one even on a handle that is no
-/// registration's), then the handle, and then the event goes nowhere,
-/// successfully -- no session listens.
-fn write(handle: u64, descriptor: *const u8, what: &[u8]) -> u32 {
+/// registration's), then the handle, and then the event -- to every
+/// session that asked for the provider and admits it, and otherwise
+/// nowhere, successfully, as it goes on Windows when nobody listens.
+///
+/// `rows` is the pair this write leaves: kept by a session, or nowhere.
+fn write(handle: u64, descriptor: *const u8, count: u32, data: *const u8, rows: [&[u8]; 2]) -> u32 {
     if descriptor.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    wrote_nowhere(handle, what)
+    let Some(guid) = with_provider(handle, |p| p.guid) else {
+        return ERROR_INVALID_HANDLE;
+    };
+    // SAFETY: the caller's descriptor, 16 bytes by definition: Level at
+    // 4 and Keyword at 8, the keyword unaligned because the caller's
+    // may be.
+    let (level, keyword) =
+        unsafe { (*descriptor.add(4), descriptor.add(8).cast::<u64>().read_unaligned()) };
+    match crate::trace::demands(&guid) {
+        Some(demands) if demands.admits(level, keyword) => {
+            crate::trace::keep(&guid, descriptor, count, data);
+            crate::reached(rows[0], 0);
+        }
+        // A session that does not admit the event is the same to the
+        // program as no session at all: the write succeeds and the
+        // event is gone. The row says the payload was built for
+        // nothing, which is what a program avoids by asking
+        // EventEnabled first.
+        _ => crate::reached(rows[1], 0),
+    }
+    0
 }
 
-/// A write with no descriptor of its own (EventWriteString): the handle,
-/// then nowhere, successfully.
-fn wrote_nowhere(handle: u64, what: &[u8]) -> u32 {
-    if with_provider(handle, |_| ()).is_none() {
+/// EventWriteString: a write with no descriptor and no payload
+/// descriptors of its own, only a level, a keyword and a string. A
+/// session that admits it is told the event happened; the string
+/// itself is not kept, because the records a session holds are
+/// TraceLogging's (provider metadata, event metadata, payload) and a
+/// bare string is none of them. The row is the account of it.
+fn wrote_string(handle: u64, level: u8, keyword: u64, rows: [&[u8]; 2]) -> u32 {
+    let Some(guid) = with_provider(handle, |p| p.guid) else {
         return ERROR_INVALID_HANDLE;
+    };
+    match crate::trace::demands(&guid) {
+        Some(demands) if demands.admits(level, keyword) => crate::reached(rows[0], 0),
+        _ => crate::reached(rows[1], 0),
     }
-    crate::reached(what, 0);
     0
 }
 
@@ -231,10 +408,16 @@ fn wrote_nowhere(handle: u64, what: &[u8]) -> u32 {
 pub extern "system" fn EventWrite(
     handle: u64,
     descriptor: *const u8,
-    _count: u32,
-    _data: *const u8,
+    count: u32,
+    data: *const u8,
 ) -> u32 {
-    write(handle, descriptor, b"advapi32.dll!EventWrite(no session)")
+    write(
+        handle,
+        descriptor,
+        count,
+        data,
+        [b"advapi32.dll!EventWrite(session)", b"advapi32.dll!EventWrite(no session)"],
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -243,10 +426,19 @@ pub extern "system" fn EventWriteTransfer(
     descriptor: *const u8,
     _activity: *const u8,
     _related: *const u8,
-    _count: u32,
-    _data: *const u8,
+    count: u32,
+    data: *const u8,
 ) -> u32 {
-    write(handle, descriptor, b"advapi32.dll!EventWriteTransfer(no session)")
+    write(
+        handle,
+        descriptor,
+        count,
+        data,
+        [
+            b"advapi32.dll!EventWriteTransfer(session)",
+            b"advapi32.dll!EventWriteTransfer(no session)",
+        ],
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -257,20 +449,31 @@ pub extern "system" fn EventWriteEx(
     _flags: u32,
     _activity: *const u8,
     _related: *const u8,
-    _count: u32,
-    _data: *const u8,
+    count: u32,
+    data: *const u8,
 ) -> u32 {
-    write(handle, descriptor, b"advapi32.dll!EventWriteEx(no session)")
+    write(
+        handle,
+        descriptor,
+        count,
+        data,
+        [b"advapi32.dll!EventWriteEx(session)", b"advapi32.dll!EventWriteEx(no session)"],
+    )
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn EventWriteString(
     handle: u64,
-    _level: u8,
-    _keyword: u64,
+    level: u8,
+    keyword: u64,
     _text: *const u16,
 ) -> u32 {
-    wrote_nowhere(handle, b"advapi32.dll!EventWriteString(no session)")
+    wrote_string(
+        handle,
+        level,
+        keyword,
+        [b"advapi32.dll!EventWriteString(session)", b"advapi32.dll!EventWriteString(no session)"],
+    )
 }
 
 /// EVENT_INFO_CLASS's EventProviderSetTraits: the one class a provider

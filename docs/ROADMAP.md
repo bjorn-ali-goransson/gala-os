@@ -7221,6 +7221,38 @@ among the slowest hand-offs.
 4. OT4: the ETW bridge (EventRegister/EventWrite, TraceLogging) turning
    what Windows programs emit into OTel logs and spans; later the same
    for LX.
+
+   The session side is done (advapi32's `trace.rs`, ARCHITECTURE
+   "advapi32"): StartTraceW, EnableTraceEx2 and ControlTraceW give a
+   program the private in-process session it can start without rights,
+   the provider side consults it, and an event in reach is kept in the
+   session's buffers with its provider, descriptor and payload. That is
+   what makes a program build its events at all -- TraceLogging builds
+   no payload for a provider no session enabled -- so until it existed
+   there was nothing for a bridge to read. The whole enablement
+   contract was measured on the pinned build as a standard user and is
+   checked on both systems by `user/etw_test` (scenario `etw_test`,
+   `ci-passing.txt`).
+
+   Next, in order:
+   1. A boot option for the sessions gala starts on a program's behalf
+      (`etw=<provider or name>[:<level>[:<keyword>]]`, following
+      `GalaTrace`'s op-0 pattern), so a run can ask for a program's own
+      telemetry without the program asking for it.
+   2. The TraceLogging metadata decoder in the kernel (provider
+      metadata, type 2, and event metadata, type 1, as
+      `TraceLoggingProvider.h` builds them; host unit tests), writing
+      decoded `etw:` lines under a budget. The records a session keeps
+      are the decoder's input, which is why they hold the descriptor
+      and payload bytes rather than a summary.
+   3. Then OTel: the decoded events as logs and spans, by the mapping
+      OT5 uses for everything else.
+
+   Why this order: a Word startup registers 20 providers and writes
+   not one event, so the first thing the bridge needs is the session
+   that makes Word write them -- and the first use of the decoded
+   events is Word's own account of the startup failure the
+   `office_word` scenario reaches.
 5. OT5: the in-guest OTLP exporter for servers, controlled from the
    `gala` CLI (on/off, sampling rules, endpoint), metrics pushed to
    Prometheus' OTLP receiver on the same host (diagnosis, not
