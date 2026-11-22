@@ -109,6 +109,24 @@ struct Dependency {
     optional: bool,
 }
 
+/// The files Microsoft's own assemblies declare, as the WinSxS
+/// manifests of Windows 11 26100 do. gala provides these DLLs itself, so
+/// a dependency on one of them has no manifest file to read and its
+/// files are this table; everything a program then reads out of such an
+/// assembly -- the DLL redirection record, the file information -- is
+/// what Windows answers, measured in `actctx_test`. Common-Controls is
+/// the one dependency WINWORD.EXE's manifest declares, and the lookup of
+/// the file it names is what a program makes before it registers one of
+/// the assembly's window classes.
+///
+/// Windows' Common-Controls manifest also declares 29 window classes and
+/// an optional resources assembly (`comctl32.dll.mui`), neither of which
+/// gala builds: ARCHITECTURE "Activation contexts" says what that costs.
+const SYSTEM_FILES: [(&[u8], &[&[u8]]); 2] = [
+    (b"Microsoft.Windows.Common-Controls", &[b"comctl32.dll"]),
+    (b"Microsoft.Windows.GdiPlus", &[b"GdiPlus.dll"]),
+];
+
 /// Manifest content gala reads but does not build sections for yet.
 pub const SKIPPED_TYPELIB: u32 = 1;
 pub const SKIPPED_PROXY_STUB: u32 = 2;
@@ -1175,7 +1193,10 @@ impl Model {
         Ok(())
     }
 
-    /// A system assembly: its identity, no manifest file or files.
+    /// A system assembly: its identity, the manifest path Windows would
+    /// have for it (gala has no such file), and the files its manifest
+    /// declares on Windows (`SYSTEM_FILES`), so that the sections answer
+    /// what Windows answers for them.
     fn add_system(&mut self, id: &Identity) -> Res<()> {
         let mut dir = Buf::<u16>::new();
         if !self.directory_name(id, &mut dir) {
@@ -1197,6 +1218,7 @@ impl Model {
             return Err(Refused { reason: b"no memory", at: 0 });
         }
         let manifest = self.keep(path.as_slice()).ok_or(Refused { reason: b"no memory", at: 0 })?;
+        let index = self.assemblies.len() as u32;
         let a = Assembly {
             id: *id,
             manifest,
@@ -1207,6 +1229,27 @@ impl Model {
         if !self.assemblies.push(a) {
             return Err(Refused { reason: b"no memory", at: 0 });
         }
+        let name = self.str(id.name);
+        let files =
+            SYSTEM_FILES.iter().find(|(n, _)| eq_ascii_ci(name, n)).map_or(&[][..], |&(_, f)| f);
+        if files.is_empty() {
+            // No row for it in the table, so its sections hold nothing
+            // and every lookup against it finds nothing. Named: this is
+            // the program that wants the next row.
+            super::note_system_without_files(name);
+        }
+        for f in files {
+            let mut w = Buf::<u16>::new();
+            if !f.iter().all(|&b| w.push(u16::from(b))) {
+                return Err(Refused { reason: b"no memory", at: 0 });
+            }
+            let name = self.keep(w.as_slice()).ok_or(Refused { reason: b"no memory", at: 0 })?;
+            let file = File { name, assembly: index, load_from: Str::default() };
+            if !self.files.push(file) {
+                return Err(Refused { reason: b"no memory", at: 0 });
+            }
+        }
+        self.assemblies.as_mut_slice()[index as usize].files = files.len() as u32;
         Ok(())
     }
 

@@ -4336,9 +4336,28 @@ ntdll imports.
     `<dir>\<name>\`, for the application directory, then the root
     manifest's), its version exactly the one asked; else, with
     Microsoft's public key token (6595b64144ccf1df: Common-Controls,
-    GdiPlus, ...), a system assembly with that identity and no files
-    (its manifest path `%SystemRoot%\WinSxS\Manifests\<directory>.manifest`;
-    gala provides those DLLs itself); else ERROR_SXS_CANT_GEN_ACTCTX
+    GdiPlus, ...), a system assembly with that identity, the
+    manifest path Windows would have for it
+    (`%SystemRoot%\WinSxS\Manifests\<directory>.manifest`, a file gala
+    does not have) and the files that manifest declares on Windows.
+    Those files are a table (`manifest.rs`'s `SYSTEM_FILES`) because
+    gala provides the DLLs itself: `comctl32.dll` for Common-Controls
+    and `GdiPlus.dll` for GdiPlus, as the host's WinSxS manifests
+    declare them. A program reads them out of the sections like any
+    other file -- a DLL redirection lookup of `comctl32.dll` is what
+    one makes before it registers a window class of that assembly's --
+    and a dependency the table has no row for leaves
+    `CreateActCtxW: no files for <name>` in the ledger ("unsupported"),
+    since its sections then hold nothing. Two limits: Windows binds
+    such a dependency to the version it has installed (Common-Controls
+    6.0.0.0 to 6.0.26100.9818 on the pinned build) and brings that
+    assembly's own dependencies with it (its optional resources
+    assembly, whose one file is `comctl32.dll.mui`), where gala keeps
+    the identity the manifest asked for and has no manifest to read
+    further dependencies out of; and Windows' Common-Controls manifest
+    declares 29 window classes, which the table does not carry because
+    nothing in gala would resolve a versioned class name yet (ROADMAP
+    item OF). Else ERROR_SXS_CANT_GEN_ACTCTX
     with `CreateActCtxW: no assembly <name>` in the ledger, unless
     optional="yes" or allowDelayedBinding="true".
   - Sections (`sections.rs`, Windows' undocumented layouts as Wine's
