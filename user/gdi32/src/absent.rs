@@ -26,8 +26,8 @@
 //!   ERROR_NOT_SUPPORTED set with it is for callers that look there
 //!   anyway; the ledger is what names them. The two the Vulkan loader
 //!   looks up by name, D3DKMTEnumAdapters2 and D3DKMTQueryAdapterInfo,
-//!   are deliberately not here: GetProcAddress must keep answering NULL
-//!   for those, which is how the loader learns to skip them.
+//!   are not here: they are answered the way a Windows with no adapter
+//!   answers them (`d3dkmt`).
 
 use super::unsupported;
 

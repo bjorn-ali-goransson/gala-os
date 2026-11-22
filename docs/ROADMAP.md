@@ -2235,11 +2235,18 @@ need gala's.
      The other gaps the ledger names around that exit, each to be
      measured on Windows before it is answered: kernelbase's
      SetSystemFileCacheSize over ntdll's NtSetSystemInformation (six
-     times), HeapQueryInformation's class, and gdi32's
-     D3DKMTEnumAdapters2 and D3DKMTQueryAdapterInfo (sixteen each,
-     which the Vulkan loader tries before the registry's list of
-     drivers) with the interface gala's dxgi refuses CreateDXGIFactory1
-     (three times).
+     times), HeapQueryInformation's class, and the interface gala's
+     dxgi refuses CreateDXGIFactory1 (three times). gdi32's
+     D3DKMTEnumAdapters2 and D3DKMTQueryAdapterInfo, which the Vulkan
+     loader tries before the registry's list of drivers, are measured
+     and answered: no adapters, and no handle ever issued to ask about
+     (`user/d3dkmt_test`, `user/gdi32/src/d3dkmt.rs`). The sixteen
+     lookups of each that the ledger used to name are a found export
+     now, and the run makes one call: Word asks how many adapters
+     there are, hears none, and never asks an adapter anything
+     (`D3DKMTEnumAdapters2(no adapters)`, one hit, the room it offered
+     0). Word stops where it did -- "(13)", status 0 after 32.8 s --
+     so this was a gap and not the cause.
      A run with every system call traced from boot takes a different
      path, not a slower one: it stops in `MsoSplash`, asking
      RoGetActivationFactory for
@@ -2813,9 +2820,11 @@ need gala's.
      gala refuses, and the run ends where it did: Word's untitled
      window up, "(13)", status 0 after 30.7 s, the decision in wwlib.
      (gdi32's `D3DKMTEnumAdapters2` and `D3DKMTQueryAdapterInfo` are
-     not among these: GetProcAddress must keep answering NULL for them,
-     which is how the Vulkan loader learns to skip them --
-     `user/gdi32/src/absent.rs`.)
+     answered as a Windows with no display adapter answers them --
+     `user/gdi32/src/d3dkmt.rs`, measured in `user/d3dkmt_test`. The
+     Vulkan loader asks them before the registry's list of drivers,
+     hears that there are no adapters, and finds lavapipe in the
+     registry after it, which `vk_test` expects of every run.)
      The machine's size is not the cause either, and that question is
      closed: on 4 GiB instead of 596 MiB, with 3.5 GiB still free,
      Word fails identically, and gala itself never came near the edge

@@ -23,6 +23,7 @@ console_test
 context_test
 cow_test
 cxx_eh_test
+d3dkmt_test
 dbghelp_test
 dir_test
 dirchange_test

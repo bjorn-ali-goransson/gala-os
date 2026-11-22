@@ -10952,6 +10952,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("display_test", "gdi32.dll", "Windows/System32"),
     ("display_test", "setupapi.dll", "Windows/System32"),
     ("display_test", "advapi32.dll", "Windows/System32"),
+    // The display driver's adapter enumeration (user/d3dkmt_test).
+    ("d3dkmt_test", "ntdll.dll", "Windows/System32"),
+    ("d3dkmt_test", "kernel32.dll", "Windows/System32"),
+    ("d3dkmt_test", "gdi32.dll", "Windows/System32"),
     // The system metrics (user/metrics_test).
     ("metrics_test", "ntdll.dll", "Windows/System32"),
     ("metrics_test", "kernel32.dll", "Windows/System32"),
@@ -11379,6 +11383,7 @@ const USER_PROGRAMS: &[&str] = &[
     "gdiplus_test",
     "uisettings_test",
     "display_test",
+    "d3dkmt_test",
     "metrics_test",
     "spi_test",
     "caps_test",
@@ -15827,6 +15832,12 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "vk_test: presented",
             "xtask: screen ok",
             "vk_test: ok",
+            // The loader asks the display driver for adapters before it
+            // reads the registry's list, and gala answers that there
+            // are none (`user/gdi32/src/d3dkmt.rs`): this row is there
+            // to say that the answer is what the loader hears, and the
+            // lines above that it still finds lavapipe after it.
+            r#"ledger: {"service":"gdi32.dll!D3DKMTEnumAdapters2(no adapters)","what":"reached""#,
             "exited with status 0x00000000",
         ],
     },
@@ -16709,6 +16720,27 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=display_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["display_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The display driver's adapter enumeration, which the Vulkan
+        // loader calls through gdi32 to find a GPU: the room
+        // D3DKMTEnumAdapters2 asks for, the adapters it writes, and what
+        // D3DKMTQueryAdapterInfo answers for a handle gala never issued
+        // (user/d3dkmt_test).
+        name: "d3dkmt_test",
+        cmdline: "qemu_exit run=d3dkmt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "d3dkmt_test: info room 0",
+            "d3dkmt_test: info adapters 0",
+            "d3dkmt_test: info values 0",
+            "d3dkmt_test: ok",
+            r#"ledger: {"service":"gdi32.dll!D3DKMTEnumAdapters2(no adapters)","what":"reached""#,
+            r#"ledger: {"service":"gdi32.dll!D3DKMTQueryAdapterInfo(ADAPTERTYPE)","what":"unsupported""#,
+            r#"ledger: {"service":"gdi32.dll!D3DKMTQueryAdapterInfo(QUERYREGISTRY)","what":"unsupported""#,
+            r#"ledger: {"service":"gdi32.dll!D3DKMTQueryAdapterInfo(QUERYREGISTRY VulkanDriverName)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // The system metrics: the sizes and switches GetSystemMetrics

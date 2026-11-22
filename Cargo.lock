@@ -568,6 +568,13 @@ name = "d3dcompiler_47"
 version = "0.1.0"
 
 [[package]]
+name = "d3dkmt_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
