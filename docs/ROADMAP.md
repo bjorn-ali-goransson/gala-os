@@ -3209,19 +3209,6 @@ need gala's.
      Word's own bookkeeping calls the (13) exit orderly rather than a
      crash, which agrees with its status 0 and with the
      `EvtWordCoreBootStop` it resolves after.
-     One gap of gala's does stand in the graphics path, upstream of
-     everything Word reads about the display: gdi32 exports neither
-     `D3DKMTEnumAdapters2` nor `D3DKMTQueryAdapterInfo`, which Windows'
-     does, and DXVK asks for each of them sixteen times 4.5 s before
-     the box (two `missing export` rows, 16 hits each). Its own log
-     names what follows -- `DXGI: Found monitors not associated with
-     any adapter, using fallback`, three times -- so the monitor is
-     associated with the adapter by DXVK's fallback and not through the
-     kernel-mode thunks. It copes, and Word's device and every call on
-     it answer S_OK, so this is a divergence to close and not a known
-     cause. Next: `d3dkmt_test` measuring both calls on real Windows
-     (the adapter count, each adapter's LUID and handle, and the query
-     types DXVK asks for), then gdi32 answering them.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
@@ -8017,6 +8004,20 @@ Each entry: what, why it matters, the structural fix, the owning item.
   module and hash that -- the packages' pins for `gala-debs-`, the
   prebuilt programs' for `gala-prebuilt-` -- after which a branch that
   adds a scenario shares both caches instead of replacing them.
+- **Three more tables scanned for a free slot**, the pattern the
+  registry's arena no longer has (ARCHITECTURE "Registry"):
+  `fs::ramfs`'s `slot`, `nt::object`'s handle tables and `net::tcp`'s
+  connections all run `nodes.iter().position(Option::is_none)` for every
+  entry they place. None is measured as costly yet and the arithmetic
+  says why: the file tree holds 12 213 nodes after an Office install, so
+  its scans are about 7.5e7 checks against the registry's 9.2e8 -- some
+  75 ms of the 1.1 s that replay takes, inside its own noise -- and the
+  busiest handle table in that run held 153 handles. They are quadratic
+  all the same, in a count no invariant bounds (a program may hold tens
+  of thousands of handles, a file tree may hold a disk's files), and
+  each wants the same free list. The registry's measurement is the
+  argument for doing them before something else grows: 2.1 s to 0.84 s
+  of replay, and a hang watchdog line gone.
 - **`arm_lx_inkscape` stalled once on CI** (1 of 5 runs; 0 of 9
   locally, 4 of them at once beside busy host loops): after glycin
   SIGKILLed its image loader (as it does on every run), Inkscape's main

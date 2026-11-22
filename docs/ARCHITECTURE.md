@@ -3347,6 +3347,16 @@ shutdown.
   freed with its last handle. Invariant: a key object is never dropped
   while the registry lock is held (its Drop takes it), so handlers make
   the key object after leaving `registry::with`.
+- **The arena** is a `Vec<Option<Node>>` indexed by key, and the slots
+  that hold nothing are a list of their own. Invariant: **placing a key
+  does not look through the table for a free slot.** A mount creates
+  keys one after another -- 42 956 of them for an installed Office -- and
+  a scan for each is quadratic over the registry: it cost 1.25 s of the
+  2.1 s that replay took, and the hang watchdog reported a CPU inside
+  one taking no timer interrupt for 5 s under a busy host. A freed slot
+  the list has no room for (no memory) is not lost either: the next key
+  that finds the list empty looks the holes up once, so the table does
+  not grow past them for the rest of the boot.
 - **Rules kept from Windows** (documented behaviour): names are
   case-insensitive and case-preserving (ASCII folding, as in the object
   namespace); subkeys enumerate in name order, values in the order first
@@ -8097,6 +8107,15 @@ rather than a format of their own.
   old tree and writes the new one; a tombstone covers the names below
   it (no tombstone under another). Replay sets only the times records
   carry: a replayed create or delete leaves the parent's LastWriteTime.
+- **The mount replays that log** before anything runs, holding the
+  registry's lock, and says how long it took (`persist: replayed N
+  registry changes (M skipped) in T ms`, beside the file log's own
+  line): an installed Office's 163 819 changes take about 0.8 s of a
+  quiet machine, which is 2.5x what the whole boot spends anywhere else
+  in the registry. The time is in the line because the boot is not
+  preemptible here and a slow replay looks like a hang -- the hang
+  watchdog's report was the only sign of the scan this arena no longer
+  does.
 - The registry is flushed lazily, as Windows' hives are ("within a few
   seconds", RegFlushKey's documentation): `persist::sync` moves the
   registry's records into the file at the first sync 5 s after the last
