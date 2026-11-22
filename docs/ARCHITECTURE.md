@@ -4768,9 +4768,7 @@ definition for both layouts, "Plan: WOW64").
   starts no service processes yet).
 - **Registry**: "Registry". **LSA policy and virtual accounts**
   (`policy.rs`): "Accounts and logon".
-- **ETW** (`etw.rs`): providers register, but no trace session exists,
-  so no provider is ever enabled and events go nowhere, successfully (as
-  on Windows with no listener). A REGHANDLE is one of those
+- **ETW, the provider side** (`etw.rs`): a REGHANDLE is one of those
   registrations and not a number: EventRegister takes a block holding
   the provider's GUID, its enable callback and context and whether its
   traits are set, EventUnregister gives the block back, and a handle no
@@ -4783,22 +4781,69 @@ definition for both layouts, "Plan: WOW64").
   EventWriteString) succeed on a live registration and validate the
   descriptor before the handle, so a null descriptor is
   ERROR_INVALID_PARAMETER whatever the handle is; EventEnabled and
-  EventProviderEnabled answer FALSE for every provider and on any
-  handle, having no error to give; EventSetInformation validates the
+  EventProviderEnabled answer FALSE for a handle no live registration
+  has, having no error to give, and otherwise whatever the running
+  sessions admit; EventSetInformation validates the
   information class before the handle (only EventProviderSetTraits
   reaches the registration, classes 1 and 5 are ERROR_NOT_SUPPORTED
   and the rest ERROR_INVALID_PARAMETER) and a provider's traits are
   set once, a second attempt ERROR_GEN_FAILURE. Windows caps how many
   providers a process registers nowhere one can reach (1200 in a row
   all succeeded), which is why registrations are a list and not a
-  table. What a program registered, and the name its traits give it,
-  is recorded (OBSERVABILITY "Missing-features ledger"): a provider no
-  session enabled writes nothing at all, TraceLogging building an
-  event's payload only once the enable callback says a session wants
-  it, so the registrations are the whole of what a program's
-  telemetry leaves behind until gala is that session (ROADMAP OF).
-  Classic (MOF) providers: RegisterTraceGuidsW returns a handle and
-  never calls back; GetTraceEnableFlags/Level and TraceEvent fail with
+  table. A provider no session enabled is not enabled, which is the
+  usual case and what Windows does with no listener: its events go
+  nowhere, successfully. What a program registered, and the name its
+  traits give it, is recorded (OBSERVABILITY "Missing-features
+  ledger"): a provider no session enabled writes nothing at all,
+  TraceLogging building an event's payload only once the enable
+  callback says a session wants it, so the registrations are the whole
+  of what a program's telemetry leaves behind until a session asks for
+  it.
+- **ETW, the session side** (`trace.rs`): StartTraceW, EnableTraceEx2
+  and ControlTraceW, so that a program's own trace session is a
+  session -- which is what makes it build its events at all. What gala
+  has is the private in-process session (EVENT_TRACE_PRIVATE_LOGGER_MODE
+  | EVENT_TRACE_PRIVATE_IN_PROC | EVENT_TRACE_BUFFERING_MODE): the one
+  kind a program starts without administrator rights, keeping its
+  events in memory, needing no file. A session that asks for a log file
+  is ERROR_NOT_SUPPORTED and a system-wide one ERROR_ACCESS_DENIED --
+  what a standard user is told -- each with a ledger row, rather than a
+  session that quietly drops what is written to it. The enablement
+  contract is Windows' own, measured as a standard user against a
+  private session of the probe's own and checked on both systems by
+  `user/etw_test`: a provider's demands are the union of every running
+  session's (the highest level, the keywords of all of them together),
+  an event is in reach when its level is 0 or at most that level and
+  its keyword is 0 or overlaps MatchAnyKeyword and holds every bit of
+  MatchAllKeyword, and a session that asks for keyword 0 means every
+  keyword and is reported as MatchAnyKeyword ~0 (level 0 does not
+  bypass the keyword test, which was the assumption the measurement
+  corrected). A provider learns its demands in its enable callback and
+  nowhere else: at an EnableTraceEx2, at a registration made while a
+  session already enables it, at a capture-state request (IsEnabled 2,
+  level 255, every keyword, which changes nothing), at the disable
+  (zeros) and once per provider at the session's stop -- and never at
+  EventUnregister. The callback gets the context the registration was
+  made with and, for a private session, a source id of all zeros, and
+  runs with no lock held, because it is the program's own code and may
+  register a provider of its own. An event in reach is kept in the
+  session's buffers as its provider, descriptor and payload bytes
+  (nothing decodes them yet, ROADMAP OT4); one that does not fit counts
+  towards the EventsLost a query reports. Two answers are gala's
+  reading where Windows is not measured: what MatchAllKeyword means
+  when several sessions ask for one (a session that demands no
+  particular bits frees the provider of the other's demand), and how
+  much room ControlTraceW wants in the block the session's names go
+  back into (gala asks only that they fit, where Windows wants more:
+  a block sized exactly to the structure plus the names is
+  ERROR_MORE_DATA on the pinned build). A flush has nowhere to flush
+  to (ERROR_FILE_NOT_FOUND, Windows' own answer for a buffering
+  session), a stopped session's handle is still taken by
+  EnableTraceEx2 and enables nothing, and ControlTraceW on it is
+  ERROR_WMI_INSTANCE_NOT_FOUND.
+  Classic (MOF) providers, which no gala session enables (EnableTrace
+  is the call that would, and it is unimplemented):
+  RegisterTraceGuidsW returns a handle and never calls back; GetTraceEnableFlags/Level and TraceEvent fail with
   ERROR_INVALID_HANDLE, as for a provider no session enabled, and
   GetTraceLoggerHandle fails ERROR_INVALID_PARAMETER with no buffer
   and ERROR_BAD_LENGTH with a buffer that is no session's (Windows'

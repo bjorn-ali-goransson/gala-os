@@ -5,7 +5,6 @@
 gala_stubs::unimplemented_exports!("advapi32.dll":
     ChangeServiceConfigA
     ChangeServiceConfigW
-    ControlTraceW
     CryptContextAddRef
     CryptEncrypt
     CryptGetHashParam
@@ -24,7 +23,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     RegCopyTreeW
     SetEntriesInAclA
     SetServiceBits
-    StartTraceW
     UnlockServiceDatabase
     CredDeleteW
     CredFree

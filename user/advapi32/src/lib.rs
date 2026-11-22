@@ -77,6 +77,7 @@ mod security;
 mod service;
 mod service_run;
 mod token;
+mod trace;
 mod trustee;
 mod unimplemented;
 
