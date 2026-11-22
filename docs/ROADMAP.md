@@ -3150,10 +3150,38 @@ need gala's.
      of gala's but the write itself. So nothing gala wrote is on the
      path that decides, which is the third measurement against a
      refused call being the cause.
-     What is left unmeasured on that thread is the window class it
-     registers: the side-by-side context the
-     `FindActCtxSectionStringW(Comctl32.dll)` above looks a class up
-     in. The window gala gave it is measured and answered now: the
+     That thread is measured now, and it held the first wrong answer
+     of gala's in this window. With a
+     `Microsoft.Windows.Common-Controls` 6.0 dependency active -- the
+     one dependency WINWORD.EXE's manifest declares -- a Windows 11
+     26100 machine answers `FindActCtxSectionStringW(2,
+     "comctl32.dll")` TRUE: a 20-byte PATH_OMITS_ASSEMBLY_ROOT record
+     with no path, roster index 2, because the assembly's WinSxS
+     manifest declares that file. gala answered FALSE
+     (ERROR_SXS_KEY_NOT_FOUND), having built a system assembly with no
+     files at all. It has them now, from a table measured against the
+     host's WinSxS manifests (ARCHITECTURE "Activation contexts";
+     `actctx_test`'s "system assemblies" section, which passes on real
+     Windows), so the lookup Word makes 130 ms before the box -- inside
+     its 22 `ActivateActCtx`/`DeactivateActCtx` pairs and immediately
+     before it resolves `RegisterClassExW` -- is answered as Windows
+     answers it. Word still raises the box after it and asks for no
+     WinSxS path, so that wrong answer was not the cause and the record's
+     PATH_OMITS_ASSEMBLY_ROOT costs nothing here; the assembly has no
+     directory on gala to omit the root of, which is what giving it one
+     would be for.
+     What is still unanswered on that thread is the class itself.
+     Windows' Common-Controls assembly declares 29 window classes
+     (ToolbarWindow32 through Button, Edit and Combobox) and
+     `FindActCtxSectionStringW(3, "Button")` answers
+     `6.0.26100.9818!Button` with module `comctl32.dll` out of a
+     29-entry section; gala answers FALSE, and must keep doing so until
+     two things change: its comctl32 registers no versioned class name
+     and its user32 never consults the activation context, so handing a
+     program `6.0.x!Button` today would break the plain-name path that
+     works. Those two, and then the classes in the table, are the next
+     piece here.
+     The window gala gave it is measured and answered now: the
      three windows Word made smaller than their own frame (the last
      1.6 s before the box) were given a client area of one pixel where
      Windows gives none, and user32 now holds a window to the minimum
@@ -3256,7 +3284,24 @@ need gala's.
      Windows' layouts, FindActCtxSectionStringW/A and
      FindActCtxSectionGuid through the active then the process default
      context (the executable's own manifest), QueryActCtxW's classes 2-6
-     and a DLL's own context (RT_MANIFEST 2); GetThreadIOPendingFlag is
+     and a DLL's own context (RT_MANIFEST 2), a system assembly's files
+     and what Windows answers for them (the record, the roster index,
+     the case-insensitive key and a DLL the assembly does not declare;
+     the identity Windows bound and the WinSxS manifest it has are
+     printed, since Windows takes the version it has installed where
+     gala keeps the one asked for). Two of the checks this test
+     inherited from Wine's hold only where the manifest sits beside the
+     executable, which is how Wine writes its manifests and not how
+     this test does, so they have never held on a Windows host: the
+     application directory Windows reports for a context made from a
+     manifest file is that file's directory and not the executable's
+     (gala answers the executable's), and the file information of a
+     private dependency's file answers nothing at all
+     (ERROR_INSUFFICIENT_BUFFER with no size written) where gala
+     answers the file -- while a system assembly's answers the file, as
+     gala does. Both are measured, neither is on Word's path, and
+     correcting them (the test and gala) is the next piece of this
+     item. GetThreadIOPendingFlag is
      ThreadIsIoPending, the kernel's count of a thread's outstanding
      socket, pipe and directory-watch requests (`office_api_test`;
      ARCHITECTURE "I/O requests and their thread"). The process

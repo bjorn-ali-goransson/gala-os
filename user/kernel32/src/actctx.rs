@@ -122,6 +122,23 @@ fn note_missing_dependency(assembly: &[u16]) {
     super::note(&name[..n], 0);
 }
 
+/// A dependency on one of Microsoft's own assemblies that
+/// `manifest::SYSTEM_FILES` has no row for: gala has no manifest to read
+/// its files out of, so its sections hold nothing and every DLL
+/// redirection and window class lookup against it finds nothing. Named,
+/// because the row to add is the one this program wanted.
+fn note_system_without_files(assembly: &[u16]) {
+    let mut name = [0u8; 96];
+    let head = b"kernel32.dll!CreateActCtxW: no files for ";
+    name[..head.len()].copy_from_slice(head);
+    let mut n = head.len();
+    for &c in assembly.iter().take(96 - n) {
+        name[n] = if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' };
+        n += 1;
+    }
+    super::unsupported(&name[..n], 0);
+}
+
 /// Reads the whole file `path` (NUL-terminated) into `out`.
 fn read_file(path: *const u16, out: &mut Buf<u8>) -> bool {
     const GENERIC_READ: u32 = 0x8000_0000;

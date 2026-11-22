@@ -40,6 +40,17 @@
 //!   run levels (asInvoker, requireAdministrator with uiAccess);
 //!   compatibility lists in manifest order with maxversiontested
 //!   (10.0.18358 is 0x000a000047b60000).
+//! - A dependency on one of Microsoft's own assemblies (public key
+//!   6595b64144ccf1df), resolved against WinSxS: what a program reads out
+//!   of such an assembly is the files its manifest declares. Measured on
+//!   Windows 11 26100: Common-Controls 6.0 declares `comctl32.dll` (and
+//!   29 window classes), GdiPlus declares `GdiPlus.dll`; each is the
+//!   roster's second assembly, answers a DLL redirection lookup with the
+//!   no-path record of a plain file and names the file in its file
+//!   information, while a DLL it does not declare is in no section.
+//!   Windows binds the dependency to the version it has installed and
+//!   pulls in Common-Controls' optional resources assembly
+//!   (`comctl32.dll.mui`): printed, not checked.
 //! - Refused manifests (ERROR_SXS_CANT_GEN_ACTCTX): no namespace, no
 //!   manifestVersion, an unknown attribute or element, content after the
 //!   root, another namespace, a short file hash, a file without a name, a
@@ -588,6 +599,13 @@ const DEP3: &str = r#"<assemblyIdentity type="win32" name="testdep" version="6.5
 /// its backslash, a path that is the file's own name, and two that hold
 /// a variable to expand.
 const LOADFROM: &str = r#"<assemblyIdentity version="1.0.0.0" name="Wine.Test" type="win32" processorArchitecture="ARCH"/><file name="plain.dll"/><file name="dironly.dll" loadFrom="sub\"/><file name="dirnoslash.dll" loadFrom="sub"/><file name="samename.dll" loadFrom="samename.dll"/><file name="expanddir.dll" loadFrom="%SystemRoot%\"/><file name="upper.dll" loadFrom="%SYSTEMROOT%\Upper.DLL"/></assembly>"#;
+
+/// A dependency on one of Microsoft's own assemblies: its public key is
+/// Microsoft's, so Windows resolves it against WinSxS instead of looking
+/// beside the manifest, and the DLLs are the system's own.
+const SYSTEM_CC: &str = r#"<assemblyIdentity version="1.0.0.0" name="Gala.Test" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="ARCH" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>"#;
+
+const SYSTEM_GDIPLUS: &str = r#"<assemblyIdentity version="1.0.0.0" name="Gala.Test" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.GdiPlus" version="1.0.0.0" processorArchitecture="ARCH" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>"#;
 
 const WRONG_DEP1: &str = r#"<assemblyIdentity type="win32" name="testdep" version="6.5.4.4" processorArchitecture="ARCH" /></assembly>"#;
 
@@ -1517,6 +1535,84 @@ fn manifests(c: &mut Checks) -> Result<(), u32> {
 
 /// Run levels and compatibility lists (Wine's test_runlevel_info and
 /// test_compatibility).
+/// Prints roster index `id`'s assembly without asserting it: Windows
+/// binds a system dependency to the version it has installed, and brings
+/// that assembly's own dependencies with it; gala keeps the identity the
+/// manifest asked for and has no manifest to read further dependencies
+/// out of.
+fn show_assembly(c: &mut Checks, h: Handle, id: u32) -> Result<(), u32> {
+    let mut buf = [0u64; 160];
+    let mut got = 0usize;
+    // SAFETY: valid buffers.
+    unsafe {
+        c.ok(
+            QueryActCtxW(
+                0,
+                h,
+                (&raw const id).cast(),
+                3,
+                buf.as_mut_ptr().cast(),
+                size_of_val(&buf),
+                &mut got,
+            ) != 0,
+            GetLastError().into(),
+        )?;
+        let a = &*buf.as_ptr().cast::<AssemblyInfo>();
+        info_text("the system assembly's identity", units(a.identity));
+        info_text("its manifest", units(a.manifest));
+        info("its ulFileCount", a.file_count.into());
+    }
+    Ok(())
+}
+
+/// One dependency on a system assembly: the file it declares answers a
+/// DLL redirection lookup out of the dependency, with the no-path record
+/// a plain `<file>` gets (`find_dll`), and the file information names
+/// it. That lookup is the one a program makes before it registers a
+/// common control's window class.
+fn system_assembly(
+    c: &mut Checks,
+    manifest: &str,
+    body: &str,
+    dll: &str,
+    spelled: &str,
+) -> Result<(), u32> {
+    put(manifest, text(&[HEAD, body]).b());
+    let h = create(manifest);
+    c.ok(h != INVALID, 0)?;
+    let mut cookie = 0usize;
+    // SAFETY: the context made above.
+    unsafe { c.ok(ActivateActCtx(h, &mut cookie) != 0, 0)? };
+    find_dll(c, dll, 2, h)?;
+    // The key is case-insensitive, whatever the manifest spelled.
+    find_dll(c, spelled, 2, h)?;
+    // A DLL the assembly does not declare is in no section: neither the
+    // dependency's nor the process default's (galaactctx.dll).
+    let absent = Wide::of("user32.dll");
+    let mut d = KeyedData::new();
+    // SAFETY: valid arguments.
+    unsafe {
+        let r = FindActCtxSectionStringW(0, null(), DLL_REDIRECTION, absent.p(), &mut d);
+        c.fails(r != 0, ERROR_SXS_KEY_NOT_FOUND)?;
+    }
+    show_assembly(c, h, 2)?;
+    // SAFETY: the context and the cookie above.
+    unsafe {
+        c.ok(DeactivateActCtx(0, cookie) != 0, 0)?;
+        ReleaseActCtx(h);
+    }
+    remove(manifest);
+    Ok(())
+}
+
+/// Microsoft's own assemblies, the dependency Office's programs declare:
+/// WINWORD.EXE's manifest has exactly one, Common-Controls 6.0.
+fn system_assemblies(c: &mut Checks) -> Result<(), u32> {
+    section("system assemblies");
+    system_assembly(c, "sys_cc.manifest", SYSTEM_CC, "comctl32.dll", "COMCTL32.DLL")?;
+    system_assembly(c, "sys_gdiplus.manifest", SYSTEM_GDIPLUS, "GdiPlus.dll", "gdiplus.dll")
+}
+
 fn levels_and_compat(c: &mut Checks) -> Result<(), u32> {
     section("run levels");
     for (m, level, ui) in [(MANIFEST6, 1, 0), (MANIFEST7, 3, 1)] {
@@ -1676,6 +1772,7 @@ fn run() -> Result<(), u32> {
     unsafe { CreateDirectoryW(dir.p(), 0) };
     process_default(&mut c)?;
     manifests(&mut c)?;
+    system_assemblies(&mut c)?;
     levels_and_compat(&mut c)?;
     refused(&mut c)?;
     // SAFETY: as above.
