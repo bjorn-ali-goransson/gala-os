@@ -369,6 +369,7 @@ pub fn mount() {
     match mounted {
         Mounted::Formatted => info!("persist: formatted the disk"),
         Mounted::Log(ops) => {
+            let began = platform::monotonic_ns();
             file::with_fs(|fs| {
                 for op in &ops {
                     match fs.apply(op) {
@@ -377,8 +378,12 @@ pub fn mount() {
                     }
                 }
             });
+            // How long it took, because the boot is not preemptible here
+            // and a slow replay looks like a hang: the hang watchdog's
+            // report is the only other sign of one.
             info!(
-                "persist: replayed {applied} changes ({skipped} skipped), {} of {} KiB of log",
+                "persist: replayed {applied} changes ({skipped} skipped) in {} ms, {} of {} KiB of log",
+                (platform::monotonic_ns() - began) / 1_000_000,
                 volume.used() / 1024,
                 volume.area_bytes() / 1024
             );
@@ -539,6 +544,7 @@ fn mount_registry() {
             return;
         }
     };
+    let began = platform::monotonic_ns();
     let result = registry::with(|r| {
         let mut skipped = 0;
         for op in &ops {
@@ -549,10 +555,16 @@ fn mount_registry() {
         r.recording = true;
         Ok(skipped)
     });
+    let took = (platform::monotonic_ns() - began) / 1_000_000;
     if let Ok(skipped) = result
         && !ops.is_empty()
     {
-        info!("persist: replayed {} registry changes ({skipped} skipped)", ops.len());
+        // The time, because this replay is the longest stretch the boot
+        // spends with the registry's lock held: the hang watchdog
+        // reported a CPU of a 42956-key registry's mount taking no timer
+        // interrupt for 5 s, and nothing else said where those seconds
+        // went (ARCHITECTURE "What the registry keeps").
+        info!("persist: replayed {} registry changes ({skipped} skipped) in {took} ms", ops.len());
     }
 }
 
