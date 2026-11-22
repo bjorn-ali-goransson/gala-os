@@ -443,6 +443,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("imports_except") {
         nt::traceimports::set_except(spec);
     }
+    // `ledger_except=<text>[,<text>...]`: keep the gaps whose names
+    // hold one of the texts out of the missing-features ledger, so that
+    // its 512 slots go to the rest (nt::ledger). Every dump says how
+    // many records each text kept out.
+    if let Some(spec) = cmdline.value("ledger_except") {
+        nt::ledger::set_except(spec);
+    }
     // `imports_in=<image>`: arm only the slots in that image -- the
     // `from` of a record -- which narrows a trace by the module a call
     // comes *from* where `imports=<program>!<dll>` narrows it by the
