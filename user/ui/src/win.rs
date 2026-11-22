@@ -472,6 +472,7 @@ fn strip<M>(placed: &[Placed<M>]) -> Vec<Placed<()>> {
             bold: p.bold,
             padding: p.padding,
             ellipsis: p.ellipsis,
+            content: p.content,
             parent: p.parent,
         })
         .collect()

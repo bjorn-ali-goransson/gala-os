@@ -863,8 +863,12 @@ shell part) leaves it.
       strip goes back to the desktop, reserved and drawn by nothing.
       Test:
       `shasha_test` with the screen scenario `shasha` (ARCHITECTURE
-      "The user-mode shell"). Not yet in shasha: the window buttons'
-      icons; the shell's bar is not told when the
+      "The user-mode shell"). A window's button holds an icon shasha
+      draws for its program (a folder, a chart, a console, a page, or
+      the program's initial), the title and an indicator; the Start
+      button gala's mark; the time over the date. Not yet in shasha:
+      the windows' own icons on their buttons (the desktop keeps them,
+      GalaWindowSetIcon, but does not hand them to the shell); the shell's bar is not told when the
       screen changes size.
    7. Done: shasha's own start menu, a gala_ui window ("Start", popup,
       topmost, hidden until opened) centred above the taskbar: the

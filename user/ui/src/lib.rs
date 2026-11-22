@@ -39,7 +39,10 @@
 //! ```
 //!
 //! - Elements: [`column`], [`row`], [`grid`] place what they hold;
-//!   [`text`], [`button`], [`input`], [`image`] and [`rule`] are leaves.
+//!   [`text`], [`button`], [`input`], [`image`] and [`rule`] are leaves,
+//!   except that a [`button`] may hold elements: its look, laid out as
+//!   a row (an icon and a label), its text then only its UIA name; what
+//!   it holds takes no id, so a click anywhere on it is the button's.
 //! - Style is set on the element ([`Node`]'s methods); `color`, `size`
 //!   and `bold` are inherited by the elements inside it, nothing else
 //!   cascades. Shared looks are plain functions and constants.

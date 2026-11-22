@@ -8482,9 +8482,20 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   already. From then on the desktop neither draws the taskbar nor
   answers clicks on its strip (`own_taskbar`); shasha's window is
   there. ABM_GETTASKBARPOS answers the shell's bar.
-- **The taskbar**: a centred row of buttons (UIA: `StartButton` named
-  "Start", and `Task<hwnd>` named with each window's title, the active
-  one outlined) and the clock (`Clock`, HH:MM) at the right. The list
+- **The taskbar**: under a hairline, a centred row of buttons (UIA:
+  `StartButton` named "Start", drawn as gala's mark, a white "g" on an
+  accent rounded square; `Task<hwnd>` named with each window's title)
+  and the time over the date (`Clock`, HH:MM; `Date`, M/D/YYYY) at the
+  right. A window's button holds its program's icon and the title, cut
+  to fit, and an indicator along its bottom: 16 px accent for the
+  active window (whose button is also a shade lighter), 6 px grey for
+  the others; a minimized one's title is dimmed. The icon is drawn by
+  shasha from the window's program (`Icon::of`, the image file name
+  that OpenProcess and QueryFullProcessImageNameW give for the window's
+  pid, looked up once a process; a failure is logged and the button
+  shows the program's initial): a folder for explorer.exe, a chart for
+  taskmgr.exe, a console for cmd.exe and PowerShell, a page for
+  notepad.exe, any other program its initial on a colour of its name. The list
   is GalaDesktopAction's ACTION_WINDOWS, fetched again when a WinEvent
   says a window was created, destroyed, shown, hidden, renamed,
   activated, minimized or restored (two out-of-context hooks; events of
@@ -9505,8 +9516,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   32 bits; alpha from the colour bitmap, else from the mask; a
   monochrome icon black and white), averages icons above 64 pixels down
   to 32, and calls GalaWindowSetIcon. The desktop keeps it at 16 x 16
-  (SM_CXSMICON) for the caption (shasha's task buttons show no icon
-  yet: ROADMAP SH step 1, part 10). conhost's
+  (SM_CXSMICON) for the caption (shasha's task buttons draw their
+  program's icon themselves, not the window's: ROADMAP SH step 1,
+  part 6). conhost's
   class has its own icon (a dark square with ">_", drawn in code).
   TODO: hand over the small icon itself for the caption (now the big
   one, scaled); conhost showing its program's icon.
@@ -15929,7 +15941,11 @@ The tree (the crate's documentation has a whole component):
 - Elements: `column()`, `row()`, `grid([px(200), fr(1), fr(2)])` place
   what they hold; `text(..)`, `button(id, label)`, `input(id, value)`,
   `image(src)` (a picture the program draws, of a set size) and
-  `rule()` are leaves. Children by `.child`, `.child_if(cond, ..)`
+  `rule()` are leaves, but a `button` may hold elements: its look (an
+  icon and a label), laid out as a row, its label then only its UIA
+  name and not drawn; what it holds takes no id (refused, naming it),
+  so the button stays one control and a click anywhere on it is its
+  own. Children by `.child`, `.child_if(cond, ..)`
   (absent otherwise: not laid out, not in UIA) and `.children(iter)`
   (lists from data).
 - Style is set on the element: `.width .height .min_width .max_width

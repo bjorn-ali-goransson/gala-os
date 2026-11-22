@@ -21950,6 +21950,10 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
+    (
+        "glob_test",
+        "a child process, whose arguments the C runtime expands (one NT process per Linux process)",
+    ),
     ("office_k32_test", "WinExec starts a child process (one NT process per Linux process)"),
     ("pkgview_test", "a child process in the package (one NT process per Linux process)"),
     ("quota_test", "child processes (one NT process per Linux process)"),

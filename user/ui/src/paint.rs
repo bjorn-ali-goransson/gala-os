@@ -40,7 +40,8 @@ pub trait Canvas {
 
 /// Draws `placed` (as [`crate::place`] gives it) in paint order: each
 /// element's background, then its border, then its text inset by its
-/// padding. An empty input shows its placeholder in [`PLACEHOLDER`];
+/// padding (a button that holds elements draws them, not its text).
+/// An empty input shows its placeholder in [`PLACEHOLDER`];
 /// the input whose id is `focus` gets a [`FOCUS`] bar along its bottom.
 /// A rule without a background is drawn in its colour. An image is
 /// drawn by the canvas ([`Canvas::image`]) over its background.
@@ -65,7 +66,7 @@ pub fn paint<M>(placed: &[Placed<M>], focus: Option<&str>, canvas: &mut dyn Canv
                 let set = if p.ellipsis { Set::Cut } else { Set::Wrap };
                 canvas.text(inner, &p.text, p.color, p.size, p.bold, set)
             }
-            Kind::Button if !p.text.is_empty() => {
+            Kind::Button if !p.text.is_empty() && !p.content => {
                 canvas.text(inner, &p.text, p.color, p.size, p.bold, Set::Centre)
             }
             Kind::Input => {
@@ -161,6 +162,15 @@ mod tests {
         // Typed text in the text's colour; no bar without the focus.
         let v: Node<()> = column().child(input("I", "hi").color(0x123456));
         assert_eq!(draw(&v, Some("J")), ["text [0, 0, 200, 18] \"hi\" 123456 14 false Line"]);
+    }
+
+    #[test]
+    fn a_button_holding_elements_draws_them_not_its_text() {
+        let v: Node<()> = column().child(button("B", "Name").bg(0xeeeeee).child(text("look")));
+        assert_eq!(
+            draw(&v, None),
+            ["fill [0, 0, 200, 18] eeeeee r0", "text [0, 0, 28, 18] \"look\" 000000 14 false Wrap"]
+        );
     }
 
     #[test]

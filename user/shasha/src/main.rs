@@ -125,7 +125,7 @@ use shasha::tray::{self, Button, Key, Refused};
 use shasha::wallpaper;
 use shasha::{
     CATALOG_ENTRY, Click, HEIGHT, MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Msg, StartMenu,
-    Taskbar, clock_text, parse_catalog, parse_programs, parse_windows,
+    Taskbar, clock_text, date_text, parse_catalog, parse_programs, parse_windows,
 };
 
 type Handle = *mut c_void;
@@ -255,6 +255,13 @@ unsafe extern "system" {
     fn ReadFile(file: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
     fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn OpenProcess(access: u32, inherit: Bool, pid: u32) -> Handle;
+    fn QueryFullProcessImageNameW(
+        process: Handle,
+        flags: u32,
+        buf: *mut u16,
+        size: *mut u32,
+    ) -> Bool;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -403,15 +410,54 @@ fn request(action: u32, hwnd: u64, args: [i32; 4], text: &str, out: &mut [u8]) -
     (status, returned as usize)
 }
 
-/// The desktop's window list, or None (logged) when it cannot be read.
-fn windows() -> Option<Vec<shasha::Task>> {
+/// The desktop's window list, or None (logged) when it cannot be read;
+/// each window's program from `known` (the list shown) when its process
+/// is in it, else looked up ([`program_of`]).
+fn windows(known: &[shasha::Task]) -> Option<Vec<shasha::Task>> {
     let mut b: Vec<u8> = alloc::vec![0; LIST_HEADER + MAX_WINDOWS * WINDOW_ENTRY];
     let (status, n) = action(ACTION_WINDOWS, 0, &mut b);
     if status != 0 {
         log(&format!("the window list is not read: status {status:#x}"));
         return None;
     }
-    Some(parse_windows(&b[..n.min(b.len())]))
+    let mut tasks = parse_windows(&b[..n.min(b.len())]);
+    for t in &mut tasks {
+        t.program = match known.iter().find(|k| k.pid == t.pid) {
+            Some(k) => k.program.clone(),
+            None => program_of(t.pid),
+        };
+    }
+    Some(tasks)
+}
+
+/// Process `pid`'s image file name (`notepad.exe`), what its window's
+/// button shows the icon of; empty (logged, once a process: the list
+/// keeps it) when it cannot be read, and the button shows an initial.
+fn program_of(pid: u32) -> alloc::string::String {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    // SAFETY: a handle we close below.
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h.is_null() {
+        log(&format!("process {pid}'s image is not read: OpenProcess error {}", unsafe {
+            // SAFETY: no arguments.
+            GetLastError()
+        }));
+        return alloc::string::String::new();
+    }
+    let mut buf = [0u16; 260];
+    let mut size = buf.len() as u32;
+    // SAFETY: our handle, a buffer of `size` characters.
+    let ok = unsafe { QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut size) };
+    // SAFETY: no arguments.
+    let error = unsafe { GetLastError() };
+    // SAFETY: opened above.
+    unsafe { CloseHandle(h) };
+    if ok == 0 {
+        log(&format!("process {pid}'s image is not read: error {error}"));
+        return alloc::string::String::new();
+    }
+    let path = alloc::string::String::from_utf16_lossy(&buf[..(size as usize).min(buf.len())]);
+    shasha::program_name(&path)
 }
 
 /// The desktop's installed programs, or None (logged).
@@ -448,11 +494,12 @@ fn linux_list() -> Option<Vec<shasha::linux::LinuxEntry>> {
     Some(parse_linux(&b[..n.min(b.len())]))
 }
 
-fn clock() -> alloc::string::String {
+/// The time and the date the taskbar shows.
+fn clock() -> (alloc::string::String, alloc::string::String) {
     let mut t = SystemTime::default();
     // SAFETY: a SYSTEMTIME to fill.
     unsafe { GetLocalTime(&mut t) };
-    clock_text(t.hour, t.minute)
+    (clock_text(t.hour, t.minute), date_text(t.year, t.month, t.day))
 }
 
 /// Hands the taskbar's app bar to `hwnd` (the shell's window): the strip
@@ -680,7 +727,7 @@ impl Component for App {
             }
             Msg::TrayClick(h, u) => self.click((*h, *u), Button::Left),
             Msg::TrayRightClick(h, u) => self.click((*h, *u), Button::Right),
-            Msg::Clock(_) | Msg::TrayChanged => {}
+            Msg::Clock(..) | Msg::TrayChanged => {}
         }
         self.bar.update(msg);
     }
@@ -718,7 +765,7 @@ impl Component for App {
                     log(&format!("notification-area icon dropped: window {h:#x} id {u} is gone"));
                     win::forget_picture(window(), &tray::icon_id(*h, *u));
                 }
-                let tasks = windows()?;
+                let tasks = windows(&self.bar.tasks)?;
                 if tasks != self.bar.tasks {
                     Some(Msg::Windows(tasks))
                 } else {
@@ -740,8 +787,8 @@ impl Component for App {
                     self.balloon_changed(before);
                     self.post();
                 }
-                let c = clock();
-                (c != self.bar.clock).then_some(Msg::Clock(c))
+                let (c, d) = clock();
+                (c != self.bar.clock || d != self.bar.date).then_some(Msg::Clock(c, d))
             }
             _ => None,
         }
@@ -1272,7 +1319,8 @@ pub extern "C" fn mainCRTStartup() -> ! {
         class: Some("Shell_TrayWnd"),
     };
     let shown: Shown = Rc::new(RefCell::new(None));
-    let bar = Taskbar { tasks: Vec::new(), clock: clock(), tray: tray::Tray::default() };
+    let (clock, date) = clock();
+    let bar = Taskbar { tasks: Vec::new(), clock, date, tray: tray::Tray::default() };
     let app = App { bar, balloon: shown.clone() };
     let Some(hwnd) = win::open(app, &options, log) else {
         log("the window could not be made");

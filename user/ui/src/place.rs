@@ -47,6 +47,9 @@ pub struct Placed<M> {
     pub padding: [i32; 4],
     /// One line, cut with "..." (`Node::ellipsis`).
     pub ellipsis: bool,
+    /// A button that holds elements (`button(..).child(..)`): they are
+    /// its look, its text is only its name.
+    pub content: bool,
     /// The element holding it (its index in the list), None for the root.
     pub parent: Option<usize>,
 }
@@ -158,8 +161,15 @@ impl<'a, M: Clone> Builder<'a, M> {
         if n.on_input.is_some() && n.kind != Kind::Input {
             return Err(self.err(format!("on_input on a {}", n.kind.name())));
         }
-        if !n.kind.is_container() && !n.children.is_empty() {
+        let content = n.kind == Kind::Button && !n.children.is_empty();
+        if !n.kind.is_container() && !content && !n.children.is_empty() {
             return Err(self.err(format!("a {} holds no elements", n.kind.name())));
+        }
+        if self.path[..self.path.len() - 1].iter().any(|(a, _)| a.kind == Kind::Button)
+            && n.id.is_some()
+        {
+            // The button is the control: what it holds is its look.
+            return Err(self.err("an element in a button takes no id"));
         }
         let s = &n.style;
         if s.pin.is_some() && s.width.is_none() {
@@ -212,8 +222,9 @@ impl<'a, M: Clone> Builder<'a, M> {
             };
         }
         match n.kind {
-            Kind::Column => st.flex_direction = FlexDirection::Column,
             Kind::Row => st.flex_direction = FlexDirection::Row,
+            Kind::Button if content => st.flex_direction = FlexDirection::Row,
+            Kind::Column => st.flex_direction = FlexDirection::Column,
             Kind::Grid => {
                 st.display = Display::Grid;
                 st.grid_template_columns = s
@@ -257,9 +268,10 @@ impl<'a, M: Clone> Builder<'a, M> {
             bold,
             padding: s.padding.map(|v| v as i32),
             ellipsis: s.ellipsis,
+            content,
             parent: None,
         };
-        let id = if n.kind.is_container() {
+        let id = if n.kind.is_container() || content {
             let id = self.tree.new_leaf(st).map_err(|e| self.err(format!("layout: {e:?}")))?;
             self.order.push((id, placed));
             let mut kids = Vec::new();
@@ -543,8 +555,10 @@ mod tests {
         assert_eq!(e(&v), "Go: the id is used twice");
         let v = column().child(text("x").id("Badge").pin(1, 1));
         assert_eq!(e(&v), "column 1 > Badge: a pinned element sets its width");
-        let v = column().child(button("B", "b").child(text("x")));
-        assert_eq!(e(&v), "column 1 > B: a button holds no elements");
+        let v = column().child(text("t").child(text("x")));
+        assert_eq!(e(&v), "column 1 > text 1: a text holds no elements");
+        let v = column().child(button("B", "b").child(row().child(text("x").id("X"))));
+        assert_eq!(e(&v), "column 1 > B > row 1 > X: an element in a button takes no id");
         let mut deep = text("leaf");
         for _ in 0..MAX_DEPTH {
             deep = column().child(deep);
@@ -552,6 +566,28 @@ mod tests {
         assert!(e(&deep).ends_with(&format!("text 1: nested deeper than {MAX_DEPTH}")));
         let wide = column().children((0..MAX_ELEMENTS).map(|_| text("x")));
         assert!(e(&wide).ends_with(&format!("more than {MAX_ELEMENTS} elements")));
+    }
+
+    #[test]
+    fn a_button_holding_elements_lays_them_in_a_row_and_is_hit_as_one() {
+        let v: Node<u8> = row().child(
+            button("Task", "Notepad")
+                .gap(4)
+                .padding(2)
+                .on_click(1)
+                .child(text("N").width(10))
+                .child(text("Notepad")),
+        );
+        let p = lay(&v, 300.0);
+        let b = at(&p, "Task");
+        assert!(b.content);
+        // 2 + 10 + 4 + 49 + 2 across, the line's 18 + 4 down.
+        assert_eq!(b.rect, [0, 0, 67, 22]);
+        let inner: Vec<_> = p.iter().filter(|x| x.parent == Some(1)).map(|x| x.rect).collect();
+        assert_eq!(inner, [[2, 2, 10, 18], [16, 2, 49, 18]]);
+        // A click anywhere on it is the button's.
+        assert_eq!(click(&p, 20, 5), Some(("Task", 1)));
+        assert!(!at(&lay(&row::<u8>().child(button("B", "b")), 100.0), "B").content);
     }
 
     #[derive(Clone, Debug, PartialEq)]
