@@ -32901,6 +32901,37 @@ mod constants {
         assert!(found.is_empty(), "use nt::platform instead:\n{}", found.join("\n"));
     }
 
+    /// The calendar is not a clock: it turns a count it is handed into a
+    /// date (`kernel/src/calendar.rs`) and reads nothing, which is what
+    /// lets the NT layer use it without the platform seam
+    /// (`nt_uses_the_machine_only_through_platform`, docs/GALA_UM.md).
+    /// So it names nothing of the kernel at all -- the day someone
+    /// reaches for the clock in here, that seam has a hole in it.
+    #[test]
+    fn the_calendar_is_not_a_clock() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/calendar.rs");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let found: Vec<_> = text
+            .lines()
+            .enumerate()
+            // What the code reaches, not what the module doc says about
+            // it: naming `crate::time` to explain why the calendar does
+            // not use it is the point of the file's own doc.
+            .filter(|(_, line)| !line.trim_start().starts_with("//") && line.contains("crate::"))
+            .map(|(i, line)| format!("{}: {}", i + 1, line.trim()))
+            .collect();
+        assert!(
+            found.is_empty(),
+            "the calendar reaches into the kernel:
+{}",
+            found.join(
+                "
+"
+            )
+        );
+    }
+
     /// `net` is core, below every personality: it reaches threads and time
     /// through `crate::runtime`, never through the NT layer (ROADMAP LX
     /// seam 6; a Linux personality would build its sockets on it too).

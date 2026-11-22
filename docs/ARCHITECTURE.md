@@ -16963,7 +16963,12 @@ New code follows them; old code is brought in line (ROADMAP R1).
    depend on it. Under clock control `time.rs` has two faces: the
    programs' clock (`ticks`, `monotonic_ns`, `system_time`: virtual when
    `clock=` is given) and the raw one (`raw_ticks`, `raw_monotonic_ns`)
-   for the kernel's own diagnostics and sleeps.
+   for the kernel's own diagnostics and sleeps. The calendar
+   (`kernel/src/calendar.rs`) is not a second clock and is not behind
+   the seam: it turns a count it is handed into a date and reads
+   nothing, which is why `nt/` uses it directly -- the taskbar's clock
+   and a date in a program's own telemetry print the same day because
+   it is the kernel's one copy of the conversion.
 
 ### Safety nets
 

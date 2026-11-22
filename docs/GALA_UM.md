@@ -170,7 +170,9 @@ business), and `P`, the type that implements them.
   `crate::disk` or the frame allocator (`crate::mm::frame`,
   `mm::paging`, `free_frame`, `allocate_frame`, `hhdm_offset`, ...);
   xtask's unit test `nt_uses_the_machine_only_through_platform` enforces
-  it.
+  it. `crate::calendar` is not among them and needs no seam: it reads no
+  clock and names nothing of the kernel, which xtask's
+  `the_calendar_is_not_a_clock` enforces in turn.
 - Both platforms keep a `personality::Dispatchers` table (gala-um:
   `entry::SYSCALL_HANDLER`, the thread's personality in a thread-local;
   ROADMAP LX).

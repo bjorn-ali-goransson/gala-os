@@ -3104,7 +3104,7 @@ fn tile_colors(title: &[u16]) -> (u32, u32) {
 fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
     let hh = (minute / 60 % 24) as u8;
     let mm = (minute % 60) as u8;
-    let at = crate::time::Civil::from_minutes(minute);
+    let at = crate::calendar::Civil::from_minutes(minute);
     let mut time = [0u8; 8];
     let mut tn = 0;
     let h12 = match hh % 12 {

@@ -18,6 +18,7 @@ extern crate std;
 pub mod arch;
 #[allow(unsafe_code)]
 pub mod boot;
+pub mod calendar;
 pub mod clockcal;
 pub mod clockctl;
 pub mod cmdline;

@@ -44,7 +44,7 @@
 
 use core::fmt::{self, Write};
 
-use crate::time::Civil;
+use crate::calendar::Civil;
 
 /// The in-type's own bits (`_TlgInTypeMask`).
 const TYPE: u8 = 31;
