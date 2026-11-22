@@ -3090,10 +3090,55 @@ need gala's.
      GetDeviceRemovedReason calls. That probe is not committed either.
      So the 650 ms between the last graphics answer and the box hold
      the decision, nothing in them reaches a DLL gala wrote, and the
-     call trace cannot see them; what can is wwlib's own import slots
-     over that second (`imports=WINWORD.EXE!wwlib.dll` with
-     `events_from=`), which name what Word asks Microsoft's own code
-     for while it decides.
+     call trace cannot see them. wwlib's own import slots do, and that
+     reading is made now. `imports=WINWORD.EXE imports_in=WWLIB.DLL`
+     arms 3266 slots in that one image, of the 21136 the process has
+     in 46 images, which is what makes the run affordable at all
+     (100.9 s against 443.2 s armed whole), and records 54 first
+     calls, 1749 later calls, 1803 answers and 138 quoted strings with
+     every budget untouched.
+     Every answer Word reads through them is right. It asks for the
+     three directories (`GetWindowsDirectoryW` "C:\Windows",
+     `GetSystemDirectoryW` "C:\Windows\system32" and
+     `GetModuleFileNameW` its own path), `PATH`, `GetDriveTypeW` 3
+     (DRIVE_FIXED), and then its user template directory:
+     `GetFullPathNameW` canonicalises
+     `C:\Users\gala\AppData\Roaming\Microsoft\Templates\X` and the
+     directory itself, and all four `GetFileAttributesExW` on it
+     answer TRUE -- so Normal.dotm's directory is there and (13) is
+     not about it. The last thing the thread that raises the box does
+     through those slots is window-class work: it resolves the
+     memory-DC and text functions (`CreateCompatibleDC`,
+     `CreateCompatibleBitmap`, `SelectObject`, `GetObjectW`,
+     `SetTextAlign`, `CreatePen`) and `SystemParametersInfoW`, then
+     makes 22 `ActivateActCtx`/`DeactivateActCtx` pairs around one
+     `FindActCtxSectionStringW(Comctl32.dll)`, then resolves
+     `RegisterClassExW`; 46 ms after the box it resolves
+     `EvtWordCoreBootStop`, its own telemetry event for a startup that
+     stopped. The trace is that one thread's almost entirely: 1790 of
+     the 1858 records before the box are its, and each of the
+     seventeen other threads that reach wwlib's slots at all makes
+     exactly four calls.
+     Which of Word's frames asked for the box is measured too, and
+     with the facility built for it: `stack_at=NtWriteFile
+     stack_from=user32 stack_words=400` captures the caption and the
+     text and passes over 645 other writes of the same run, which is
+     the filter earning its place rather than a count that never
+     reaches the call. The kilobyte of locals user32's MessageBoxW
+     holds puts Word's own frames at the 177th stack word, past the
+     128 a default capture reads, as OBSERVABILITY says; above them
+     the stack carries WWINTL.DLL (where the sentence comes from),
+     Mso30win32client.dll, MSO.DLL, Mso20win32client.dll,
+     Mso40UIwin32client.dll, WWLIB.DLL and WINWORD.EXE, and no frame
+     of gala's but the write itself. So nothing gala wrote is on the
+     path that decides, which is the third measurement against a
+     refused call being the cause.
+     What is left unmeasured on that thread is the window class it
+     registers and the window gala gives it: the side-by-side context
+     the `FindActCtxSectionStringW(Comctl32.dll)` above looks a class
+     up in, and `user32.dll!a window smaller than its frame (a pixel
+     of client area, not none)`, which is hit three times, the last of
+     them 1.6 s before the box.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
