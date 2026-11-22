@@ -255,7 +255,7 @@ has a section under "Open items".
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on a solid-colour brush over that target, every call of the path S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); the display is answered as far as Word and DXVK ask for it (EnumDisplayDevicesW's monitor level, a Plug and Play device tree setupapi reads out of the registry, and the panel's EDID the kernel writes into the monitor's device key at boot, which is what DXVK's `getMonitorEdid` wanted: `display_test`); the system metrics a program lays its windows out from are measured on Windows and answered, 73 indices having answered a silent 0 before, sixteen of them among the 34 Word reads (SM_MOUSEPRESENT, both scroll bars, all four frames, the double-click slop, the menu buttons and the window edge), and every index a program asks for leaving a reached row now (`metrics_test`); the device caps a program lays text out from are measured on Windows and answered, sixteen indices having answered a silent 0 before (TEXTCAPS, the curve, line and polygon caps and the pixel's aspect among them), one of them among the ten Word reads (RASTERCAPS, 10889 where Windows answers 32409), and every index a program asks for leaving a reached row now (`caps_test`); the settings a program asks the desktop for are measured on Windows and answered, nine of the answers having been values no Windows gives (every animation and fade off, UI effects off and client-area animation off, where a Windows desktop answers TRUE for all nine), two of them the first two settings Word reads, the non-client metrics now read from the system metrics so two copies of a desktop's sizes cannot drift (a caption button was 32 wide against the metric's 46), and every action a program is answered leaving a reached row now (`spi_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 32.3 s and no document drawn, the decision its own, in wwlib, by a stack capture over MessageBoxW (`office_word`); the hardware graphics path is ruled out from Office's own side, with `DisableHardwareAcceleration` seeded Word raising the same box with the same (13), and the silent seconds before it are Word walking its own address space and not a wait; the multisample answer Word reads 197 ms before the box is measured against Windows and is wrong without being the cause -- gala's renderer offers no quality level for 2 samples on B8G8R8A8_UNORM where Windows offers one, which the ledger records now, and answering it as offered leaves the box unchanged (`d3d10_1_test`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on a solid-colour brush over that target, every call of the path S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); the display is answered as far as Word and DXVK ask for it (EnumDisplayDevicesW's monitor level, a Plug and Play device tree setupapi reads out of the registry, and the panel's EDID the kernel writes into the monitor's device key at boot, which is what DXVK's `getMonitorEdid` wanted: `display_test`); the system metrics a program lays its windows out from are measured on Windows and answered, 73 indices having answered a silent 0 before, sixteen of them among the 34 Word reads (SM_MOUSEPRESENT, both scroll bars, all four frames, the double-click slop, the menu buttons and the window edge), and every index a program asks for leaving a reached row now (`metrics_test`); the device caps a program lays text out from are measured on Windows and answered, sixteen indices having answered a silent 0 before (TEXTCAPS, the curve, line and polygon caps and the pixel's aspect among them), one of them among the ten Word reads (RASTERCAPS, 10889 where Windows answers 32409), and every index a program asks for leaving a reached row now (`caps_test`); the settings a program asks the desktop for are measured on Windows and answered, nine of the answers having been values no Windows gives (every animation and fade off, UI effects off and client-area animation off, where a Windows desktop answers TRUE for all nine), two of them the first two settings Word reads, the non-client metrics now read from the system metrics so two copies of a desktop's sizes cannot drift (a caption button was 32 wide against the metric's 46), and every action a program is answered leaving a reached row now (`spi_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 32.3 s and no document drawn, the decision its own, in wwlib, by a stack capture over MessageBoxW (`office_word`); the hardware graphics path is ruled out from Office's own side, with `DisableHardwareAcceleration` seeded Word raising the same box with the same (13), and the silent seconds before it are Word walking its own address space and not a wait; the multisample answer Word reads 197 ms before the box is measured against Windows and is wrong without being the cause -- gala's renderer offers no quality level for 2 samples on B8G8R8A8_UNORM where Windows offers one, which the ledger records now, and answering it as offered leaves the box unchanged (`d3d10_1_test`); every file Word opens is read and none it needs is missing (`events=file`: 482 opens, 225 refusals Windows refuses too, the eight before the box the message box's own side-by-side probe), and so is Word's own 401-byte exit record (`events_data=512`), which is a session record with no reason in it, filed under GracefulExit rather than CrashPersistence; gdi32 exports neither `D3DKMTEnumAdapters2` nor `D3DKMTQueryAdapterInfo`, so DXVK associates the monitor with the adapter by its fallback (its log says so), a divergence to close next; Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -3089,9 +3089,13 @@ need gala's.
      the same (13) at 39991 ms, 650 ms after the same two
      GetDeviceRemovedReason calls. That probe is not committed either.
      So the 650 ms between the last graphics answer and the box hold
-     the decision, nothing in them reaches a DLL gala wrote, and the
-     call trace cannot see them. wwlib's own import slots do, and that
-     reading is made now. `imports=WINWORD.EXE imports_in=WWLIB.DLL`
+     the decision. What of gala they reach is the five display answers
+     above and nothing more, and the call trace is not the instrument
+     for the rest of them: armed on
+     `d3d10_1.dll!ID3D10Device::CheckMultisampleQualityLevels` it
+     records the calls into that one DLL ("3 calls recorded ... into
+     d3d10_1.dll") and not a user32 call beside them. wwlib's own
+     import slots are, and that reading is made now. `imports=WINWORD.EXE imports_in=WWLIB.DLL`
      arms 3266 slots in that one image, of the 21136 the process has
      in 46 images, which is what makes the run affordable at all
      (100.9 s against 443.2 s armed whole), and records 54 first
@@ -3139,6 +3143,51 @@ need gala's.
      up in, and `user32.dll!a window smaller than its frame (a pixel
      of client area, not none)`, which is hit three times, the last of
      them 1.6 s before the box.
+     Every file Word opens is read now, and no file it needs is
+     missing. `events=file` names each NtCreateFile and NtOpenFile with
+     the path as given and the status (the opens no ledger row names),
+     and costs 8 s of a 92 s run, so of the three instruments on this
+     window it is the cheap one. Word makes 482 opens, 225 of them
+     refused over 102 distinct paths, and every refusal is one Windows
+     refuses as well: the app-directory search for DLLs it then finds
+     in System32 (`imm32.dll`, `dwmapi.dll`, `d3d10_1.dll`,
+     `uxtheme.dll`), the Click-to-Run pipe no server answers (89), and
+     the eight that come 130 ms before the box, which are the message
+     box being built -- the Common-Controls side-by-side assembly
+     looked for in Office16, in Common Files\Microsoft Shared\Office16
+     and in a private-assembly directory beside each, the probe that
+     follows the `FindActCtxSectionStringW(Comctl32.dll)` above. The
+     user template directory answers every open of it, with and
+     without its trailing separator, which is the second measurement
+     against Normal.dotm after the attributes above.
+     Word's own account of the exit is read now too, and it holds no
+     reason. The 401 bytes it writes to
+     `Common\GracefulExit\WINWORD\12:2` are JSON, and `events_data=512`
+     carries a value that long whole where the default 64 bytes stop
+     inside the first field: `AppName`, `AppVersion` (16.20527.20196),
+     `ReleaseFork`, `ReleaseChannel`, `ReleaseAudienceGroup`,
+     `ProcessId`, `SessionId`, `SessionInitTime`, `SessionUninitTime`,
+     `ProcessorArchitecture`, `InstallMethod`, `PreviousBuild` and an
+     empty `EcsETag` -- a session record, with no status, no step and
+     no error anywhere in it. What it does say is where Word files it:
+     under GracefulExit, the previous run's 360-byte
+     `CrashPersistence\WINWORD\12:4` record read and deleted first, so
+     Word's own bookkeeping calls the (13) exit orderly rather than a
+     crash, which agrees with its status 0 and with the
+     `EvtWordCoreBootStop` it resolves after.
+     One gap of gala's does stand in the graphics path, upstream of
+     everything Word reads about the display: gdi32 exports neither
+     `D3DKMTEnumAdapters2` nor `D3DKMTQueryAdapterInfo`, which Windows'
+     does, and DXVK asks for each of them sixteen times 4.5 s before
+     the box (two `missing export` rows, 16 hits each). Its own log
+     names what follows -- `DXGI: Found monitors not associated with
+     any adapter, using fallback`, three times -- so the monitor is
+     associated with the adapter by DXVK's fallback and not through the
+     kernel-mode thunks. It copes, and Word's device and every call on
+     it answer S_OK, so this is a divergence to close and not a known
+     cause. Next: `d3dkmt_test` measuring both calls on real Windows
+     (the adapter count, each adapter's LUID and handle, and the query
+     types DXVK asks for), then gdi32 answering them.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
