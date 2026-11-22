@@ -333,6 +333,8 @@ pub const NT_PULSE_EVENT: u32 = 0x7f2a;
 pub const GALA_TRACE: u32 = 0x7f2b;
 /// GalaImports: gala's own service, not part of Windows.
 pub const GALA_IMPORTS: u32 = 0x7f2c;
+/// GalaEtw: gala's own service, not part of Windows.
+pub const GALA_ETW: u32 = 0x7f2d;
 pub const NT_CREATE_EVENT: u32 = 0x0048;
 pub const NT_QUERY_EVENT: u32 = 0x0056;
 pub const NT_QUERY_SYSTEM_TIME: u32 = 0x005a;
@@ -394,6 +396,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_RECORD_MISSING, "GalaRecordMissing", 4, gala_record_missing),
     (GALA_TRACE, "GalaTrace", 4, gala_trace),
     (GALA_IMPORTS, "GalaImports", 4, gala_imports),
+    (GALA_ETW, "GalaEtw", 4, gala_etw),
     (
         NT_GET_CURRENT_PROCESSOR_NUMBER,
         "NtGetCurrentProcessorNumber",
@@ -4112,6 +4115,55 @@ fn gala_trace(call: &mut Call<'_>) -> NtStatus {
                 &name[..len],
                 arg!(call, 3),
             );
+            if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
+        }
+        _ => NtStatus::INVALID_PARAMETER,
+    }
+}
+
+/// GalaEtw(Op, A, B, C): the DLL half of `etw=` (nt::etw). Op 0 asks
+/// what the run wants of a trace session: A is a buffer of B bytes and C
+/// takes the length written as a `u64` (0: no session was asked for, and
+/// the DLL asks nothing more for the life of the process). Op 1 hands
+/// over one event a session kept: A is the record and B its length
+/// (`etw::RECORD_LEN`: the provider id, the event descriptor, and the
+/// payload's length).
+///
+/// The answer to op 1 is what ends a session: NO_MORE_ENTRIES once the
+/// budget is spent, so a program whose events nobody is reading any more
+/// stops building payloads for them.
+fn gala_etw(call: &mut Call<'_>) -> NtStatus {
+    match arg!(call, 0) {
+        0 => {
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut ask = [0u8; super::etw::ASK_LEN];
+            let written = if len >= ask.len() && super::etw::ask(&mut ask) { ask.len() } else { 0 };
+            if call.process.write(arg!(call, 3), &(written as u64).to_ne_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            if written != 0 && call.process.write(ptr, &ask).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            NtStatus::SUCCESS
+        }
+        1 => {
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            if len < super::etw::RECORD_LEN {
+                return NtStatus::INVALID_PARAMETER;
+            }
+            let mut record = [0u8; super::etw::RECORD_LEN];
+            if call.process.read(ptr, &mut record).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let mut guid = [0u8; 16];
+            guid.copy_from_slice(&record[..16]);
+            // EVENT_DESCRIPTOR, as the program built it: Level at 4 and
+            // Keyword at 8 of the sixteen bytes after the provider id.
+            let level = record[16 + 4];
+            let keyword =
+                u64::from_le_bytes(record[16 + 8..16 + 16].try_into().unwrap_or_default());
+            let bytes = u32::from_le_bytes(record[32..36].try_into().unwrap_or_default());
+            let keep = super::etw::record(call.process.name, &guid, level, keyword, bytes);
             if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
         }
         _ => NtStatus::INVALID_PARAMETER,

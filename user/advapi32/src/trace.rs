@@ -190,6 +190,20 @@ struct Session {
     buffers: u32,
     /// Events that did not fit, which is what EventsLost counts.
     lost: u32,
+    /// The session gala started for this program (`etw=`, nt::etw): it
+    /// has no buffers, and every event in its reach goes to the kernel
+    /// as it is written. The program neither started it nor has its
+    /// handle, so it cannot query or stop it; it is a session here so
+    /// that a provider learns of it exactly as of any other.
+    to_kernel: bool,
+    /// On that session: every provider the program registers, whatever
+    /// its id (`etw=*`).
+    every_provider: bool,
+    /// On that session: the provider it asks for, when it does not ask
+    /// for every one.
+    ask_guid: [u8; 16],
+    /// On that session: what it asks of that provider.
+    ask: Demands,
 }
 
 /// One provider one session asked for.
@@ -211,6 +225,16 @@ static LOCK: AtomicBool = AtomicBool::new(false);
 /// The next TRACEHANDLE. Never 0: 0 is what a failed start leaves, and
 /// what `EnableTraceEx2` answers ERROR_INVALID_PARAMETER for.
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(0x0100_0001);
+
+/// Whether the kernel has been asked what `etw=` wants of this program.
+/// One system call in a process's life, at its first `EventRegister`: a
+/// program that registers no provider pays nothing at all, and one whose
+/// run asked for no session pays one call and then nothing.
+static ASKED: AtomicBool = AtomicBool::new(false);
+
+/// The handle of the session gala started, or 0 for none: read without
+/// the lists' lock, so that the common case costs one load.
+static KERNEL: AtomicU64 = AtomicU64::new(0);
 
 /// `f` with both lists held.
 fn with_list<R>(f: impl FnOnce() -> R) -> R {
@@ -749,6 +773,21 @@ struct DataDescriptor {
 /// How long a record a session keeps: the header, the descriptor and
 /// the payload. An event longer than this is counted lost rather than
 /// cut in half, because half a TraceLogging event decodes as nothing.
+/// `GalaEtw`'s operations (nt::etw): what the run asks of a session,
+/// and one event a session kept.
+const OP_ASK: usize = 0;
+const OP_RECORD: usize = 1;
+
+/// The ask the kernel answers op 0 with (`etw::ASK_LEN`): the provider
+/// id, a flags byte, the level, six bytes of nothing, and the keyword as
+/// a little-endian `u64`.
+const ASK_LEN: usize = 32;
+/// Bit 0 of that flags byte: every provider the program registers.
+const ASK_EVERY: u8 = 1;
+/// The record op 1 takes (`etw::RECORD_LEN`): the provider id, the event
+/// descriptor as the program built it, and the payload's length.
+const KERNEL_RECORD: usize = 36;
+
 const RECORD_MAX: usize = 4096;
 
 /// What a kept event costs besides its payload: its length, the
@@ -761,7 +800,133 @@ const RECORD_HEADER: usize = 4 + 16 + 16 + 4;
 /// (ROADMAP OT4 step 2 has the decoder, which is what the pieces are
 /// kept whole for); what they give now is the count a query reports,
 /// and a session that holds a program's own account of its work.
-pub(crate) fn keep(guid: &[u8; 16], descriptor: *const u8, count: u32, data: *const u8) {
+/// Asks the kernel what `etw=` wants of this program and makes the
+/// session it asks for. True if there was no memory for it. The lists
+/// are held.
+fn ask_kernel() -> bool {
+    let mut ask = [0u8; ASK_LEN];
+    let mut written = 0u64;
+    // SAFETY: a buffer and a word this frame owns, of the length given;
+    // the service writes no more than it is told, and writes the buffer
+    // only when it says it did.
+    let status = unsafe {
+        crate::GalaEtw(
+            OP_ASK,
+            ask.as_mut_ptr() as usize,
+            ask.len(),
+            (&raw mut written) as *mut u8 as usize,
+        )
+    };
+    if status != 0 || written as usize != ASK_LEN {
+        return false;
+    }
+    let block = take_block();
+    if block == 0 {
+        return true;
+    }
+    // SAFETY: ours.
+    let s = unsafe { &mut *(block as *mut Session) };
+    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    s.live = true;
+    s.used = true;
+    s.handle = handle;
+    // No name, which is what keeps the program from finding it: a
+    // lookup by name never matches an empty one, and the handle is
+    // never given out.
+    s.name_len = 0;
+    s.mode = PRIVATE | IN_PROC | BUFFERING;
+    s.buffer = core::ptr::null_mut();
+    s.capacity = 0;
+    s.at = 0;
+    s.buffers = 0;
+    s.lost = 0;
+    s.to_kernel = true;
+    s.every_provider = ask[16] & ASK_EVERY != 0;
+    s.ask_guid.copy_from_slice(&ask[..16]);
+    let keyword = u64::from_le_bytes(ask[24..32].try_into().unwrap_or_default());
+    // A session that asks for keyword 0 asks for every keyword, as
+    // `EnableTraceEx2` has it (the contract, measured).
+    s.ask = Demands { level: ask[17], any: if keyword == 0 { u64::MAX } else { keyword }, all: 0 };
+    KERNEL.store(handle, Ordering::Relaxed);
+    false
+}
+
+/// The enable the session gala started has on `guid`, made now if the
+/// run asked for that provider. A registration is the only moment a
+/// provider learns anything, so this runs at every `EventRegister` and
+/// the registration that follows it tells the provider about the session
+/// the way it would about one the program started itself.
+pub(crate) fn arm(guid: &[u8; 16]) {
+    // The common case, and the only one for a program whose run asked
+    // for no session: one load and no lock.
+    if ASKED.load(Ordering::Acquire) && KERNEL.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let short = with_list(|| {
+        let mut short = false;
+        if !ASKED.load(Ordering::Relaxed) {
+            short = ask_kernel();
+            ASKED.store(true, Ordering::Release);
+        }
+        let handle = KERNEL.load(Ordering::Relaxed);
+        if handle == 0 {
+            return short;
+        }
+        let mut found = None;
+        let mut at = SESSIONS.load(Ordering::Relaxed);
+        while at != 0 {
+            // SAFETY: ours, never freed.
+            let s = unsafe { &mut *(at as *mut Session) };
+            if s.live && s.handle == handle {
+                found = Some((s.every_provider, s.ask_guid, s.ask));
+                break;
+            }
+            at = s.next as usize;
+        }
+        let Some((every, wanted, ask)) = found else {
+            return short;
+        };
+        if (!every && wanted != *guid) || asked_by(handle, guid).is_some() {
+            return short;
+        }
+        short || set_enable(handle, guid, ask).is_none()
+    });
+    if short {
+        crate::missing(b"advapi32.dll!EventRegister(no memory for the session etw= asks for)");
+    }
+}
+
+/// One event handed to the session gala started (`GalaEtw` op 1). False
+/// once its budget is spent, which is what ends that session: nothing is
+/// gained by building payloads for a reader that has stopped reading.
+fn to_kernel(guid: &[u8; 16], descriptor: *const u8, payload: usize) -> bool {
+    let mut record = [0u8; KERNEL_RECORD];
+    record[..16].copy_from_slice(guid);
+    if !descriptor.is_null() {
+        // SAFETY: the caller's EVENT_DESCRIPTOR, sixteen bytes by
+        // definition, copied into this frame's own buffer.
+        unsafe { core::ptr::copy_nonoverlapping(descriptor, record.as_mut_ptr().add(16), 16) };
+    }
+    record[32..36].copy_from_slice(&(payload as u32).to_le_bytes());
+    // SAFETY: a buffer this frame owns, of the length given.
+    let status = unsafe { crate::GalaEtw(OP_RECORD, record.as_ptr() as usize, record.len(), 0) };
+    status == 0
+}
+
+/// Every provider the session gala started asked for is told it is gone,
+/// the way a session the program stops tells them. Called outside the
+/// lists' lock, like every other call into a provider's callback.
+pub(crate) fn session_over(handle: u64) {
+    stop_telling(handle);
+    crate::reached(b"advapi32.dll!EventWrite(the session etw= asked for is full)", 0);
+}
+
+pub(crate) fn keep(
+    guid: &[u8; 16],
+    descriptor: *const u8,
+    count: u32,
+    data: *const u8,
+) -> Option<u64> {
     let pieces = if data.is_null() { 0 } else { count as usize };
     let mut payload = 0usize;
     for i in 0..pieces {
@@ -770,6 +935,7 @@ pub(crate) fn keep(guid: &[u8; 16], descriptor: *const u8, count: u32, data: *co
         payload = payload.saturating_add(d.size as usize);
     }
     let length = RECORD_HEADER + payload;
+    let mut over = None;
     with_list(|| {
         let mut at = SESSIONS.load(Ordering::Relaxed);
         while at != 0 {
@@ -777,6 +943,16 @@ pub(crate) fn keep(guid: &[u8; 16], descriptor: *const u8, count: u32, data: *co
             let s = unsafe { &mut *(at as *mut Session) };
             at = s.next as usize;
             if !s.live || asked_by(s.handle, guid).is_none() {
+                continue;
+            }
+            // The session gala started has no buffers: the event goes to
+            // the kernel as it is written, and its budget running out is
+            // what ends the session.
+            if s.to_kernel {
+                if !to_kernel(guid, descriptor, payload) {
+                    s.live = false;
+                    over = Some(s.handle);
+                }
                 continue;
             }
             if length > RECORD_MAX || s.at + length > s.capacity {
@@ -811,4 +987,5 @@ pub(crate) fn keep(guid: &[u8; 16], descriptor: *const u8, count: u32, data: *co
             s.at += length;
         }
     });
+    over
 }

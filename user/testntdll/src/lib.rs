@@ -555,6 +555,11 @@ syscall_stubs! {
     // is about to begin and asks for the return address of the call it
     // begins in (`walking`).
     GalaImports = 0x7f2c, fn(op: u64, a: u64, b: u64, c: u64);
+    // gala's own: the trace session gala starts on a program's behalf
+    // (`etw=`, nt::etw). Op 0 asks what the run wants of a session (a
+    // provider id, a level and a keyword, or nothing at all), op 1 hands
+    // over one event the session kept.
+    GalaEtw = 0x7f2d, fn(op: usize, a: usize, b: usize, c: usize);
     // gala's own: the exception no handler took, before the top-level
     // filter runs (null: the filter continued); the kernel's crash report
     // describes it whatever status the process then ends with.

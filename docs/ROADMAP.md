@@ -7234,22 +7234,28 @@ among the slowest hand-offs.
    checked on both systems by `user/etw_test` (scenario `etw_test`,
    `ci-passing.txt`).
 
+   A run can also ask for a session itself, without the program asking
+   for one: `etw=<provider or name>[:<level>[:<keyword>[:<n>]]]`
+   (nt::etw, OBSERVABILITY "A session gala starts"). advapi32 asks the
+   kernel once, at a program's first EventRegister, and makes that
+   session's enable there, so a provider learns of it in the callback it
+   would learn of any session in; each event in reach goes to the kernel
+   as it is written and leaves an `etw:` line. Scenarios `etwarm_test`
+   (nothing armed, so the program's own answers, which are real
+   Windows'), `etw_armed` and `etw_armed_all`.
+
    Next, in order:
-   1. A boot option for the sessions gala starts on a program's behalf
-      (`etw=<provider or name>[:<level>[:<keyword>]]`, following
-      `GalaTrace`'s op-0 pattern), so a run can ask for a program's own
-      telemetry without the program asking for it.
-   2. The TraceLogging metadata decoder in the kernel (provider
+   1. The TraceLogging metadata decoder in the kernel (provider
       metadata, type 2, and event metadata, type 1, as
       `TraceLoggingProvider.h` builds them; host unit tests), writing
       decoded `etw:` lines under a budget. The records a session keeps
       are the decoder's input, which is why they hold the descriptor
       and payload bytes rather than a summary.
-   3. Then OTel: the decoded events as logs and spans, by the mapping
+   2. Then OTel: the decoded events as logs and spans, by the mapping
       OT5 uses for everything else.
 
    Why this order: a Word startup registers 20 providers and writes
-   not one event, so the first thing the bridge needs is the session
+   not one event, so the first thing the bridge needed was the session
    that makes Word write them -- and the first use of the decoded
    events is Word's own account of the startup failure the
    `office_word` scenario reaches.

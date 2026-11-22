@@ -10973,6 +10973,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("etw_test", "ntdll.dll", "Windows/System32"),
     ("etw_test", "kernel32.dll", "Windows/System32"),
     ("etw_test", "advapi32.dll", "Windows/System32"),
+    ("etwarm_test", "ntdll.dll", "Windows/System32"),
+    ("etwarm_test", "kernel32.dll", "Windows/System32"),
+    ("etwarm_test", "advapi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11392,6 +11395,7 @@ const USER_PROGRAMS: &[&str] = &[
     "spi_test",
     "caps_test",
     "etw_test",
+    "etwarm_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -16834,6 +16838,65 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // The provider side with no session of the program's own: what
+        // a program is told when nobody asked for its telemetry, which
+        // is the half real Windows runs unelevated too (user/etwarm_test).
+        name: "etwarm_test",
+        cmdline: "qemu_exit run=etwarm_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etwarm_test: Gala.Test.Arm: no session",
+            "etwarm_test: Gala.Test.Quiet: no session",
+            "etwarm_test: Gala.Test.Arm: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
+            "etwarm_test: Gala.Test.Quiet: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
+            "etwarm_test: wrote 4",
+            "etwarm_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // etw=<name>: the session gala starts on the program's behalf,
+        // named by the provider name TraceLogging hashes into a GUID.
+        // The program asked for no session, so every demand it is told
+        // of is the run's own -- and the provider the option does not
+        // name stays as quiet as it was.
+        name: "etw_armed",
+        cmdline: "qemu_exit run=etwarm_test.exe etw=Gala.Test.Arm",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for Gala.Test.Arm (2542af41-3d78-596e-ff31-017dbbeacc32), level 5",
+            "etwarm_test: Gala.Test.Arm: calls=1 enabled=1 level=5 any=0xffffffffffffffff all=0x0 ctx=0x5101",
+            "etwarm_test: Gala.Test.Quiet: no session",
+            "etwarm_test: Gala.Test.Arm: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=11 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=11",
+            "etwarm_test: Gala.Test.Quiet: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
+            "etw: etwarm_test.exe 2542af41-3d78-596e-ff31-017dbbeacc32 level 4 keyword 0x0, 49 bytes",
+            "etwarm_test: ok",
+            "etw: 1 event written to the session, from 1 provider (etw=)",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // etw=*:<level>:<keyword>: every provider the program registers,
+        // and the level and keyword the run asks for rather than the
+        // defaults -- the shape a program whose provider names are not
+        // known in advance is read with.
+        name: "etw_armed_all",
+        cmdline: "qemu_exit run=etwarm_test.exe etw=*:4:0x10",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for every provider, level 4 and keyword 0x10",
+            "etwarm_test: Gala.Test.Arm: calls=1 enabled=1 level=4 any=0x10 all=0x0 ctx=0x5101",
+            "etwarm_test: Gala.Test.Quiet: calls=1 enabled=1 level=4 any=0x10 all=0x0 ctx=0x5102",
+            "etwarm_test: Gala.Test.Arm: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=00",
+            "etwarm_test: Gala.Test.Quiet: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=00",
+            "etw: etwarm_test.exe 2542af41-3d78-596e-ff31-017dbbeacc32 level 4 keyword 0x0, 49 bytes",
+            "etw: etwarm_test.exe c7be3843-7267-5b9d-1d9c-ebe8fe08d1fd level 4 keyword 0x0, 51 bytes",
+            "etwarm_test: ok",
+            "etw: 2 events written to the session, from 2 providers (etw=)",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Windows.UI.ViewManagement.UISettings: its factory and objects,
         // weak references, the theme's and accent's colours, the classic
         // elements' system colours (user/uisettings_test).
@@ -21575,6 +21638,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("import_threads", "lock_test"),
     ("import_answer_text", "import_strings_test"),
     ("import_answer_bytes", "import_strings_test"),
+    ("etw_armed", "etwarm_test"),
+    ("etw_armed_all", "etwarm_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),

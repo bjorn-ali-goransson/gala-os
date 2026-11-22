@@ -177,6 +177,11 @@ pub extern "system" fn EventRegister(
     note_provider(b"advapi32.dll!EventRegister(", &guid);
     // SAFETY: the caller's output.
     unsafe { *handle = block as u64 };
+    // The session gala started for this program, if the run asked for
+    // one: a registration is the only moment a provider learns anything,
+    // so this is where that session's enable is made and the callback
+    // below is the one that tells the provider about it.
+    crate::trace::arm(&guid);
     if let Some(demands) = crate::trace::demands(&guid) {
         crate::reached(b"advapi32.dll!EventRegister(a session is asking)", 0);
         call_back(callback as usize, context as usize, 1, demands);
@@ -374,7 +379,12 @@ fn write(handle: u64, descriptor: *const u8, count: u32, data: *const u8, rows: 
         unsafe { (*descriptor.add(4), descriptor.add(8).cast::<u64>().read_unaligned()) };
     match crate::trace::demands(&guid) {
         Some(demands) if demands.admits(level, keyword) => {
-            crate::trace::keep(&guid, descriptor, count, data);
+            if let Some(over) = crate::trace::keep(&guid, descriptor, count, data) {
+                // The session gala started has had its fill: every
+                // provider it asked for is told it is gone, outside the
+                // lists' lock, exactly as a stopped session's are.
+                crate::trace::session_over(over);
+            }
             crate::reached(rows[0], 0);
         }
         // A session that does not admit the event is the same to the

@@ -30,6 +30,7 @@ dirchange_test
 dpapi_test
 dwrite_test
 etw_test
+etwarm_test
 exception_test
 file_test
 filemap_test

@@ -352,6 +352,7 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x01bc, &[H, U]),                               // NtSuspendThread
     (0x01c5, &[H, U, U, U, U]),                      // NtUnlockFile
     (0x7f00, &[U, U, U, U, Hi]),                     // GalaRecordMissing
+    (0x7f2d, &[U, U, U, U]),                         // GalaEtw
     (0x7f01, &[H, U, U]),                            // NtCancelIoFileEx
     // GalaCreateProcess: its block has fixed 8-byte fields whatever the
     // caller's bitness (ARCHITECTURE "Processes started by programs").
