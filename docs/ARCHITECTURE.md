@@ -4770,10 +4770,39 @@ definition for both layouts, "Plan: WOW64").
   (`policy.rs`): "Accounts and logon".
 - **ETW** (`etw.rs`): providers register, but no trace session exists,
   so no provider is ever enabled and events go nowhere, successfully (as
-  on Windows with no listener; not recorded). Classic (MOF) providers:
-  RegisterTraceGuidsW returns a handle and never calls back;
-  GetTraceLoggerHandle, GetTraceEnableFlags/Level and TraceEvent fail
-  with ERROR_INVALID_HANDLE, as for a provider no session enabled.
+  on Windows with no listener). A REGHANDLE is one of those
+  registrations and not a number: EventRegister takes a block holding
+  the provider's GUID, its enable callback and context and whether its
+  traits are set, EventUnregister gives the block back, and a handle no
+  live registration holds -- an unregistered one, or a value a program
+  invented -- is answered ERROR_INVALID_HANDLE rather than
+  dereferenced (blocks are reused and never freed, so a stale handle
+  cannot reach memory that was something else). The answers are
+  Windows' own, measured function by function on the pinned build: the
+  four write forms (EventWrite, EventWriteTransfer, EventWriteEx,
+  EventWriteString) succeed on a live registration and validate the
+  descriptor before the handle, so a null descriptor is
+  ERROR_INVALID_PARAMETER whatever the handle is; EventEnabled and
+  EventProviderEnabled answer FALSE for every provider and on any
+  handle, having no error to give; EventSetInformation validates the
+  information class before the handle (only EventProviderSetTraits
+  reaches the registration, classes 1 and 5 are ERROR_NOT_SUPPORTED
+  and the rest ERROR_INVALID_PARAMETER) and a provider's traits are
+  set once, a second attempt ERROR_GEN_FAILURE. Windows caps how many
+  providers a process registers nowhere one can reach (1200 in a row
+  all succeeded), which is why registrations are a list and not a
+  table. What a program registered, and the name its traits give it,
+  is recorded (OBSERVABILITY "Missing-features ledger"): a provider no
+  session enabled writes nothing at all, TraceLogging building an
+  event's payload only once the enable callback says a session wants
+  it, so the registrations are the whole of what a program's
+  telemetry leaves behind until gala is that session (ROADMAP OF).
+  Classic (MOF) providers: RegisterTraceGuidsW returns a handle and
+  never calls back; GetTraceEnableFlags/Level and TraceEvent fail with
+  ERROR_INVALID_HANDLE, as for a provider no session enabled, and
+  GetTraceLoggerHandle fails ERROR_INVALID_PARAMETER with no buffer
+  and ERROR_BAD_LENGTH with a buffer that is no session's (Windows'
+  own two answers).
 - **Performance counters** (`perf.rs`): the PerfLib V2 provider functions
   keep providers, counter-set templates and instances
   (PERF_COUNTERSET_INSTANCE, the data block at the counters' offsets, the

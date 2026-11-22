@@ -116,6 +116,13 @@ fn missing_detail(function: &[u8], detail: u64) {
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, detail) };
 }
 
+/// A row saying a program got this far: an answer gala gave, which the
+/// caller cannot tell from a measurement (`etw`).
+pub(crate) fn reached(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; "reached" (9).
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 9, detail) };
+}
+
 /// RegisterEventSourceA: no event log yet (NULL, ERROR_NOT_SUPPORTED).
 #[unsafe(no_mangle)]
 pub extern "system" fn RegisterEventSourceA(_server: *const u8, _source: *const u8) -> usize {

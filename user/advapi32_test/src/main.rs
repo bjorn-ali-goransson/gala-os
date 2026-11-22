@@ -329,6 +329,20 @@ unsafe extern "system" {
         data: *const c_void,
     ) -> u32;
     fn EventEnabled(handle: u64, descriptor: *const [u8; 16]) -> u8;
+    fn EventProviderEnabled(handle: u64, level: u8, keyword: u64) -> u8;
+    #[allow(clippy::too_many_arguments)]
+    fn EventWriteEx(
+        handle: u64,
+        descriptor: *const [u8; 16],
+        filter: u64,
+        flags: u32,
+        activity: *const [u8; 16],
+        related: *const [u8; 16],
+        count: u32,
+        data: *const c_void,
+    ) -> u32;
+    fn EventWriteString(handle: u64, level: u8, keyword: u64, text: *const u16) -> u32;
+    fn EventSetInformation(handle: u64, class: u32, info: *const u8, length: u32) -> u32;
     fn EventUnregister(handle: u64) -> u32;
     fn EventActivityIdControl(code: u32, id: *mut [u8; 16]) -> u32;
     fn SaferIdentifyLevel(
@@ -1002,6 +1016,7 @@ fn clr(c: &mut Checks) -> Result<(), u32> {
         c.ok(handle != 0, 0)?;
         let descriptor = [1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // id 1, level 4
         c.eq(EventEnabled(handle, &descriptor).into(), 0)?;
+        c.eq(EventProviderEnabled(handle, 0xff, u64::MAX).into(), 0)?;
         c.eq(EventWrite(handle, &descriptor, 0, core::ptr::null()).into(), 0)?;
         let activity = [7u8; 16];
         let r = EventWriteTransfer(
@@ -1013,7 +1028,78 @@ fn clr(c: &mut Checks) -> Result<(), u32> {
             core::ptr::null(),
         );
         c.eq(r.into(), 0)?;
+        let r = EventWriteEx(
+            handle,
+            &descriptor,
+            0,
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+        );
+        c.eq(r.into(), 0)?;
+        let text = w("advapi32_test");
+        c.eq(EventWriteString(handle, 4, 0, text.as_ptr()).into(), 0)?;
+
+        // A null descriptor is answered before the handle is looked at,
+        // and a handle that is no registration's is ERROR_INVALID_HANDLE
+        // -- a write that goes nowhere is a success, a write on a handle
+        // nobody holds is not.
+        c.eq(EventWrite(handle, core::ptr::null(), 0, core::ptr::null()).into(), 87)?;
+        c.eq(EventWrite(1, core::ptr::null(), 0, core::ptr::null()).into(), 87)?;
+        c.eq(EventWrite(1, &descriptor, 0, core::ptr::null()).into(), 6)?;
+        c.eq(EventWrite(0, &descriptor, 0, core::ptr::null()).into(), 6)?;
+        let r = EventWriteTransfer(
+            1,
+            &descriptor,
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+        );
+        c.eq(r.into(), 6)?;
+        c.eq(EventWriteString(1, 4, 0, text.as_ptr()).into(), 6)?;
+        c.eq(EventEnabled(1, &descriptor).into(), 0)?; // FALSE, not an error
+
+        // The provider's traits: the name a session would be told to
+        // enable, which TraceLogging sets right after it registers (a
+        // `u16` of the blob's size, the name in UTF-8 with its NUL). The
+        // information class is answered before the handle, only
+        // EventProviderSetTraits (2) reaches the registration, and a
+        // provider's traits are set once.
+        let mut traits = [0u8; 2 + 14];
+        traits[0] = traits.len() as u8;
+        traits[2..2 + 13].copy_from_slice(b"advapi32_test");
+        let (blob, size) = (traits.as_ptr(), traits.len() as u32);
+        c.eq(EventSetInformation(handle, 0, blob, size).into(), 87)?;
+        c.eq(EventSetInformation(handle, 1, blob, size).into(), 50)?;
+        c.eq(EventSetInformation(handle, 3, blob, size).into(), 87)?;
+        c.eq(EventSetInformation(handle, 4, blob, size).into(), 87)?;
+        c.eq(EventSetInformation(handle, 5, blob, size).into(), 50)?;
+        c.eq(EventSetInformation(1, 1, blob, size).into(), 50)?;
+        c.eq(EventSetInformation(1, 2, blob, size).into(), 6)?;
+        c.eq(EventSetInformation(handle, 2, core::ptr::null(), 0).into(), 87)?;
+        c.eq(EventSetInformation(handle, 2, blob, 2).into(), 87)?;
+        c.eq(EventSetInformation(handle, 2, blob, size).into(), 0)?;
+        c.eq(EventSetInformation(handle, 2, blob, size).into(), 31)?;
+
+        // The registration given back: everything on that handle after
+        // it is ERROR_INVALID_HANDLE, and a new one may take its place.
         c.eq(EventUnregister(handle).into(), 0)?;
+        c.eq(EventUnregister(handle).into(), 6)?;
+        c.eq(EventUnregister(0).into(), 6)?;
+        c.eq(EventEnabled(handle, &descriptor).into(), 0)?;
+        c.eq(EventWrite(handle, &descriptor, 0, core::ptr::null()).into(), 6)?;
+        c.eq(EventSetInformation(handle, 2, blob, size).into(), 6)?;
+        let mut again = 0u64;
+        c.eq(
+            EventRegister(&provider, core::ptr::null(), core::ptr::null_mut(), &mut again).into(),
+            0,
+        )?;
+        c.ok(again != 0, 0)?;
+        c.eq(EventSetInformation(again, 2, blob, size).into(), 0)?;
+        c.eq(EventUnregister(again).into(), 0)?;
 
         // The thread's activity id: none at first; CREATE makes new ones
         // (not stored), SET stores, GET reads, GET_SET swaps.
@@ -1183,8 +1269,13 @@ fn perf(c: &mut Checks) -> Result<(), u32> {
         );
         c.eq(r.into(), 0)?;
         c.ok(reg != 0, 0)?;
+        // No buffer at all is the parameter; a buffer that is no
+        // session's is a length Windows cannot read a logger out of.
         c.eq(GetTraceLoggerHandle(core::ptr::null_mut()), u64::MAX)?;
-        c.eq(GetLastError().into(), 6)?;
+        c.eq(GetLastError().into(), 87)?;
+        let mut zeroed = [0u8; 128];
+        c.eq(GetTraceLoggerHandle(zeroed.as_mut_ptr().cast()), u64::MAX)?;
+        c.eq(GetLastError().into(), 24)?;
         let mut header = [0u8; 48];
         header[0..2].copy_from_slice(&48u16.to_le_bytes());
         c.eq(TraceEvent(0x1234, header.as_mut_ptr()).into(), 6)?;
