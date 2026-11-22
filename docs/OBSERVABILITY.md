@@ -455,7 +455,10 @@ real program, this list is the work queue, ranked by how often it was
 hit (scenario `ledger_test`).
 Names from user mode (`GalaRecordMissing`, the registry's absent keys)
 live in a second fixed table of 512 names; a name that finds no room is
-`?user`. Invariants (`nt::ledger`): each dump gives back the names no
+`?user`, and a name that is not plain text is `?text` -- a caller's bug
+and no cap of the ledger's, told apart because a row that said `?user`
+of a name read for more bytes than the caller meant sent the reader
+after a cap of the ledger's instead (`ledger_test` reports one of each). Invariants (`nt::ledger`): each dump gives back the names no
 entry uses any more, so the table holds the names of the gaps since the
 last dump, not every name of the boot; and bulk reports (the registry's
 `absent key`s, thousands in an Office install) hold at most 384 names

@@ -9,7 +9,12 @@
 //! was lost. Filling it is asked of gala only (`ntrt::on_gala`), since it
 //! takes gala's own service number: on Windows such a number reaches
 //! win32k's table and faults the process instead of being refused
-//! (WORKFLOW "Test programs"). The questions above it are Windows' own
+//! (WORKFLOW "Test programs"). One more gap is reported after the table
+//! is full, under a name of its own: whether its row is in the dump is
+//! what says a slot was freed, which is what the exclusion filter is
+//! read by (`ledger_except`). One report before them carries a name
+//! that is not text, which the ledger names apart from a name it had no
+//! room for. The questions above them are Windows' own
 //! and are asked of both. Prints `ledger_test: ok` or exits with the
 //! number of the failing check.
 
@@ -33,11 +38,32 @@ const WHAT_OTHER: u64 = 5;
 const FILL_RECORDS: u64 = 600;
 /// The name they are recorded under; printable ASCII, as the ledger asks.
 const FILL_NAME: &[u8] = b"ledger_test.exe!fill";
+/// The name of the one gap reported after the table is full. The table
+/// has no room for it, so its row is in the dump only when the records
+/// above were kept out of the table (`ledger_except=ledger_test.exe!fill`,
+/// scenario `ledger_except`), which is how a run says the filter freed
+/// the slots rather than only counting what it hid.
+const AFTER_NAME: &[u8] = b"ledger_test.exe!after";
+/// A name that is not plain text, as a report whose length was never
+/// meant carries: the ledger cannot name its row and says so under
+/// `?text`, which is not the `?user` of a name table with no room. It
+/// is reported before the table fills, because a row the table dropped
+/// would say neither.
+const UNNAMEABLE: &[u8] = b"ledger_test.exe!\0\0bad";
+/// Its detail, so that its row is told from the rest at a glance.
+const UNNAMEABLE_DETAIL: u64 = 0xbad;
 const UNKNOWN_PROCESS_CLASS: u32 = 0x7f00;
 
 /// System service `N` with no arguments, made directly: x64's `syscall`
 /// (the number in eax), ARM64's `svc #N` (Windows ARM64's ntdll puts the
 /// number in the immediate).
+///
+/// A call returns with every volatile register the kernel's to change,
+/// as it does through ntdll's stubs, which is what `clobber_abi` and
+/// `=> _` say here. A call that kept that to itself would leave the
+/// caller holding an argument in a register the kernel had written to:
+/// these calls are made in a loop, and the second of them reported a
+/// name as long as whatever rdx held by then (WORKFLOW "Test programs").
 #[cfg(target_arch = "x86_64")]
 fn raw_syscall<const N: u32>() -> NtStatus {
     let status: u64;
@@ -45,12 +71,9 @@ fn raw_syscall<const N: u32>() -> NtStatus {
     // number and returns a status in rax.
     unsafe {
         core::arch::asm!(
-            "mov r10, rcx",
             "syscall",
             inlateout("rax") u64::from(N) => status,
-            out("rcx") _,
-            out("r10") _,
-            out("r11") _,
+            clobber_abi("win64"),
             options(nostack)
         )
     };
@@ -61,12 +84,20 @@ fn raw_syscall<const N: u32>() -> NtStatus {
 fn raw_syscall<const N: u32>() -> NtStatus {
     let status: u64;
     // SAFETY: a system call with no arguments; the status comes in x0.
-    unsafe { core::arch::asm!("svc #{n}", n = const N, lateout("x0") status, options(nostack)) };
+    unsafe {
+        core::arch::asm!(
+            "svc #{n}",
+            n = const N,
+            lateout("x0") status,
+            clobber_abi("C"),
+            options(nostack)
+        )
+    };
     status as NtStatus
 }
 
-/// Four arguments, in the system-call convention: x64's (rcx moved to r10
-/// by the caller, as ntdll does, then rdx, r8, r9), ARM64's (x0-x3).
+/// Four arguments, in the system-call convention: x64's (r10, as ntdll's
+/// stubs leave the first, then rdx, r8, r9), ARM64's (x0-x3).
 #[cfg(target_arch = "x86_64")]
 fn raw_syscall4<const N: u32>(a: u64, b: u64, c: u64, d: u64) -> NtStatus {
     let status: u64;
@@ -74,15 +105,13 @@ fn raw_syscall4<const N: u32>(a: u64, b: u64, c: u64, d: u64) -> NtStatus {
     // status in rax; the pointer is a slice this program owns.
     unsafe {
         core::arch::asm!(
-            "mov r10, rcx",
             "syscall",
             inlateout("rax") u64::from(N) => status,
-            in("rcx") a,
-            in("rdx") b,
-            in("r8") c,
-            in("r9") d,
-            out("r10") _,
-            out("r11") _,
+            inlateout("r10") a => _,
+            inlateout("rdx") b => _,
+            inlateout("r8") c => _,
+            inlateout("r9") d => _,
+            clobber_abi("win64"),
             options(nostack)
         )
     };
@@ -98,9 +127,10 @@ fn raw_syscall4<const N: u32>(a: u64, b: u64, c: u64, d: u64) -> NtStatus {
             "svc #{n}",
             n = const N,
             inlateout("x0") a => status,
-            in("x1") b,
-            in("x2") c,
-            in("x3") d,
+            inlateout("x1") b => _,
+            inlateout("x2") c => _,
+            inlateout("x3") d => _,
+            clobber_abi("C"),
             options(nostack)
         )
     };
@@ -127,6 +157,17 @@ fn run() -> u32 {
     if !on_gala() {
         return 0;
     }
+    // A name the ledger cannot carry, while the table still has room
+    // for its row.
+    let status = raw_syscall4::<GALA_RECORD_MISSING>(
+        UNNAMEABLE.as_ptr() as u64,
+        UNNAMEABLE.len() as u64,
+        WHAT_OTHER,
+        UNNAMEABLE_DETAIL,
+    );
+    if status != 0 {
+        return 6;
+    }
     for detail in 0..FILL_RECORDS {
         let status = raw_syscall4::<GALA_RECORD_MISSING>(
             FILL_NAME.as_ptr() as u64,
@@ -137,6 +178,17 @@ fn run() -> u32 {
         if status != 0 {
             return 4;
         }
+    }
+    // The gap after them, which the full table drops and a filtered run
+    // records.
+    let status = raw_syscall4::<GALA_RECORD_MISSING>(
+        AFTER_NAME.as_ptr() as u64,
+        AFTER_NAME.len() as u64,
+        WHAT_OTHER,
+        0,
+    );
+    if status != 0 {
+        return 5;
     }
     0
 }

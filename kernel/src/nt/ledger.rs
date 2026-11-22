@@ -9,7 +9,10 @@
 //! kind). Dumped as JSON lines (`ledger: {...}`) by `dump`, which also
 //! clears the table so that each dump covers one program.
 //!
-//! Names from user mode are kept in a second fixed table. Invariants: a
+//! Names from user mode are kept in a second fixed table; a name that
+//! finds no room there is `?user`, and one that is not plain text
+//! `?text`, which is a caller's bug and no cap of this table's.
+//! Invariants: a
 //! dump gives back the names no entry uses any more (`compact`), so the
 //! table holds only the names of the gaps since the last dump, never
 //! every name of the boot; and bulk reports (the registry's absent keys,
@@ -261,9 +264,24 @@ pub fn record_user_bulk(name: &[u8], what: &'static str, detail: u64) {
     record_named(name, what, detail, true);
 }
 
+/// Whether a name can be a row's own: printable ASCII without the two
+/// characters a JSON string could not carry it with.
+fn plain_text(name: &[u8]) -> bool {
+    name.iter().all(|&b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\')
+}
+
 fn record_named(name: &[u8], what: &'static str, detail: u64, bulk: bool) {
-    let clean = name.iter().all(|&b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\');
-    match if clean { intern(name, bulk) } else { None } {
+    // A name that is not text is counted under `?text` and not under
+    // the `?user` that means the name table was full: they are
+    // different gaps, and a name comes from a caller's memory for as
+    // many bytes as the caller said -- a length it never meant leaves
+    // the name with whatever followed it, which is a caller's bug and
+    // no cap of the ledger's (`ledger_test`).
+    if !plain_text(name) {
+        add(Key { service: Service::Kernel("?text"), what, detail }, bulk);
+        return;
+    }
+    match intern(name, bulk) {
         Some(i) => add(Key { service: Service::User(i), what, detail }, bulk),
         None => add(Key { service: Service::Kernel("?user"), what, detail }, bulk),
     }
@@ -554,6 +572,22 @@ mod tests {
         assert_eq!(ledger.dropped.iter().flatten().count(), DROPPED_KINDS);
         let named: u64 = ledger.dropped.iter().flatten().map(|d| d.hits).sum();
         assert_eq!((named, ledger.overflow), (DROPPED_KINDS as u64, DROPPED_KINDS as u64 + 1));
+    }
+
+    /// The names the ledger can carry as a row's own, and the ones it
+    /// cannot: a name that is not text is `?text` and a name with no
+    /// room `?user`, and a dump that said the same of both sent the
+    /// reader after a cap of its own when the length a caller passed
+    /// was the gap.
+    #[test]
+    fn a_name_that_is_not_text_is_not_a_name_without_room() {
+        assert!(plain_text(b"kernel32.dll!CreateFileW"));
+        assert!(plain_text(b"registry:MACHINE/SOFTWARE/Microsoft"));
+        // A buffer read for more bytes than the name has.
+        assert!(!plain_text(b"kernel32.dll!CreateFileW\0\0"));
+        assert!(!plain_text(b"a\"b"));
+        assert!(!plain_text(br"a\b"));
+        assert!(!plain_text("café".as_bytes()));
     }
 
     #[test]

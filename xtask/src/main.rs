@@ -19154,10 +19154,61 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "exited with status 0x00000000",
             r#"ledger: {"service":"?","what":"unknown service","detail":4095,"hits":1,"#,
             r#"ledger: {"service":"NtQueryInformationProcess","what":"info class","detail":32512,"hits":2,"#,
+            // The second of the gaps this program reports under one
+            // name, which is the name the ledger must have kept: a
+            // system call made by hand whose argument registers the
+            // kernel is not told it may change leaves the next call
+            // with what the last one left behind, and the name that
+            // reached the ledger was then as long as whatever was in
+            // rdx (`?user`, a name the ledger had no room for, which
+            // is what it is not).
+            r#"ledger: {"service":"ledger_test.exe!fill","what":"other","detail":1,"hits":1,"#,
+            // The one report whose name is not text: its row is named
+            // apart from a name the table had no room for (`?user`),
+            // which is a cap of the ledger's and not a caller's bug.
+            r#"ledger: {"service":"?text","what":"other","detail":2989,"hits":1,"#,
             // The table filled up; how many records it then dropped
             // depends on what the boot itself recorded, but their kind
             // does not.
             r#"ledger: {"service":"?full","what":"other","detail":0,"hits":"#,
+        ],
+    },
+    Scenario {
+        // The ledger's exclusion filter (`ledger_except=`): a gap whose
+        // name holds one of the texts is not recorded at all, so the
+        // table's slots go to the rest. The program above fills the
+        // 512-entry table with 600 gaps under one name and reports one
+        // more afterwards, which a full table drops (`ledger_test`
+        // expects the `?full` line that says so); with that one name
+        // excluded, the later gap has a slot, which is what says the
+        // filter freed the table and did not only hide what it matched.
+        // A text is a substring of a name and is compared without
+        // regard to case, so one of them is given in the wrong case
+        // here; the other matches nothing, and its line of no hits is
+        // the dump saying so, because a name missing from a dump must
+        // read as the filter's doing and not as a gap the program never
+        // hit.
+        name: "ledger_except",
+        cmdline: "qemu_exit run=ledger_test.exe \
+                  ledger_except=LEDGER_TEST.EXE!FILL,no_such_gap",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ledger_except: a gap whose name holds one of 2 texts \
+             (LEDGER_TEST.EXE!FILL,no_such_gap) is not recorded: it takes no name, \
+             no slot of the table and no hit",
+            "ledger_test: ok",
+            "exited with status 0x00000000",
+            // The gap after the 600, which only a freed table records.
+            r#"ledger: {"service":"ledger_test.exe!after","what":"other","detail":0,"hits":1,"#,
+            // What each text kept out, the one that kept out nothing
+            // included.
+            r#"ledger: {"service":"?except","what":"LEDGER_TEST.EXE!FILL","detail":0,"hits":600,"#,
+            r#"ledger: {"service":"?except","what":"no_such_gap","detail":0,"hits":0,"#,
+            // The two gaps this program asks of Windows as well are
+            // recorded as ever: the filter kept out the name it was
+            // given and nothing else.
+            r#"ledger: {"service":"?","what":"unknown service","detail":4095,"hits":1,"#,
+            r#"ledger: {"service":"NtQueryInformationProcess","what":"info class","detail":32512,"hits":2,"#,
         ],
     },
     Scenario {
