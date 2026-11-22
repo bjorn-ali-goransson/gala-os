@@ -2350,6 +2350,18 @@ dependencies (libm in msvcrt) get absolute paths under the cargo home,
 which end up in panic locations: xtask's `user_build` remaps the cargo
 home to `/cargo` (`--remap-path-prefix`, merged into the target's
 rustflags with `--config`). A new dependency needs nothing more.
+Those locations carry line numbers, so **`export-tests` runs after
+`cargo fmt`, never before**: reformatting a source changes the bytes of
+every binary built from it while changing nothing it does. A `fmt` that
+took two lines out of `user/kernel32/src/actctx/manifest.rs` after the
+export left the checked-in `testkernel32.dll` ten bytes from a rebuild's
+-- two panic line numbers and the two `/Brepro` content hashes that
+follow them -- and CI's `git diff` of `user/bin` was the only thing that
+saw it. `cmp -l user/bin/<name>.dll
+target/<triple>/release/<name>.dll` says which bytes those are; four
+bytes at 0x80 (the PE timestamp `/Brepro` fills with a hash) and four in
+`.rdata`'s debug directory are the hash, and whatever else differs is
+the answer.
 Third-party builds (`user/<name>/build.sh`) pin their source and
 checksum and strip build ids and timestamps so two builds give the same
 hash. Inputs' file times count too: export-tests rewrites `user/bin`, so
