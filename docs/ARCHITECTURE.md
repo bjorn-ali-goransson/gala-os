@@ -4901,9 +4901,12 @@ definition for both layouts, "Plan: WOW64").
   the event and of every field in it, which the kernel's
   `etw::tracelogging` reads. An event with neither is a manifest
   provider's, whose names are in no part of it, and the record says
-  that rather than leaving the kernel to guess from the bytes; one
-  longer than a record holds is cut, and says that too, so that a line
-  cut to fit is never read as an event that ended. The kernel answers
+  that rather than leaving the kernel to guess from the bytes -- the
+  line for one is its size and the text its bytes carried
+  (`etw::strings`), a message, path or reason being the part of an
+  event nobody needs a manifest to read; one longer than a record
+  holds is cut, and says that too, so that a line cut to fit is never
+  read as an event that ended. The kernel answers
   that write STATUS_NO_MORE_ENTRIES once the run's event budget is
   spent, and advapi32 then tells every provider the session asked for
   that it is gone, by the path a ControlTraceW stop uses: a program
