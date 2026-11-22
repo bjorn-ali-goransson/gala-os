@@ -30,7 +30,7 @@ rather than free text.
 | Serial log | `log` macros, `kernel/src/console.rs` | `target/<profile>/test-<scenario>.serial.log`; `target/failed/<scenario>.log` |
 | Event stream (JSON lines) | `kernel/src/events.rs` | `events=` / `XTASK_EVENTS`; `<iso>.events.jsonl`; `cargo xtask events` |
 | OpenTelemetry export | `xtask/src/otel.rs` | `cargo xtask otel`, `XTASK_OTEL=1` |
-| Missing-features ledger | `kernel/src/nt/ledger.rs` | `ledger:` lines; `cargo xtask report` |
+| Missing-features ledger | `kernel/src/nt/ledger.rs` | `ledger:` lines; `cargo xtask report`; `ledger_except=<text>[,<text>...]` for the gaps to leave out of the table, each dump saying how many records every text kept out (`?except` lines) |
 | Triage of a failed log | `xtask/src/triage.rs` | end of every failed log; `cargo xtask triage` |
 | Run history, health | `xtask/src/main.rs` (`record_history`) | `target/report/history.jsonl`, `xtask: health:` lines |
 | Backtraces, panic output | `arch::backtrace`, `cargo xtask symbolize` | `backtrace:` lines, symbolized in failed logs |
@@ -455,7 +455,10 @@ real program, this list is the work queue, ranked by how often it was
 hit (scenario `ledger_test`).
 Names from user mode (`GalaRecordMissing`, the registry's absent keys)
 live in a second fixed table of 512 names; a name that finds no room is
-`?user`. Invariants (`nt::ledger`): each dump gives back the names no
+`?user`, and a name that is not plain text is `?text` -- a caller's bug
+and no cap of the ledger's, told apart because a row that said `?user`
+of a name read for more bytes than the caller meant sent the reader
+after a cap of the ledger's instead (`ledger_test` reports one of each). Invariants (`nt::ledger`): each dump gives back the names no
 entry uses any more, so the table holds the names of the gaps since the
 last dump, not every name of the boot; and bulk reports (the registry's
 `absent key`s, thousands in an Office install) hold at most 384 names
@@ -470,6 +473,28 @@ even then keeps the hive it is in and the end that says which key it was
 (`registry:USER/.../Store/Tenants/Default`) -- the end alone said
 neither which hive nor, with a SID in front of it, which key. The `key`
 events carry every open's full name for whoever wants the hive itself.
+
+`ledger_except=<text>[,<text>...]` keeps the gaps whose names hold one
+of the texts out of the table altogether -- no name, no record and no
+hit -- so that the 512 records go to the rest. The texts are parts of a
+name and are compared without regard to case, so one text covers a
+family a program reports once in every module it loads:
+`register_frame` holds both the registering and the deregistering name
+and is 86 of the 409 records a Word startup leaves, a fifth of them and
+as many of the 512 names. What the filter is not for is a gap that is
+merely known, because a record it keeps out is one the next reader does
+not see: every dump says how many records each text kept out, as
+`?except` lines, the texts that kept out none included -- a name a dump
+does not carry must read as the filter's doing and not as a gap the
+program never hit, and a text that named nothing (a typo) says so here
+and nowhere else. Sixteen texts at most, of 96 bytes of plain text
+each; a value that is not one is refused outright with the reason and
+every gap is recorded, as without it, a filter that quietly excluded
+nothing reading afterwards as a table the gaps it was meant to keep out
+were entitled to fill. A dump of a program that recorded nothing says
+nothing at all, filter or no filter. Scenario `ledger_except`, whose
+program reports one gap after the 600 that fill the table without it:
+that row is in the dump only when the filter freed the slot it took.
 
 - The dispatcher records unknown services and, generically, any
   STATUS_INVALID_INFO_CLASS (with the class argument, per

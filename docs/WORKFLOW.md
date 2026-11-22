@@ -1808,6 +1808,20 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   the numbers that are gala's own), falling back to gala's number only
   when no ntdll is mapped (gala scenarios that ship none). A raw
   `mov eax, N` in a test is for long-stable numbers only.
+- **A system call made by hand returns with the volatile registers
+  changed.** gala's kernel, like Windows', leaves every volatile
+  register the caller's to reload, which is what ntdll's stubs are
+  called under: an `asm!` block that puts arguments in rdx, r8 and r9
+  (x1-x3 on ARM64) must say so with `=> _` and `clobber_abi` ("win64",
+  or "C" on ARM64), as ntrt's own inline call does
+  (`user/ntrt/src/x64.rs`). Without it the compiler holds a value in
+  one of those registers across the call and the next call is made with
+  whatever the kernel left there. `ledger_test` reported 600 gaps under
+  one name in a loop and the ledger named one of them: every later
+  report passed a name as long as whatever rdx held by then, and 509 of
+  them reached the ledger as `?user`, the name it has no room for --
+  which is why its scenario expects the name of the *second* report and
+  not only of the first.
 - **A test must hold on an ordinary user's machine too** (run-all.ps1
   runs as a non-admin user in session 1, with many CPUs, a battery, its
   own UI language): files and directories go in `%TEMP%` (GetTempPathW),

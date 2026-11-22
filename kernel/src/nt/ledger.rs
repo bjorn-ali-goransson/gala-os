@@ -9,7 +9,16 @@
 //! kind). Dumped as JSON lines (`ledger: {...}`) by `dump`, which also
 //! clears the table so that each dump covers one program.
 //!
-//! Names from user mode are kept in a second fixed table. Invariants: a
+//! `ledger_except=<text>[,<text>...]` keeps the gaps whose names hold
+//! one of the texts out of the table altogether, for a program that
+//! reports one gap in every module it loads; every dump says how many
+//! records each text kept out (`?except`), the texts that kept out none
+//! included.
+//!
+//! Names from user mode are kept in a second fixed table; a name that
+//! finds no room there is `?user`, and one that is not plain text
+//! `?text`, which is a caller's bug and no cap of this table's.
+//! Invariants: a
 //! dump gives back the names no entry uses any more (`compact`), so the
 //! table holds only the names of the gaps since the last dump, never
 //! every name of the boot; and bulk reports (the registry's absent keys,
@@ -20,7 +29,7 @@
 //! while a `?full` line of a rarer kind says a gap was lost.
 
 use core::fmt;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::sync::IrqMutex;
 
@@ -200,6 +209,105 @@ impl Ledger {
     }
 }
 
+/// The most texts `ledger_except=` may hold, and how long one may be (a
+/// name's own length, a text being a part of a name). Eleven families
+/// cover the gaps a Word startup repeats -- the register/deregister pair
+/// every module of it loads is 86 rows of 409 by itself, and one text
+/// (`register_frame`) covers both halves of it -- and sixteen is room
+/// for them and for what the next program repeats.
+const MAX_EXCEPT: usize = 16;
+
+/// `ledger_except=`'s texts and what each of them kept out. The counts
+/// are a dump's, as every other number here is, and are cleared with
+/// the table.
+struct Except {
+    texts: [[u8; USER_NAME_LEN]; MAX_EXCEPT],
+    lens: [usize; MAX_EXCEPT],
+    hits: [u64; MAX_EXCEPT],
+    held: usize,
+}
+
+impl Except {
+    const fn new() -> Self {
+        Except {
+            texts: [[0; USER_NAME_LEN]; MAX_EXCEPT],
+            lens: [0; MAX_EXCEPT],
+            hits: [0; MAX_EXCEPT],
+            held: 0,
+        }
+    }
+
+    /// Whether a text names this gap, counting it against the first
+    /// that does: `name` is the name a row would carry, and the texts
+    /// are parts of it.
+    fn excludes(&mut self, name: &[u8]) -> bool {
+        let Some(i) = (0..self.held).find(|&i| holds(name, &self.texts[i][..self.lens[i]])) else {
+            return false;
+        };
+        self.hits[i] += 1;
+        true
+    }
+}
+
+static EXCEPT: IrqMutex<Except> = IrqMutex::new(Except::new());
+
+/// Whether `ledger_except=` named anything, read before the lock so
+/// that a boot without it pays nothing for the filter.
+static EXCEPTING: AtomicBool = AtomicBool::new(false);
+
+/// `ledger_except=<text>[,<text>...]`: a gap whose name holds one of the
+/// texts is not recorded -- no name, no slot of the table and no hit --
+/// so that the slots go to the rest. The texts are compared without
+/// regard to case, the names being file names and exports, and a value
+/// that is not one is refused outright: a filter that quietly excluded
+/// nothing would read afterwards as a table the gaps it was meant to
+/// keep out were entitled to fill.
+pub fn set_except(spec: &str) {
+    let mut named = Except::new();
+    for text in spec.split(',') {
+        if text.is_empty()
+            || text.len() > USER_NAME_LEN
+            || !plain_text(text.as_bytes())
+            || named.held == MAX_EXCEPT
+        {
+            crate::warn!(
+                "ledger_except: {spec} reads <text>[,<text>...], such as \
+                 register_frame,api-ms-win-crt-, with {MAX_EXCEPT} texts at most of \
+                 {USER_NAME_LEN} bytes of plain text each: every gap is recorded, as \
+                 without it"
+            );
+            return;
+        }
+        named.texts[named.held][..text.len()].copy_from_slice(text.as_bytes());
+        named.lens[named.held] = text.len();
+        named.held += 1;
+    }
+    let held = named.held;
+    *EXCEPT.lock() = named;
+    EXCEPTING.store(true, Ordering::Release);
+    crate::info!(
+        "ledger_except: a gap whose name holds one of {held} texts ({spec}) is not \
+         recorded: it takes no name, no slot of the table and no hit. Every dump says \
+         how many records each text kept out, so that a name a dump does not carry \
+         reads as the filter's doing and not as a gap the program never hit"
+    );
+}
+
+/// Whether the filter names this gap, which is what keeps it out of the
+/// table altogether.
+fn excluded(name: &[u8]) -> bool {
+    EXCEPTING.load(Ordering::Acquire) && EXCEPT.lock().excludes(name)
+}
+
+/// Whether `name` holds `text`, without regard to case. An empty text
+/// holds nothing: `set_except` refuses one, and a window of no bytes
+/// would otherwise match every name and record nothing at all.
+fn holds(name: &[u8], text: &[u8]) -> bool {
+    !text.is_empty()
+        && name.len() >= text.len()
+        && name.windows(text.len()).any(|at| at.eq_ignore_ascii_case(text))
+}
+
 static LEDGER: IrqMutex<Ledger> = IrqMutex::new(Ledger {
     entries: [None; ENTRIES],
     dropped: [None; DROPPED_KINDS],
@@ -213,6 +321,9 @@ static PRINTING: AtomicUsize = AtomicUsize::new(0);
 
 /// Counts one hit of a missing feature.
 pub fn record(service: &'static str, what: &'static str, detail: u64) {
+    if excluded(service.as_bytes()) {
+        return;
+    }
     add(Key { service: Service::Kernel(service), what, detail }, false);
 }
 
@@ -261,9 +372,29 @@ pub fn record_user_bulk(name: &[u8], what: &'static str, detail: u64) {
     record_named(name, what, detail, true);
 }
 
+/// Whether a name can be a row's own: printable ASCII without the two
+/// characters a JSON string could not carry it with.
+fn plain_text(name: &[u8]) -> bool {
+    name.iter().all(|&b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\')
+}
+
 fn record_named(name: &[u8], what: &'static str, detail: u64, bulk: bool) {
-    let clean = name.iter().all(|&b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\');
-    match if clean { intern(name, bulk) } else { None } {
+    // Before the name is interned and before the entry, so that a gap
+    // the filter names costs neither (`ledger_except=`).
+    if excluded(name) {
+        return;
+    }
+    // A name that is not text is counted under `?text` and not under
+    // the `?user` that means the name table was full: they are
+    // different gaps, and a name comes from a caller's memory for as
+    // many bytes as the caller said -- a length it never meant leaves
+    // the name with whatever followed it, which is a caller's bug and
+    // no cap of the ledger's (`ledger_test`).
+    if !plain_text(name) {
+        add(Key { service: Service::Kernel("?text"), what, detail }, bulk);
+        return;
+    }
+    match intern(name, bulk) {
         Some(i) => add(Key { service: Service::User(i), what, detail }, bulk),
         None => add(Key { service: Service::Kernel("?user"), what, detail }, bulk),
     }
@@ -324,13 +455,42 @@ pub fn dump() {
     // no room left, "?bulk" the bulk cap, "?" the kinds `dropped` itself
     // had no room to name.
     let mut named = 0;
+    let mut rows = entries.iter().flatten().count();
     for d in dropped.iter().flatten() {
+        rows += 1;
         let service = if d.bulk { "?bulk" } else { "?full" };
         let (what, hits) = (d.what, d.hits);
         named += hits;
         crate::kprintln!(
             r#"ledger: {{"service":"{service}","what":"{what}","detail":0,"hits":{hits},"first":0,"last":0}}"#
         );
+    }
+    // What each text of `ledger_except=` kept out of this dump, the
+    // texts that kept out nothing included: a name a dump does not
+    // carry must read as the filter's doing and not as a gap the
+    // program never hit, and a text that named nothing (a typo) says so
+    // here and nowhere else. A dump of a program that reported nothing
+    // says nothing at all, which it goes on doing with the filter armed.
+    if EXCEPTING.load(Ordering::Acquire) {
+        let (texts, lens, hits, held) = {
+            let mut except = EXCEPT.lock();
+            let was = (except.texts, except.lens, except.hits, except.held);
+            except.hits = [0; MAX_EXCEPT];
+            was
+        };
+        let kept_out: u64 = hits[..held].iter().sum();
+        let empty = rows == 0 && overflow == 0 && kept_out == 0;
+        if !empty {
+            for i in 0..held {
+                // `set_except` takes plain text only, which is what a
+                // JSON string here can carry.
+                let text = core::str::from_utf8(&texts[i][..lens[i]]).unwrap_or("?");
+                let hits = hits[i];
+                crate::kprintln!(
+                    r#"ledger: {{"service":"?except","what":"{text}","detail":0,"hits":{hits},"first":0,"last":0}}"#
+                );
+            }
+        }
     }
     if overflow > named {
         let rest = overflow - named;
@@ -554,6 +714,70 @@ mod tests {
         assert_eq!(ledger.dropped.iter().flatten().count(), DROPPED_KINDS);
         let named: u64 = ledger.dropped.iter().flatten().map(|d| d.hits).sum();
         assert_eq!((named, ledger.overflow), (DROPPED_KINDS as u64, DROPPED_KINDS as u64 + 1));
+    }
+
+    /// The names the ledger can carry as a row's own, and the ones it
+    /// cannot: a name that is not text is `?text` and a name with no
+    /// room `?user`, and a dump that said the same of both sent the
+    /// reader after a cap of its own when the length a caller passed
+    /// was the gap.
+    #[test]
+    fn a_name_that_is_not_text_is_not_a_name_without_room() {
+        assert!(plain_text(b"kernel32.dll!CreateFileW"));
+        assert!(plain_text(b"registry:MACHINE/SOFTWARE/Microsoft"));
+        // A buffer read for more bytes than the name has.
+        assert!(!plain_text(b"kernel32.dll!CreateFileW\0\0"));
+        assert!(!plain_text(b"a\"b"));
+        assert!(!plain_text(br"a\b"));
+        assert!(!plain_text("café".as_bytes()));
+    }
+
+    /// A text is a part of a name and is compared without regard to
+    /// case, so that one text names a family of gaps -- the two frame
+    /// calls a program reports in every module it loads are one text,
+    /// `register_frame` holding both the registering and the
+    /// deregistering name. The name is what is matched, never the kind
+    /// or the detail.
+    #[test]
+    fn a_text_of_the_filter_is_a_part_of_a_name() {
+        let mut filter = parsed("register_frame,API-MS-WIN-CRT-");
+        assert!(filter.excludes(b"winword.exe!__register_frame"));
+        assert!(filter.excludes(b"mso20win32client.dll!__deregister_frame"));
+        assert!(filter.excludes(b"api-ms-win-crt-runtime-l1-1-0.dll!_crt_atexit"));
+        assert!(!filter.excludes(b"winword.exe!GetFrameRate"));
+        assert!(!filter.excludes(b"winword.exe!RegisterClassW"));
+        assert!(!filter.excludes(b"registry:MACHINE/SOFTWARE/Microsoft"));
+        assert_eq!((filter.hits[0], filter.hits[1]), (2, 1));
+    }
+
+    /// A gap is counted against the first text that names it, so that a
+    /// dump's counts add up to the records the filter kept out.
+    #[test]
+    fn a_gap_is_counted_once_however_many_texts_name_it() {
+        let mut filter = parsed("frame,winword");
+        assert!(filter.excludes(b"winword.exe!__register_frame"));
+        assert_eq!((filter.hits[0], filter.hits[1]), (1, 0));
+    }
+
+    /// The texts as `set_except` holds them, without its refusals.
+    fn parsed(spec: &str) -> alloc::boxed::Box<Except> {
+        let mut filter = alloc::boxed::Box::new(Except::new());
+        for text in spec.split(',') {
+            let held = filter.held;
+            filter.texts[held][..text.len()].copy_from_slice(text.as_bytes());
+            filter.lens[held] = text.len();
+            filter.held += 1;
+        }
+        filter
+    }
+
+    /// An empty text would name every gap and record nothing at all,
+    /// which is why `set_except` refuses a value that holds one.
+    #[test]
+    fn an_empty_text_names_nothing() {
+        assert!(!holds(b"winword.exe!__register_frame", b""));
+        assert!(!holds(b"", b"frame"));
+        assert!(holds(b"FRAME", b"frame"));
     }
 
     #[test]
