@@ -15511,11 +15511,19 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // P1 (JDK): SIDs, ACLs, security descriptors, the process token.
+        // P1 (JDK): SIDs, ACLs, security descriptors, the process token,
+        // and the ETW provider side -- whose rows are the point of it:
+        // the provider a program registered and the name its own traits
+        // give it, which is what a session would be told to enable.
         name: "advapi32_test",
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "advapi32_test: ok",
+            r#""service":"advapi32.dll!EventRegister(524d2c6e-3b9a-414f-8a55-1c6d0e7f3a21)""#,
+            r#""service":"advapi32.dll!EventSetInformation(advapi32_test)""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // Security model S1 (docs/SECURITY.md): access tokens as kernel

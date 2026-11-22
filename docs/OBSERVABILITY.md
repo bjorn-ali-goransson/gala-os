@@ -740,6 +740,23 @@ that row is in the dump only when the filter freed the slot it took.
   files have one) when a manifest's files name a path to load them
   from, which the DLL redirection section hands out but the loader
   does not use.
+  ETW providers (advapi32's `etw.rs`), "reached": every provider a
+  program registers, `advapi32.dll!EventRegister(<guid>)`, and the name
+  its own traits give it, `advapi32.dll!EventSetInformation(<name>)` --
+  TraceLogging sets those traits right after registering, and the name
+  in them is what a session would be told to enable. Neither is a gap
+  of gala's; the rows are there because **a provider no session enabled
+  writes nothing at all**, so without them a program's own account of
+  its work leaves nothing behind, and a reader cannot tell a program
+  that never traces from one whose trace has no listener. That is
+  measured and not assumed: a Word startup registers 20 providers and
+  writes not one event, no write of any form leaving a row. The forms
+  are recorded when they do happen, once each --
+  `advapi32.dll!EventWrite(no session)`, `EventWriteTransfer`,
+  `EventWriteEx`, `EventWriteString` -- as are the answers a provider
+  is given, `EventEnabled(no session)` and `EventProviderEnabled(no
+  session)`, an enablement answered no being a payload the program then
+  does not build (ARCHITECTURE "advapi32", ROADMAP OF).
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
 - The Linux personality records with the same call: `linux syscall
