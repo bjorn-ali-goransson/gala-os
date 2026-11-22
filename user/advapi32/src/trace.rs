@@ -758,9 +758,9 @@ const RECORD_HEADER: usize = 4 + 16 + 16 + 4;
 /// An event in reach, kept by every running session that asked for it:
 /// the provider, the descriptor and the payload's bytes, which is what
 /// a reader of the buffers needs to decode it. Nothing reads them yet
-/// (ROADMAP OF step 1 has the decoder); what they give now is the count
-/// a query reports, and a session that holds a program's own account of
-/// its work.
+/// (ROADMAP OT4 step 2 has the decoder, which is what the pieces are
+/// kept whole for); what they give now is the count a query reports,
+/// and a session that holds a program's own account of its work.
 pub(crate) fn keep(guid: &[u8; 16], descriptor: *const u8, count: u32, data: *const u8) {
     let pieces = if data.is_null() { 0 } else { count as usize };
     let mut payload = 0usize;
