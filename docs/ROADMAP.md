@@ -7201,6 +7201,16 @@ among the slowest hand-offs.
    (nothing armed, so the program's own answers, which are real
    Windows'), `etw_armed` and `etw_armed_all`.
 
+   The session is spent on the program the run is about:
+   `etw_from=<text>` gives it only to a process whose name has the text
+   in it, in either case, and the filter is in the ask, so a process the
+   run is not about is told nobody is listening and builds no payload.
+   Measured, not supposed -- an `office_word` run armed for every
+   provider gave 1834 of its 2048 lines to OfficeClickToRun.exe, the
+   service Word starts and nobody was reading, and Word's own providers
+   registered ten seconds after the budget was gone. Scenarios
+   `etw_from` and `etw_from_elsewhere`.
+
    The decoder is done (`kernel/src/nt/etw/tracelogging.rs`, host unit
    tests): a line carries the event's own name and every field with the
    name the program gave it, read out of the provider metadata (type 2)

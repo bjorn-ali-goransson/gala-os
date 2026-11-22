@@ -4896,7 +4896,13 @@ definition for both layouts, "Plan: WOW64").
   `TraceLoggingProvider.h` gives the algorithm and an example, which
   `nt::etw::name_guid`'s host test checks against). `etw=*` asks for
   every provider the program registers, which is one enable per
-  registration and so needs nothing of the union rule above.
+  registration and so needs nothing of the union rule above. A run
+  may also spend the session on one program: `etw_from=<text>` is
+  answered in the ask itself (op 0), and a process whose name does not
+  have the text in it is refused there exactly as one with no session
+  at all is -- so its TraceLogging builds no payload either, and a
+  service's chatter never reaches the budget instead of being dropped
+  once it has been counted.
 - **Performance counters** (`perf.rs`): the PerfLib V2 provider functions
   keep providers, counter-set templates and instances
   (PERF_COUNTERSET_INSTANCE, the data block at the counters' offsets, the

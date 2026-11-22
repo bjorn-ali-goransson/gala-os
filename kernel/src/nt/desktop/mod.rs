@@ -4238,7 +4238,7 @@ pub fn install_started(session: u32, program: &'static Program, pid: Option<u64>
 fn not_watched(watched: bool, pid: Option<u64>) {
     if let (false, Some(pid)) = (watched, pid) {
         crate::warn!(
-            "desktop: start menu: the install in pid {pid} is not watched (at most              {MAX_INSTALLERS} are): its tile waits for the next listing"
+            "desktop: start menu: the install in pid {pid} is not watched (at most {MAX_INSTALLERS} are): its tile waits for the next listing"
         );
         super::ledger::record("start menu", "install not watched", 0);
     }

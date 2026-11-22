@@ -16904,6 +16904,45 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // etw_from=<process>: the session spends its budget on the
+        // program the run is about. Measured, not supposed: an
+        // office_word run armed for every provider gave 1834 of its
+        // 2048 lines to OfficeClickToRun.exe, a service Word starts
+        // and nobody was reading, and Word's own providers registered
+        // (59.1s) after the budget was gone. Here the name matches, so
+        // the session is the one `etw_armed` gets.
+        name: "etw_from",
+        cmdline: "qemu_exit run=etwarm_test.exe etw=Gala.Test.Arm etw_from=etwarm",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for Gala.Test.Arm (2542af41-3d78-596e-ff31-017dbbeacc32), level 5 and every keyword, 256 events at most, and only for a process whose name has etwarm in it (etw=)",
+            "etwarm_test: Gala.Test.Arm: calls=1 enabled=1 level=5 any=0xffffffffffffffff all=0x0 ctx=0x5101",
+            "etw: etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why=\"armed\"",
+            "etw: 1 event written to the session, from 1 provider (etw=)",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same session for a process this run is not about: the
+        // program registers the provider the option names and is still
+        // told nobody is listening, because the ask itself is refused
+        // (op 0) -- TraceLogging then builds no payload, which is the
+        // whole point of the filter and not merely a line left out.
+        name: "etw_from_elsewhere",
+        cmdline: "qemu_exit run=etwarm_test.exe etw=Gala.Test.Arm etw_from=winword",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "and only for a process whose name has winword in it (etw=)",
+            "etwarm_test: Gala.Test.Arm: no session",
+            "etwarm_test: Gala.Test.Quiet: no session",
+            "etwarm_test: Gala.Test.Arm: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
+            "etwarm_test: wrote 4",
+            "etwarm_test: ok",
+            "etw: not one event was written to the session (etw=): no process whose name has winword in it wrote one",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Every field shape TraceLogging can put in an event, written by
         // a program nobody is listening to: the half that must stay real
         // Windows' line for line, so the decoded lines below can be read
@@ -21693,6 +21732,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("import_answer_text", "import_strings_test"),
     ("import_answer_bytes", "import_strings_test"),
     ("etw_armed", "etwarm_test"),
+    ("etw_from", "etwarm_test"),
+    ("etw_from_elsewhere", "etwarm_test"),
     ("etwfields_armed", "etwfields_test"),
     ("etw_armed_all", "etwarm_test"),
     ("events_from", "process_test"),
@@ -27982,7 +28023,7 @@ fn dump_and_check(
                 let all = rw as usize * rh as usize;
                 if n * 100 < all * percent as usize {
                     return Err(format!(
-                        "{n} of the {all} pixels in ({x}, {y}, {rw}, {rh}) are {want:06x}, not                          the {percent}% asked for"
+                        "{n} of the {all} pixels in ({x}, {y}, {rw}, {rh}) are {want:06x}, not the {percent}% asked for"
                     ));
                 }
             }
@@ -32899,6 +32940,92 @@ mod constants {
             }
         }
         assert!(found.is_empty(), "use nt::platform instead:\n{}", found.join("\n"));
+    }
+
+    /// A message carrying a run of spaces nobody typed. rustfmt in
+    /// this repository rewrites a `\`-newline continuation inside a
+    /// string literal by joining the lines and keeping the
+    /// indentation, so a sentence written over three source lines
+    /// prints with eighteen spaces in the middle of it. A log line is
+    /// the product here, so that is a defect; and it is one nothing
+    /// else catches, because the message is usually on a path no test
+    /// takes -- three had been in the tree for some time when this
+    /// test was written (the start menu's unwatched install, an lx
+    /// signal statedump, and an `etw:` summary). Write a long message
+    /// on one source line instead: a literal rustfmt cannot rewrap is
+    /// one it cannot mangle (WORKFLOW "Rules for every change").
+    #[test]
+    fn no_message_carries_spaces_rustfmt_left_behind() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src");
+        let mut files = Vec::new();
+        let mut dirs = vec![dir];
+        while let Some(d) = dirs.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        // Eight spaces or fewer are typed on purpose: a log line that
+        // indents a sub-line under its heading ("crash report:   ").
+        const RUN: usize = 9;
+        let mut found = Vec::new();
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                if longest_run_of_spaces_in_a_string(line) >= RUN {
+                    found.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "a run of {RUN} spaces inside a string, which rustfmt left there; write the message on one source line\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// The longest run of spaces inside a `"` literal on this line. A
+    /// byte string is skipped (the dunes of the start menu's wallpaper
+    /// are drawn in spaces, and are not a sentence), as is anything
+    /// after a `//`.
+    fn longest_run_of_spaces_in_a_string(line: &str) -> usize {
+        let b = line.as_bytes();
+        let mut at = 0;
+        let mut inside = false;
+        let mut counting = false;
+        let mut run = 0usize;
+        let mut longest = 0usize;
+        while at < b.len() {
+            match b[at] {
+                // An escape takes the next byte with it, so an escaped
+                // quote does not end the literal.
+                b'\\' if inside => at += 1,
+                // The one character literal that would otherwise read
+                // as the start of a string.
+                b'\''
+                    if !inside && b.get(at + 1) == Some(&b'"') && b.get(at + 2) == Some(&b'\'') =>
+                {
+                    at += 2;
+                }
+                b'"' => {
+                    counting = !inside && !(at > 0 && b[at - 1] == b'b');
+                    inside = !inside;
+                    run = 0;
+                }
+                b'/' if !inside && b.get(at + 1) == Some(&b'/') => break,
+                b' ' if counting => {
+                    run += 1;
+                    longest = longest.max(run);
+                }
+                _ => run = 0,
+            }
+            at += 1;
+        }
+        longest
     }
 
     /// The calendar is not a clock: it turns a count it is handed into a

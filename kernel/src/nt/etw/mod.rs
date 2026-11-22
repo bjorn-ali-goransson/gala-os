@@ -18,6 +18,16 @@
 //! manifest of any kind, and `*` asks for every provider the program
 //! registers.
 //!
+//! `etw_from=<text>` keeps the session for the program the run is
+//! about: only a process whose name has the text in it is given it.
+//! Measured, not supposed -- an `office_word` run armed for every
+//! provider gave 1834 of its 2048 lines to OfficeClickToRun.exe, the
+//! service Word starts and nobody was reading, and Word's own
+//! providers registered after the budget was gone. The filter is in
+//! the ask (op 0) and not only in the line, so a process the run is
+//! not about is told nobody is listening and TraceLogging builds it no
+//! payload at all.
+//!
 //! A line says what the program said: the provider's name, the event's,
 //! and every field with the name the program gave it, read out of the
 //! metadata TraceLogging ships beside each event (`tracelogging`). An
@@ -38,6 +48,10 @@ pub mod tracelogging;
 /// rather than cut, because a cut name hashes to a GUID no provider
 /// has.
 pub const NAME_LEN: usize = 128;
+
+/// The longest `etw_from=` text. A process name is shorter than this;
+/// the room is for a run that types the tail of a path.
+pub const FROM_LEN: usize = 64;
 
 /// How many events one run reports unless `:<n>` asks for another
 /// number. Each is a line of the serial log, so this is the same shape
@@ -101,12 +115,87 @@ struct Ask {
     /// alone tells a reader nothing.
     name: [u8; NAME_LEN],
     name_len: usize,
+    /// The text `etw_from=` gave, empty when it was not given.
+    from: [u8; FROM_LEN],
+    from_len: usize,
 }
 
 impl Ask {
     const fn new() -> Self {
-        Self { every: false, guid: [0; 16], level: 0, keyword: 0, name: [0; NAME_LEN], name_len: 0 }
+        Self {
+            every: false,
+            guid: [0; 16],
+            level: 0,
+            keyword: 0,
+            name: [0; NAME_LEN],
+            name_len: 0,
+            from: [0; FROM_LEN],
+            from_len: 0,
+        }
     }
+
+    /// Whether a process is one this session is for: every process
+    /// when `etw_from=` was not given.
+    fn keeps(&self, name: &str) -> bool {
+        self.from_len == 0 || contains_ignoring_case(name.as_bytes(), &self.from[..self.from_len])
+    }
+}
+
+/// `haystack` with `needle` in it, upper and lower case being the same
+/// letter: a process is `WINWORD.EXE` to the kernel and `winword` to
+/// the run that asked for it, and a value in the wrong case would
+/// otherwise read afterwards as a program that wrote nothing.
+fn contains_ignoring_case(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    (0..=haystack.len() - needle.len())
+        .any(|at| needle.iter().zip(&haystack[at..]).all(|(n, h)| n.eq_ignore_ascii_case(h)))
+}
+
+/// The `etw_from=` clause of the line that says what the session is
+/// for. Nothing at all when every process keeps it, so a run that
+/// asked for no filter does not read as one whose filter matched
+/// everything.
+struct Only<'a>(&'a [u8]);
+
+impl fmt::Display for Only<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        write!(f, ", and only for a process whose name has {} in it", tracelogging::Text(self.0))
+    }
+}
+
+/// Whether `etw_from=` is in force (read before taking its lock).
+static FROM_ON: AtomicBool = AtomicBool::new(false);
+
+/// `etw_from=<text>`: of the events a session would keep, only those a
+/// process whose name has the text in it wrote. Read before `etw=`, so
+/// the line that says what the session is for says this too.
+pub fn only_from(text: &str) {
+    if text.is_empty() || text.len() > FROM_LEN {
+        warn!(
+            "etw: etw_from={text} is not a name of 1 to {FROM_LEN} bytes: every process keeps the session"
+        );
+        return;
+    }
+    {
+        let mut ask = ASK.lock();
+        ask.from_len = text.len();
+        ask.from[..text.len()].copy_from_slice(text.as_bytes());
+    }
+    FROM_ON.store(true, Ordering::Release);
+}
+
+/// Whether a process is one the session is for, without the lock where
+/// no filter was given.
+fn for_process(name: &str) -> bool {
+    !FROM_ON.load(Ordering::Acquire) || ASK.lock().keeps(name)
 }
 
 /// What the run asked for.
@@ -372,20 +461,29 @@ pub fn set(value: &str) {
     LEFT.store(budget, Ordering::Relaxed);
     WANTED.store(true, Ordering::Release);
     let keyword = Keyword(keyword);
+    // `etw_from=` is read before `etw=` (`only_from`), so the one line
+    // that says what the session is for says this too. Two lines would
+    // leave a reader to put them together, and a filter nobody noticed
+    // reads afterwards as a program that wrote nothing.
+    let (from, from_len) = {
+        let ask = ASK.lock();
+        (ask.from, ask.from_len)
+    };
+    let only = Only(&from[..from_len]);
     if every {
         info!(
             "etw: a session for every provider, level {level} and {keyword}, \
-             {budget} events at most (etw=)"
+             {budget} events at most{only} (etw=)"
         );
     } else if by_guid.is_some() {
         info!(
-            "etw: a session for {}, level {level} and {keyword}, {budget} events at most (etw=)",
+            "etw: a session for {}, level {level} and {keyword}, {budget} events at most{only} (etw=)",
             Guid(&guid)
         );
     } else {
         info!(
             "etw: a session for {who} ({}), level {level} and {keyword}, \
-             {budget} events at most (etw=)",
+             {budget} events at most{only} (etw=)",
             Guid(&guid)
         );
     }
@@ -399,11 +497,18 @@ pub fn wanted() -> bool {
 /// What the run asks for, in the bytes op 0 answers with ([`ASK_LEN`]).
 /// False when no session was asked for, which is what a DLL pays one
 /// system call in its life to learn.
-pub fn ask(out: &mut [u8; ASK_LEN]) -> bool {
+pub fn ask(out: &mut [u8; ASK_LEN], process: &str) -> bool {
     if !wanted() {
         return false;
     }
     let ask = ASK.lock();
+    // A process the run is not about is told nobody is listening, and
+    // TraceLogging then builds no payload for the provider at all. That
+    // is what keeps a service's chatter out of the budget, rather than
+    // out of the log once it has already been counted.
+    if !ask.keeps(process) {
+        return false;
+    }
     out[..16].copy_from_slice(&ask.guid);
     out[16] = if ask.every { ASK_EVERY } else { 0 };
     out[17] = ask.level;
@@ -451,7 +556,7 @@ pub struct Written<'a> {
 /// should keep handing them over: `false` once the budget is spent, so
 /// a program whose session is over stops paying a system call an event.
 pub fn record(event: &Written<'_>) -> bool {
-    if !wanted() {
+    if !wanted() || !for_process(event.process) {
         return false;
     }
     let Some(left) = take_line() else { return false };
@@ -507,18 +612,34 @@ pub fn record(event: &Written<'_>) -> bool {
 /// What the session came to, at the end of the run.
 pub fn log_stats() {
     if !wanted() {
+        if FROM_ON.load(Ordering::Relaxed) {
+            warn!(
+                "etw: etw_from= was given without etw=: no session was started, so it kept nothing from anyone"
+            );
+        }
         return;
     }
     let written = WRITTEN.load(Ordering::Relaxed);
     if written == 0 {
         // Said rather than left out: a run that armed a session and saw
-        // nothing has learnt something, and the two reasons it can have
-        // are what a reader looks for next.
-        info!(
-            "etw: not one event was written to the session (etw=): either the program \
-             registered no provider the session asked for, or it wrote none in reach of \
-             the level and keyword asked for"
-        );
+        // nothing has learnt something, and the reasons it can have are
+        // what a reader looks for next. A filter is named first among
+        // them, because a process that never ran under the name the run
+        // typed looks exactly like a program that wrote nothing.
+        let (from, from_len) = {
+            let ask = ASK.lock();
+            (ask.from, ask.from_len)
+        };
+        if from_len > 0 {
+            info!(
+                "etw: not one event was written to the session (etw=): no process whose name has {} in it wrote one -- none ran under that name, or the one that did registered no provider the session asked for, or wrote none in reach of the level and keyword asked for",
+                tracelogging::Text(&from[..from_len])
+            );
+        } else {
+            info!(
+                "etw: not one event was written to the session (etw=): either the program registered no provider the session asked for, or it wrote none in reach of the level and keyword asked for"
+            );
+        }
         return;
     }
     let (providers, more) = {
@@ -547,7 +668,37 @@ pub fn log_stats() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Guid, Keyword, name_guid, parse_guid, parse_keyword};
+    use super::{Ask, Guid, Keyword, contains_ignoring_case, name_guid, parse_guid, parse_keyword};
+
+    #[test]
+    fn a_filter_keeps_the_process_it_names_whatever_the_case() {
+        let mut ask = Ask::new();
+        // Every process keeps a session nobody filtered.
+        assert!(ask.keeps("OfficeClickToRun.exe"));
+        let text = b"winword";
+        ask.from_len = text.len();
+        ask.from[..text.len()].copy_from_slice(text);
+        // The case a run types is not the case the kernel has.
+        assert!(ask.keeps("WINWORD.EXE"));
+        assert!(ask.keeps("winword.exe"));
+        assert!(!ask.keeps("OfficeClickToRun.exe"));
+        // The process name is the whole of what is searched: a text
+        // longer than it is not in it.
+        assert!(!ask.keeps("word.exe"));
+    }
+
+    #[test]
+    fn a_text_is_found_at_either_end_of_a_name_and_inside_it() {
+        assert!(contains_ignoring_case(b"abc", b"a"));
+        assert!(contains_ignoring_case(b"abc", b"b"));
+        assert!(contains_ignoring_case(b"abc", b"c"));
+        assert!(contains_ignoring_case(b"abc", b"abc"));
+        assert!(!contains_ignoring_case(b"abc", b"abcd"));
+        assert!(!contains_ignoring_case(b"abc", b"d"));
+        // No text at all is in every name, which is the state of a run
+        // that gave no filter.
+        assert!(contains_ignoring_case(b"abc", b""));
+    }
 
     fn text(guid: [u8; 16]) -> std::string::String {
         std::format!("{}", Guid(&guid))

@@ -4137,7 +4137,11 @@ fn gala_etw(call: &mut Call<'_>) -> NtStatus {
         0 => {
             let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
             let mut ask = [0u8; super::etw::ASK_LEN];
-            let written = if len >= ask.len() && super::etw::ask(&mut ask) { ask.len() } else { 0 };
+            let written = if len >= ask.len() && super::etw::ask(&mut ask, call.process.name) {
+                ask.len()
+            } else {
+                0
+            };
             if call.process.write(arg!(call, 3), &(written as u64).to_ne_bytes()).is_err() {
                 return NtStatus::ACCESS_VIOLATION;
             }
