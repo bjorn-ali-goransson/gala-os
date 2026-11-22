@@ -265,11 +265,12 @@ pub(crate) fn calc_frame(hwnd: Hwnd, changed: bool) {
 }
 
 /// Where top-level window `w` at (x, y), w x h is on the desktop: its
-/// rectangle, or its client area's for a frame of its own. Either way
-/// at least the size that leaves the one pixel of client area every
-/// window has here, so that the desktop's window and this one's buffer
-/// hold the same pixels -- a window smaller than its own frame (Office
-/// makes one) keeps the size it reports and is drawn at this one.
+/// rectangle, or its client area's for a frame of its own. Either way at
+/// least the size that leaves a pixel of client area, the extent every
+/// window's buffer has here (`buffer_size`), so that the desktop's window
+/// and this one's buffer hold the same pixels -- a window smaller than
+/// its own frame (Office makes one) has no client area at all, keeps the
+/// size it reports and is drawn at this one.
 pub(crate) fn desktop_rect(w: &Window, x: i32, y: i32, wd: i32, ht: i32) -> (i32, i32, i32, i32) {
     match w.custom {
         Some((b, t)) => (x + b, y + t, (wd - 2 * b).max(1), (ht - t - b).max(1)),
@@ -287,7 +288,7 @@ fn set_frame(i: usize, custom: Option<(i32, i32)>) {
     with(|s| s.windows[i].custom = custom);
     let w = with(|s| s.windows[i]);
     let (b, top) = frame(&w);
-    crate::tree::resize_client(i, (w.w - 2 * b).max(1), (w.h - top - b).max(1));
+    crate::tree::resize_client(i, (w.w - 2 * b).max(0), (w.h - top - b).max(0));
     let w = with(|s| s.windows[i]);
     let len = w.title.iter().position(|&c| c == 0).unwrap_or(0);
     let (x, y, wd, ht) = desktop_rect(&w, w.x, w.y, w.w, w.h);
@@ -340,8 +341,17 @@ pub(crate) fn buffer_base(w: &Window) -> *mut u32 {
     if w.pixels.is_null() {
         return w.pixels;
     }
-    // SAFETY: the buffer holds `bar` rows of `cw` before the client area.
-    unsafe { w.pixels.sub((w.bar * w.cw) as usize) }
+    // SAFETY: the buffer holds `bar` rows of `buffer_size().0` before the
+    // client area.
+    unsafe { w.pixels.sub((w.bar * buffer_size(w).0) as usize) }
+}
+
+/// The extent of a window's buffer: its client area, or one pixel of it
+/// where the client area is nothing at all (a window smaller than its own
+/// frame, which `GetClientRect` answers 0 x 0 for). A DC needs a pixel to
+/// be a DC, so the buffer always has one.
+pub(crate) fn buffer_size(w: &Window) -> (i32, i32) {
+    (w.cw.max(1), w.ch.max(1))
 }
 
 /// Whether a top-level window of `style` is a frameless popup.
@@ -349,6 +359,54 @@ pub(crate) fn is_popup(style: u32) -> bool {
     const WS_POPUP: u32 = 0x8000_0000;
     const WS_CAPTION: u32 = 0x00c0_0000;
     style & WS_POPUP != 0 && style & WS_CAPTION != WS_CAPTION
+}
+
+/// The smallest a window with a frame is made or sized: SM_CXMIN x
+/// SM_CYMIN, which is what WM_GETMINMAXINFO answers for such a window.
+/// Its height is the frame's own height, so the smallest one has no
+/// client height at all (Windows 11 26300: 136 x 39, for a frame of
+/// 16 x 39).
+pub(crate) const MIN_TRACK: (i32, i32) = (3 * CAPTION_BUTTON + 2 * BORDER, CAPTION + 2 * BORDER);
+
+/// MINMAXINFO: WM_GETMINMAXINFO's lParam, filled before the message is
+/// sent. The window procedure changes what it likes of it; DefWindowProc
+/// does nothing with it and answers 0, and a window whose procedure
+/// never calls DefWindowProc is held to these same sizes (measured on
+/// Windows 11 26300).
+#[repr(C)]
+pub struct MinMaxInfo {
+    pub reserved: [i32; 2],
+    pub max_size: [i32; 2],
+    pub max_position: [i32; 2],
+    pub min_track: [i32; 2],
+    pub max_track: [i32; 2],
+}
+
+/// The smallest size `hwnd` may be given: what the window answers
+/// WM_GETMINMAXINFO with, never below `floor`. A window with no frame of
+/// its own has no minimum and is never asked for one: Windows sends the
+/// message to a window with a sizing border or with neither WS_POPUP nor
+/// WS_CHILD, and gala draws a sizing border on neither a popup nor a
+/// child (ARCHITECTURE, "The size a window may be given").
+///
+/// The maximized size and position are what gala's own metrics say
+/// (SM_CXMAXIMIZED, SM_CYMAXIMIZED and SM_CX/CYMAXTRACK); gala's desktop
+/// does the maximizing and takes neither from this message.
+pub(crate) fn min_size(hwnd: Hwnd, w: &Window, floor: (i32, i32)) -> (i32, i32) {
+    const WM_GETMINMAXINFO: u32 = 0x0024;
+    if w.popup || w.parent != 0 {
+        return (0, 0);
+    }
+    let (screen, work) = crate::monitor::screen();
+    let mut info = MinMaxInfo {
+        reserved: [0; 2],
+        max_size: [screen[2] + 2 * BORDER, work[3] + 2 * BORDER],
+        max_position: [-BORDER, -BORDER],
+        min_track: [MIN_TRACK.0, MIN_TRACK.1],
+        max_track: [screen[2] + 2 * BORDER + 4, screen[3] + 2 * BORDER + 4],
+    };
+    SendMessageW(hwnd, WM_GETMINMAXINFO, 0, &mut info as *mut MinMaxInfo as isize);
+    (info.min_track[0].max(floor.0), info.min_track[1].max(floor.1))
 }
 
 #[derive(Clone, Copy)]
@@ -1172,27 +1230,26 @@ pub extern "system" fn CreateWindowExW(
         0
     };
     let (b, top) = if popup { (0, 0) } else { (BORDER, BORDER + CAPTION) };
-    let (w, h) = if w == CW_USEDEFAULT { (640, 480) } else { (w.max(0), h.max(0)) };
-    // A window smaller than its own frame is made on Windows, and the
-    // kernel keeps one (winstate::size_fits): the window is that size
-    // and GetWindowRect says so. Its client area is not nothing here
-    // but one pixel, because every client area is a shared section of
-    // at least that (`desktop_rect` asks the desktop for a window that
-    // leaves room for it); GetClientRect answers 1 x 1 where Windows
-    // answers 0 x 0, which is the gap in the ledger.
-    if w < 2 * b + 1 || h < top + bar + b + 1 {
-        unsupported(
-            b"user32.dll!a window smaller than its frame (a pixel of client area, not none)",
-            ((w as u64) << 32) | h as u64,
-        );
-    }
-    let (cw, ch) = ((w - 2 * b).max(1), (h - top - bar - b).max(1));
+    let (asked_w, asked_h) = if w == CW_USEDEFAULT { (640, 480) } else { (w.max(0), h.max(0)) };
+    // A window with a frame is never made smaller than the minimum such a
+    // window has (`MIN_TRACK`); a popup has no minimum and is the size it
+    // was asked for, which may be nothing at all. The window is asked for
+    // a minimum of its own below, once it exists and can answer.
+    let (w, h) = if popup {
+        (asked_w, asked_h)
+    } else {
+        (asked_w.max(MIN_TRACK.0), asked_h.max(MIN_TRACK.1))
+    };
+    // What is left of it is the client area, and nothing at all is a
+    // client area too: its buffer keeps a pixel (`buffer_size`), its
+    // GetClientRect is 0 x 0.
+    let (cw, ch) = ((w - 2 * b).max(0), (h - top - bar - b).max(0));
     // SAFETY: plain calls; the title is the caller's NUL-terminated string.
     let (pixels, section, desktop) = unsafe {
-        let Some((base, section)) = crate::surface::alloc(cw, ch, bar) else {
+        let Some((base, section)) = crate::surface::alloc(cw.max(1), ch.max(1), bar) else {
             return 0;
         };
-        let pixels = base.add((bar * cw) as usize);
+        let pixels = base.add((bar * cw.max(1)) as usize);
         let mut len = 0;
         if !name.is_null() {
             while len < 256 && *name.add(len) != 0 {
@@ -1270,7 +1327,7 @@ pub extern "system" fn CreateWindowExW(
     let Some(i) = created else {
         // SAFETY: our buffer and window.
         unsafe {
-            crate::surface::free(pixels.sub((bar * cw) as usize), section);
+            crate::surface::free(pixels.sub((bar * cw.max(1)) as usize), section);
             if desktop != 0 {
                 GalaWindowDestroy(desktop);
             }
@@ -1279,12 +1336,16 @@ pub extern "system" fn CreateWindowExW(
         return 0;
     };
     crate::foreign::assign(i);
-    crate::surface::register(hwnd_of(i), section, cw, ch, bar);
+    crate::surface::register(hwnd_of(i), section, cw.max(1), ch.max(1), bar);
     if bar != 0 {
         crate::menu::attach(hwnd_of(i), menu as usize);
     }
     show_icon(hwnd_of(i));
-    finish_create(i, ex_style, class, name, style, x, y, w, h, parent, menu, instance, param)
+    // The CREATESTRUCT keeps the size that was asked for, whatever the
+    // window was made at (measured).
+    finish_create(
+        i, ex_style, class, name, style, x, y, asked_w, asked_h, parent, menu, instance, param,
+    )
 }
 
 /// What CreateWindowEx does once the window exists: WH_CBT, WM_NCCREATE,
@@ -1345,6 +1406,21 @@ pub(crate) fn finish_create(
                 }
             }
             return 0;
+        }
+    }
+    // The minimum the window has of its own: WM_GETMINMAXINFO, after the
+    // hook and before WM_NCCREATE, where Windows sends it (measured on
+    // Windows 11 26300). A window that answers with a larger minimum than
+    // the system's is made at that size; one that answers with a smaller
+    // is made as small as it asked for, down to twice its own border
+    // (16 x 16 there, twice the sizing frame such a window has). A popup
+    // and a child are not asked, and never resized here.
+    if let Some(v) = window(hwnd).filter(|v| !v.popup && v.parent == 0) {
+        let (b, _) = frame(&v);
+        let (mw, mh) = min_size(hwnd, &v, (2 * b, 2 * b));
+        let (nw, nh) = (w.max(mw), h.max(mh));
+        if (nw, nh) != (v.w, v.h) {
+            crate::tree::resize_top_level(i, nw, nh);
         }
     }
     if SendMessageW(hwnd, WM_NCCREATE, 0, lp) == 0 {
@@ -1758,10 +1834,11 @@ fn client_dc(hwnd: Hwnd) -> Handle {
     let Some((root, offset, visible)) = crate::tree::placement(hwnd) else {
         return core::ptr::null_mut();
     };
+    let (bw, bh) = buffer_size(&root);
     let hdc = if offset == (0, 0) && window(hwnd).is_some_and(|w| w.parent == 0) {
-        (g.create_dc)(root.pixels, root.cw, root.ch, root.cw)
+        (g.create_dc)(root.pixels, bw, bh, bw)
     } else {
-        (g.create_child_dc)(root.pixels, root.cw, root.ch, root.cw, offset.0, offset.1, &visible)
+        (g.create_child_dc)(root.pixels, bw, bh, bw, offset.0, offset.1, &visible)
     };
     keep_dc(hdc, hwnd);
     // The window's thread, not the one asking: what another thread draws
@@ -3662,12 +3739,12 @@ pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
         54 | 55 => 19,             // SM_CXMENUSIZE, SM_CYMENUSIZE
         71 | 72 => MENU_CHECK,     // SM_CXMENUCHECK, SM_CYMENUCHECK
         // The sizes that frame gives a window, as Windows derives them.
-        28 | 34 => 3 * CAPTION_BUTTON + 2 * BORDER, // SM_CXMIN, SM_CXMINTRACK
-        29 | 35 => CAPTION + 2 * BORDER,            // SM_CYMIN, SM_CYMINTRACK
-        59 => screen[2] + 2 * BORDER + 4,           // SM_CXMAXTRACK
-        60 => screen[3] + 2 * BORDER + 4,           // SM_CYMAXTRACK
-        61 => screen[2] + 2 * BORDER,               // SM_CXMAXIMIZED
-        62 => work[3] + 2 * BORDER,                 // SM_CYMAXIMIZED
+        28 | 34 => MIN_TRACK.0,           // SM_CXMIN, SM_CXMINTRACK
+        29 | 35 => MIN_TRACK.1,           // SM_CYMIN, SM_CYMINTRACK
+        59 => screen[2] + 2 * BORDER + 4, // SM_CXMAXTRACK
+        60 => screen[3] + 2 * BORDER + 4, // SM_CYMAXTRACK
+        61 => screen[2] + 2 * BORDER,     // SM_CXMAXIMIZED
+        62 => work[3] + 2 * BORDER,       // SM_CYMAXIMIZED
         // A minimized window, the icons and the cursor.
         47 | 57 => 160, // SM_CXMINSPACING, SM_CXMINIMIZED
         48 | 58 => 28,  // SM_CYMINSPACING, SM_CYMINIMIZED

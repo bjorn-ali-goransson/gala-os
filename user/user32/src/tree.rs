@@ -1127,16 +1127,20 @@ fn resize_buffer(i: usize, cw: i32, ch: i32) {
 
 fn relayout(i: usize, cw: i32, ch: i32, bar: i32) {
     let w = with(|s| s.windows[i]);
-    let (old, ow, oh) = (w.pixels, w.cw, w.ch);
+    let (ow, oh) = crate::window::buffer_size(&w);
+    let old = w.pixels;
     let old_base = crate::window::buffer_base(&w);
-    let (cw, ch) = (cw.max(1), ch.max(1));
-    let Some((base, section)) = crate::surface::alloc(cw, ch, bar) else {
+    // The client area may be nothing at all (a window smaller than its own
+    // frame); its buffer is a pixel of it either way, so that a DC over it
+    // is still a DC. The window keeps the client size it was given.
+    let (bw, bh) = (cw.max(1), ch.max(1));
+    let Some((base, section)) = crate::surface::alloc(bw, bh, bar) else {
         return;
     };
     // SAFETY: the bar's rows come first.
-    let new = unsafe { base.add((bar * cw) as usize) };
-    for y in 0..ch {
-        for x in 0..cw {
+    let new = unsafe { base.add((bar * bw) as usize) };
+    for y in 0..bh {
+        for x in 0..bw {
             let v = if x < ow && y < oh && !old.is_null() {
                 // SAFETY: inside the old buffer.
                 unsafe { *old.add((y * ow + x) as usize) }
@@ -1144,7 +1148,7 @@ fn relayout(i: usize, cw: i32, ch: i32, bar: i32) {
                 0x00ff_ffff
             };
             // SAFETY: inside the new buffer.
-            unsafe { *new.add((y * cw + x) as usize) = v };
+            unsafe { *new.add((y * bw + x) as usize) = v };
         }
     }
     with(|s| {
@@ -1154,11 +1158,31 @@ fn relayout(i: usize, cw: i32, ch: i32, bar: i32) {
         s.windows[i].ch = ch;
         s.windows[i].bar = bar;
     });
-    crate::surface::register(hwnd_of(i), section, cw, ch, bar);
+    crate::surface::register(hwnd_of(i), section, bw, bh, bar);
     // The window's former buffer, no longer used.
     crate::surface::free(old_base, w.section);
     if bar != 0 {
         crate::track::draw_bar(hwnd_of(i));
+    }
+}
+
+/// A top-level window is given a new outer size, with no message of its
+/// own: what CreateWindowEx does when the window answers
+/// WM_GETMINMAXINFO with a minimum of its own.
+pub(crate) fn resize_top_level(i: usize, nw: i32, nh: i32) {
+    let w = with(|s| s.windows[i]);
+    let (b, top) = crate::window::frame(&w);
+    resize_client(i, (nw - 2 * b).max(0), (nh - top - b).max(0));
+    with(|s| {
+        let v = &mut s.windows[i];
+        v.w = nw;
+        v.h = nh;
+    });
+    if w.desktop != 0 {
+        crate::foreign::sync_tree(hwnd_of(i));
+        let (dx, dy, dw, dh) = crate::window::desktop_rect(&w, w.x, w.y, nw, nh);
+        // SAFETY: our desktop window.
+        unsafe { GalaWindowPlace(w.desktop, dx, dy, dw as u32, dh as u32) };
     }
 }
 
@@ -1175,7 +1199,7 @@ pub fn set_menu_bar(hwnd: Hwnd, on: bool) {
         crate::track::draw_bar(hwnd);
         return;
     }
-    let ch = (w.ch + w.bar - bar).max(1);
+    let ch = (w.ch + w.bar - bar).max(0);
     relayout(i, w.cw, ch, bar);
     let (cw, ch) = with(|s| (s.windows[i].cw, s.windows[i].ch));
     SendMessageW(hwnd, WM_SIZE, 0, ((ch as isize) << 16) | cw as isize);
@@ -1238,7 +1262,7 @@ pub extern "system" fn SetWindowPos(
     let top_level = w.parent == 0;
     if top_level {
         let (b, top) = crate::window::frame(&w);
-        let (ncw, nch) = ((nw - 2 * b).max(1), (nh - top - b).max(1));
+        let (ncw, nch) = ((nw - 2 * b).max(0), (nh - top - b).max(0));
         if (nw, nh) != (w.w, w.h) {
             resize_buffer(i, ncw, nch);
         }
@@ -1581,6 +1605,28 @@ const HTCAPTION: usize = 2;
 /// What DefWindowProc does for the messages of this module.
 pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
     match msg {
+        // The size in the WINDOWPOS is held to the minimum the window has,
+        // which DefWindowProc asks the window itself for with
+        // WM_GETMINMAXINFO. SetWindowPos reads the WINDOWPOS back after
+        // the message, so this is the whole of the clamp: a window whose
+        // procedure answers WM_WINDOWPOSCHANGING without DefWindowProc is
+        // held to nothing and is given the size it asked for, frame and
+        // all -- and so is one sized with SWP_NOSENDCHANGING, which skips
+        // the message. That is how a window ends up smaller than its own
+        // frame, with no client area at all (measured on Windows 11
+        // 26300).
+        WM_WINDOWPOSCHANGING => {
+            // SAFETY: lParam is the WINDOWPOS the message carries.
+            let pos = unsafe { &mut *(lparam as *mut WindowPos) };
+            if pos.flags & SWP_NOSIZE == 0
+                && let Some(w) = window(hwnd)
+            {
+                let (mw, mh) = crate::window::min_size(hwnd, &w, crate::window::MIN_TRACK);
+                pos.cx = pos.cx.max(mw);
+                pos.cy = pos.cy.max(mh);
+            }
+            Some(0)
+        }
         // WM_MOUSEWHEEL/WM_MOUSEHWHEEL: on to the parent (a child that
         // doesn't scroll leaves it to the window around it).
         0x020a | 0x020e => {

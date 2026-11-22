@@ -696,10 +696,14 @@ by programs"; SECURITY.md for OpenSSH and PostgreSQL.
 - msvcrt's `_ismbblead` (3.71's mingw WinMain entry; `msvcrt_test`).
 
 **Next**:
-1. DefWindowProc's WM_WINDOWPOSCHANGING sends WM_GETMINMAXINFO and keeps
-   a thick-framed window within its track sizes (FileZilla's minimum is
-   700 x 500, so its snapped half would be 700 wide as on Windows; the
-   desktop's docking test and the scenario's checks change with it);
+1. The minimum a window has reaches the resizes the desktop drives: a
+   drag of a border and a snap keep to it instead of the desktop's own
+   120 x 60 (FileZilla's minimum is 700 x 500, so its snapped half would
+   be 700 wide as on Windows; the desktop's docking test and the
+   scenario's checks change with it). DefWindowProc's
+   WM_WINDOWPOSCHANGING asks the window and clamps already
+   (ARCHITECTURE, "The size a window may be given"), so what is left is
+   the desktop asking the window before it places it. Then
    SetWindowPos's WM_NCCALCSIZE.
 2. Rich edit: RTF streams, undo, cut, copy and paste over user32's
    clipboard, OLE callbacks (wx asks for them).
@@ -3138,11 +3142,15 @@ need gala's.
      path that decides, which is the third measurement against a
      refused call being the cause.
      What is left unmeasured on that thread is the window class it
-     registers and the window gala gives it: the side-by-side context
-     the `FindActCtxSectionStringW(Comctl32.dll)` above looks a class
-     up in, and `user32.dll!a window smaller than its frame (a pixel
-     of client area, not none)`, which is hit three times, the last of
-     them 1.6 s before the box.
+     registers: the side-by-side context the
+     `FindActCtxSectionStringW(Comctl32.dll)` above looks a class up
+     in. The window gala gave it is measured and answered now: the
+     three windows Word made smaller than their own frame (the last
+     1.6 s before the box) were given a client area of one pixel where
+     Windows gives none, and user32 now holds a window to the minimum
+     it has and answers 0 x 0 for a client area that is nothing at all
+     (ARCHITECTURE, "The size a window may be given"; `tiny_windows`,
+     56 checks, which pass on real Windows too).
      Every file Word opens is read now, and no file it needs is
      missing. `events=file` names each NtCreateFile and NtOpenFile with
      the path as given and the status (the opens no ledger row names),

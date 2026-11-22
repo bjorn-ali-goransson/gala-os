@@ -8817,12 +8817,35 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   popup style 1 is for menus and lists) (the
   borders outside it are like Windows 11's invisible resize borders);
   the desktop window is made again when the frame changes. Test:
-  `user32_test` (custom_frame, tiny_windows). A window smaller than its
-  own frame keeps the size it was asked for and reports it
-  (GetWindowRect), and is given a desktop window large enough for one
-  pixel of client area (`desktop_rect`), because every client area here
-  is a shared section of at least a pixel: GetClientRect then answers
-  1 x 1 where Windows answers 0 x 0 (ledger). Limits: uneven borders
+  `user32_test` (custom_frame, tiny_windows).
+- **The size a window may be given** (`min_size`, `MIN_TRACK`): a window
+  with a frame is never made or sized below the minimum such a window
+  has, SM_CXMIN x SM_CYMIN (140 x 34 here: three caption buttons wide,
+  and exactly as tall as the frame, so the smallest one has no client
+  height at all). The minimum is the window's own to raise.
+  CreateWindowEx asks it with WM_GETMINMAXINFO after the WH_CBT hook and
+  before WM_NCCREATE, the message prefilled from gala's metrics
+  (DefWindowProc leaves it as it is and answers 0, as Windows does), and
+  takes the larger of the answer and twice the border in each direction,
+  while the CREATESTRUCT keeps the size that was asked for. On a resize
+  the clamp is DefWindowProc's own WM_WINDOWPOSCHANGING: it asks the
+  window and writes the size it gets into the WINDOWPOS, which
+  SetWindowPos reads back. So a procedure that answers
+  WM_WINDOWPOSCHANGING without DefWindowProc is held to nothing, and
+  neither is a window sized with SWP_NOSENDCHANGING, which skips the
+  message -- that is how a window ends up smaller than its own frame
+  (Office's shared runtime makes a 0 x 0 one, hidden, before Word's first
+  window; the kernel keeps it, `winstate::size_fits`). Such a window has
+  no client area at all: GetClientRect and WM_SIZE answer 0 x 0, as
+  Windows does, while its buffer keeps a pixel (`buffer_size`) so that a
+  DC over it is still a DC, and the desktop gets a window of that pixel
+  (`desktop_rect`). Measured on Windows 11 26300 (`tiny_windows`, 56
+  checks, which pass there as well). Limits: gala asks no sizeable popup
+  or child (Windows sends the message to a window with a sizing border
+  too, with twice its frame as the minimum), and nothing reads ptMaxSize,
+  ptMaxPosition or ptMaxTrackSize back, since gala's maximize is the
+  desktop's; a resize the desktop itself drives keeps to its own minimum
+  (120 x 60 below) without asking the window. Limits: uneven borders
   take the left one (ledger); gala's own frame has 1-pixel sides, Windows 11's
   WS_OVERLAPPEDWINDOW 8 (a 320-wide window's client is 318 here, 304
   there; user32_test asserts only that WM_SIZE and GetClientRect agree). A left-button press in such a window goes first to its
@@ -9028,8 +9051,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 - Not yet: WS_CLIPCHILDREN/CLIPSIBLINGS (overlapping siblings paint in
   Z order only when invalidated together), WM_PARENTNOTIFY,
   WM_NCCALCSIZE and child borders, owned windows; SetWindowPos's
-  WM_GETMINMAXINFO and WM_NCCALCSIZE on a resize (Windows sends both
-  after the first WM_WINDOWPOSCHANGING).
+  WM_NCCALCSIZE on a resize (Windows sends it after the first
+  WM_WINDOWPOSCHANGING, which carries WM_GETMINMAXINFO with it -- "The
+  size a window may be given" above).
 
 #### Window icons, icons and cursors
 

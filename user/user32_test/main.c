@@ -541,20 +541,26 @@ static void menu_bar(void) {
     CHECK(RegisterClassW(&wc) != 0);
     HMENU file = CreatePopupMenu(), bar_menu = CreateMenu();
     CHECK(AppendMenuW(file, MF_STRING, 100, L"E&xit") && AppendMenuW(bar_menu, MF_POPUP, (UINT_PTR)file, L"&File"));
-    // A window made with the menu's frame size and the menu: 100 x 100 inside.
+    /* A window made with the menu's frame size and the menu: 300 x 200
+       inside. A client area of 100 x 100 would not do -- such a window is
+       narrower than the minimum a window has (SM_CXMIN) and is made wider
+       than it asked for, client area and all. */
+    RECT inner = {0, 0, 300, 200};
+    CHECK(AdjustWindowRectEx(&inner, WS_OVERLAPPEDWINDOW, TRUE, 0));
+    CHECK(inner.right - inner.left > GetSystemMetrics(SM_CXMIN));
     HWND w = CreateWindowExW(0, L"User32TestMenuBar", L"menu", WS_OVERLAPPEDWINDOW, 0, 0,
-                             with_menu.right - with_menu.left, with_menu.bottom - with_menu.top, NULL,
+                             inner.right - inner.left, inner.bottom - inner.top, NULL,
                              bar_menu, GetModuleHandleW(NULL), NULL);
     RECT c;
     CHECK(w != NULL && GetMenu(w) == bar_menu);
-    CHECK(GetClientRect(w, &c) && c.right == 100 && c.bottom == 100);
+    CHECK(GetClientRect(w, &c) && c.right == 300 && c.bottom == 200);
     // Without it the client area grows by the bar, with WM_SIZE.
     sizes_seen = 0;
     CHECK(SetMenu(w, NULL) && GetMenu(w) == NULL);
-    CHECK(GetClientRect(w, &c) && c.right == 100 && c.bottom == 100 + bar && sizes_seen > 0);
+    CHECK(GetClientRect(w, &c) && c.right == 300 && c.bottom == 200 + bar && sizes_seen > 0);
     POINT o = {0, 0};
     CHECK(ClientToScreen(w, &o) && o.y == -plain.top);
-    CHECK(SetMenu(w, bar_menu) && GetClientRect(w, &c) && c.bottom == 100);
+    CHECK(SetMenu(w, bar_menu) && GetClientRect(w, &c) && c.bottom == 200);
     o.x = o.y = 0;
     CHECK(ClientToScreen(w, &o) && o.y == -with_menu.top);
     CHECK(DrawMenuBar(w));
@@ -1481,47 +1487,175 @@ static void posted_order(void) {
     CHECK(!PeekMessageW(&m, NULL, WM_APP + 7, WM_APP + 7, PM_REMOVE));
 }
 
-/* A window smaller than its own frame. CreateWindowEx has no minimum
-   size: what AdjustWindowRect gives for a one-pixel client area is a
-   window with a one-pixel client area, and one pixel in all is a window
-   too. Only the bounds of a client area are the same on every system
-   (how much frame a window has is the system's), so that is what is
-   checked for the smallest; the round trip through AdjustWindowRect is
-   exact by its own definition. Office's shared runtime makes one of
-   these, hidden, before Word's first real window. */
+/* The minimum size a window has, and a client area of nothing at all.
+   WM_GETMINMAXINFO decides both: it is prefilled with ptMinTrackSize =
+   SM_CXMIN x SM_CYMIN for a window with a caption (DefWindowProc leaves
+   it as it is and answers 0), and the window is never made or sized below
+   what comes back -- side by side with the minimum the window asks for
+   itself, whichever is larger in each direction.
+   On a resize the clamp is DefWindowProc's own, in its
+   WM_WINDOWPOSCHANGING: it is what asks the window with WM_GETMINMAXINFO
+   and writes the size the window gets into the WINDOWPOS, which is why
+   WM_WINDOWPOSCHANGING carries the size that was asked for and
+   WM_WINDOWPOSCHANGED the one it gets. A window whose procedure answers
+   WM_WINDOWPOSCHANGING itself, without DefWindowProc, is held to nothing,
+   and so is one sized with SWP_NOSENDCHANGING, which skips the message:
+   that is how a window ends up smaller than its own frame, its client
+   area nothing at all, not one pixel of it. A popup and a child have no
+   minimum and are never asked for one. Office's shared runtime makes a
+   0 x 0 window, hidden, before the first real window of Word. Measured on
+   Windows 11 26300. */
+
+static int tiny_min_on, tiny_min_w, tiny_min_h, tiny_minmax, tiny_def_w, tiny_def_h;
+static int tiny_swallow;
+static int tiny_create_cx, tiny_create_cy, tiny_changing_cx, tiny_changing_cy;
+static int tiny_changed_cx, tiny_changed_cy, tiny_size_w, tiny_size_h;
+
+static LRESULT CALLBACK tiny_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    switch (msg) {
+    case WM_GETMINMAXINFO: {
+        LRESULT r = DefWindowProcW(hwnd, msg, wparam, lparam);
+        MINMAXINFO *i = (MINMAXINFO *)lparam;
+        tiny_minmax++;
+        tiny_def_w = i->ptMinTrackSize.x;
+        tiny_def_h = i->ptMinTrackSize.y;
+        if (tiny_min_on) {
+            i->ptMinTrackSize.x = tiny_min_w;
+            i->ptMinTrackSize.y = tiny_min_h;
+        }
+        return r;
+    }
+    case WM_CREATE:
+        tiny_create_cx = ((CREATESTRUCTW *)lparam)->cx;
+        tiny_create_cy = ((CREATESTRUCTW *)lparam)->cy;
+        break;
+    case WM_WINDOWPOSCHANGING:
+        tiny_changing_cx = ((WINDOWPOS *)lparam)->cx;
+        tiny_changing_cy = ((WINDOWPOS *)lparam)->cy;
+        if (tiny_swallow)
+            return 0; /* no DefWindowProc, so nothing holds the size */
+        break;
+    case WM_WINDOWPOSCHANGED:
+        tiny_changed_cx = ((WINDOWPOS *)lparam)->cx;
+        tiny_changed_cy = ((WINDOWPOS *)lparam)->cy;
+        break;
+    case WM_SIZE:
+        tiny_size_w = (int)(short)LOWORD(lparam);
+        tiny_size_h = (int)(short)HIWORD(lparam);
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static HWND tiny_make(HINSTANCE inst, DWORD style, int w, int h, HWND parent) {
+    return CreateWindowExW(0, L"User32TestTiny", L"tiny", style, 0, 0, w, h, parent, NULL, inst, NULL);
+}
+
 static void tiny_windows(void) {
     HINSTANCE inst = GetModuleHandleW(NULL);
     WNDCLASSW wc = {0};
-    wc.lpfnWndProc = DefWindowProcW;
+    wc.lpfnWndProc = tiny_proc;
     wc.hInstance = inst;
     wc.lpszClassName = L"User32TestTiny";
     CHECK(RegisterClassW(&wc));
-    RECT f = {0, 0, 1, 1};
+    RECT r, c;
+    /* The minimum a window with a caption has, and the frame such a window
+       has: the minimum is exactly as tall as the frame, so the smallest one
+       has no client height at all. */
+    int mw = GetSystemMetrics(SM_CXMIN), mh = GetSystemMetrics(SM_CYMIN);
+    CHECK(mw > 0 && mh > 0);
+    CHECK(GetSystemMetrics(SM_CXMINTRACK) == mw && GetSystemMetrics(SM_CYMINTRACK) == mh);
+    RECT f = {0, 0, 0, 0};
     CHECK(AdjustWindowRect(&f, WS_OVERLAPPEDWINDOW, FALSE));
     int fw = f.right - f.left, fh = f.bottom - f.top;
-    CHECK(fw >= 1 && fh >= 1);
-    HWND w = CreateWindowExW(0, L"User32TestTiny", L"tiny", WS_OVERLAPPEDWINDOW, 0, 0, fw, fh, NULL, NULL, inst, NULL);
+    CHECK(fw > 0 && fh == mh && mw > fw);
+    /* Asked for nothing, a top-level window is made at that minimum, and
+       its client area is what is left of it: no height at all. The
+       CREATESTRUCT keeps the size that was asked for. */
+    tiny_minmax = 0; tiny_create_cx = -1; tiny_create_cy = -1;
+    HWND w = tiny_make(inst, WS_OVERLAPPEDWINDOW, 0, 0, NULL);
     CHECK(w != NULL);
-    RECT r, c;
-    CHECK(GetWindowRect(w, &r) && r.right - r.left == fw && r.bottom - r.top == fh);
-    CHECK(GetClientRect(w, &c) && c.right == 1 && c.bottom == 1);
-    /* One pixel in all: all frame, and a client area of nothing. */
-    HWND one = CreateWindowExW(0, L"User32TestTiny", L"one", WS_OVERLAPPEDWINDOW, 0, 0, 1, 1, NULL, NULL, inst, NULL);
-    CHECK(one != NULL);
-    CHECK(GetWindowRect(one, &r) && r.right - r.left == 1 && r.bottom - r.top == 1);
-    CHECK(GetClientRect(one, &c) && c.right >= 0 && c.bottom >= 0 && c.right <= 1 && c.bottom <= 1);
-    CHECK(DestroyWindow(one));
-    /* An ordinary window goes down to it and back. */
+    CHECK(tiny_minmax == 1 && tiny_def_w == mw && tiny_def_h == mh);
+    CHECK(tiny_create_cx == 0 && tiny_create_cy == 0);
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == mw && r.bottom - r.top == mh);
+    CHECK(GetClientRect(w, &c) && c.right == mw - fw && c.bottom == 0);
+    /* The size that was asked for in WM_WINDOWPOSCHANGING, the size the
+       window gets in WM_WINDOWPOSCHANGED, and the client area WM_SIZE
+       reports. */
     CHECK(SetWindowPos(w, NULL, 0, 0, 300, 200, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
-    CHECK(GetClientRect(w, &c) && c.right > 1 && c.bottom > 1);
-    CHECK(SetWindowPos(w, NULL, 0, 0, fw, fh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    tiny_changing_cx = tiny_changed_cx = tiny_size_w = -1;
+    CHECK(SetWindowPos(w, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    CHECK(tiny_changing_cx == 0 && tiny_changing_cy == 0);
+    CHECK(tiny_changed_cx == mw && tiny_changed_cy == mh);
+    CHECK(tiny_size_w == mw - fw && tiny_size_h == 0);
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == mw && r.bottom - r.top == mh);
+    CHECK(GetClientRect(w, &c) && c.right == mw - fw && c.bottom == 0);
+    /* A minimum the window asks for itself, taken side by side with the one
+       the system has. */
+    tiny_min_on = 1; tiny_min_w = mw - 10; tiny_min_h = mh + 11;
+    CHECK(SetWindowPos(w, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == mw && r.bottom - r.top == mh + 11);
+    tiny_min_w = mw + 60; tiny_min_h = mh + 11;
+    CHECK(SetWindowPos(w, NULL, 0, 0, 10, 10, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == mw + 60 && r.bottom - r.top == mh + 11);
+    /* A window made while it asks for one is made at that size. */
+    tiny_min_w = mw + 40; tiny_min_h = mh + 30;
+    HWND own = tiny_make(inst, WS_OVERLAPPEDWINDOW, 10, 10, NULL);
+    CHECK(own != NULL);
+    CHECK(GetWindowRect(own, &r) && r.right - r.left == mw + 40 && r.bottom - r.top == mh + 30);
+    CHECK(DestroyWindow(own));
+    tiny_min_on = 0;
+    /* Neither the message nor the clamp: a window smaller than its own
+       frame, whose client area is nothing at all. */
+    tiny_minmax = 0;
+    CHECK(SetWindowPos(w, NULL, 0, 0, fw, fh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING));
+    CHECK(tiny_minmax == 0);
     CHECK(GetWindowRect(w, &r) && r.right - r.left == fw && r.bottom - r.top == fh);
+    CHECK(GetClientRect(w, &c) && c.right == 0 && c.bottom == 0);
+    CHECK(SetWindowPos(w, NULL, 0, 0, fw + 1, fh + 1, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING));
     CHECK(GetClientRect(w, &c) && c.right == 1 && c.bottom == 1);
-    CHECK(MoveWindow(w, 10, 20, 1, 1, FALSE));
-    CHECK(GetWindowRect(w, &r) && r.left == 10 && r.top == 20 && r.right - r.left == 1 && r.bottom - r.top == 1);
+    CHECK(SetWindowPos(w, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING));
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == 0 && r.bottom - r.top == 0);
+    CHECK(GetClientRect(w, &c) && c.right == 0 && c.bottom == 0);
     CHECK(DestroyWindow(w));
+    /* The clamp is DefWindowProc's: a window that answers
+       WM_WINDOWPOSCHANGING without it is held to no minimum, and is not
+       even asked for one. */
+    HWND swal = tiny_make(inst, WS_OVERLAPPEDWINDOW, 300, 200, NULL);
+    CHECK(swal != NULL);
+    tiny_swallow = 1; tiny_minmax = 0;
+    CHECK(SetWindowPos(swal, NULL, 0, 0, fw, fh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    CHECK(tiny_minmax == 0);
+    CHECK(GetWindowRect(swal, &r) && r.right - r.left == fw && r.bottom - r.top == fh);
+    CHECK(GetClientRect(swal, &c) && c.right == 0 && c.bottom == 0);
+    tiny_swallow = 0;
+    CHECK(DestroyWindow(swal));
+    /* A window with a caption and no sizing border has the same minimum. */
+    HWND fixed = tiny_make(inst, WS_OVERLAPPED | WS_CAPTION, 300, 200, NULL);
+    CHECK(fixed != NULL);
+    CHECK(SetWindowPos(fixed, NULL, 0, 0, 10, 10, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    CHECK(GetWindowRect(fixed, &r) && r.right - r.left == mw && r.bottom - r.top == mh);
+    CHECK(DestroyWindow(fixed));
+    /* A popup is the size it was made at, and so is a child. */
+    tiny_minmax = 0;
+    HWND pop = tiny_make(inst, WS_POPUP, 0, 0, NULL);
+    CHECK(pop != NULL && tiny_minmax == 0);
+    CHECK(GetWindowRect(pop, &r) && r.right - r.left == 0 && r.bottom - r.top == 0);
+    CHECK(GetClientRect(pop, &c) && c.right == 0 && c.bottom == 0);
+    CHECK(SetWindowPos(pop, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    CHECK(tiny_minmax == 0);
+    CHECK(GetWindowRect(pop, &r) && r.right - r.left == 0 && r.bottom - r.top == 0);
+    CHECK(DestroyWindow(pop));
+    HWND parent = tiny_make(inst, WS_OVERLAPPEDWINDOW, 300, 200, NULL);
+    CHECK(parent != NULL);
+    tiny_minmax = 0;
+    HWND kid = tiny_make(inst, WS_CHILD, 0, 0, parent);
+    CHECK(kid != NULL && tiny_minmax == 0);
+    CHECK(GetClientRect(kid, &c) && c.right == 0 && c.bottom == 0);
+    CHECK(DestroyWindow(parent));
     CHECK(UnregisterClassW(L"User32TestTiny", inst));
 }
+
 
 int main(void) {
     bitmaps();
