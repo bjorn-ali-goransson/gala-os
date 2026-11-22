@@ -349,9 +349,18 @@ pub(in crate::nt) fn deliver_special_apc(call: &Call<'_>, status: NtStatus) {
     deliver_apc(call, context, call.frame.sp(), &state, true);
 }
 
-/// Where an APC frame has its XSTATE area: after the CONTEXT and its
-/// CONTEXT_EX, 64-byte aligned (the frame is).
-const APC_XSTATE_AT: usize = 0x500;
+/// Where an APC frame has the machine frame (rip, cs, rflags, rsp and ss
+/// of the code the APC interrupted): after the CONTEXT and its CONTEXT_EX.
+/// gala's ntdll's KiUserApcDispatcher names this offset in its unwind data,
+/// so a walk out of an APC continues into the frames the APC interrupted
+/// instead of ending at the dispatcher, which is what lets a handler below
+/// an alertable wait take an exception an APC raised (`apc_test`). The
+/// CONTEXT alone cannot serve: the frame is aligned down, so the
+/// interrupted rsp is not a fixed distance from it.
+const APC_MACHINE_FRAME_AT: usize = 0x500;
+/// Where an APC frame has its XSTATE area: after the machine frame,
+/// 64-byte aligned (the frame is).
+const APC_XSTATE_AT: usize = 0x540;
 
 /// Runs the next user APC, if any, by resuming the thread in
 /// ntdll!KiUserApcDispatcher with `context` (the state to return to, with
@@ -360,9 +369,11 @@ const APC_XSTATE_AT: usize = 0x500;
 /// the CONTEXT, whose P1Home..P4Home hold NormalContext, SystemArgument1,
 /// SystemArgument2 and NormalRoutine; the dispatcher calls the routine and
 /// NtContinues the CONTEXT with TestAlert set, which delivers the next
-/// APC. With extended features the CONTEXT has CONTEXT_XSTATE, its
-/// CONTEXT_EX after it and the XSTATE area at APC_XSTATE_AT, so the
-/// routine's use of the YMM registers does not reach the resumed code.
+/// APC. A machine frame at APC_MACHINE_FRAME_AT says where the interrupted
+/// code was, which the dispatcher's unwind data reads. With extended
+/// features the CONTEXT has CONTEXT_XSTATE, its CONTEXT_EX after it and
+/// the XSTATE area at APC_XSTATE_AT, so the routine's use of the YMM
+/// registers does not reach the resumed code.
 // TODO: verify the frame against the pinned build's ntdll.
 pub(in crate::nt) fn deliver_apc(
     call: &Call<'_>,
@@ -381,13 +392,20 @@ pub(in crate::nt) fn deliver_apc(
         context[8 * i..8 * i + 8].copy_from_slice(&v.to_le_bytes());
     }
     let xlen = c::xstate_len();
-    let size = if xlen == 0 { c::SIZE } else { APC_XSTATE_AT + xlen };
+    let size =
+        if xlen == 0 { APC_MACHINE_FRAME_AT + c::MACHINE_FRAME_SIZE } else { APC_XSTATE_AT + xlen };
     let frame = (rsp.wrapping_sub(size as u64)) & !0x3f;
     if xlen != 0 {
         let flags = c::flags(&context) | c::CONTEXT_XSTATE;
         c::set_flags(&mut context, flags);
     }
-    if frame >= rsp || call.process.write(frame, &context).is_err() {
+    if frame >= rsp
+        || call.process.write(frame, &context).is_err()
+        || call
+            .process
+            .write(frame + APC_MACHINE_FRAME_AT as u64, &c::machine_frame(&context))
+            .is_err()
+    {
         return false;
     }
     if xlen != 0 {

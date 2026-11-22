@@ -109,27 +109,10 @@ pub extern "system" fn NtTerminateProcess(_process: isize, _status: u32) -> i32 
     )
 }
 
-/// The kernel resumes a thread here to run a user APC: rsp points at the
-/// CONTEXT to return to, whose P1Home..P4Home hold NormalContext,
-/// SystemArgument1, SystemArgument2 and NormalRoutine. The routine runs
-/// with the CONTEXT's home area as its shadow space; NtContinue with
-/// TestAlert then delivers the next APC or resumes the CONTEXT.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn KiUserApcDispatcher() -> ! {
-    core::arch::naked_asm!(
-        "mov rcx, [rsp]",
-        "mov rdx, [rsp + 8]",
-        "mov r8, [rsp + 0x10]",
-        "mov rax, [rsp + 0x18]",
-        "call rax",
-        "mov rcx, rsp",
-        "mov edx, 1",
-        "call {continue}",
-        "int3",
-        continue = sym NtContinue,
-    )
-}
+// KiUserApcDispatcher is in `seh`, with the other entry points the kernel
+// resumes a thread at: it needs unwind data, which a naked function does
+// not get (it has no prologue for the compiler to describe), and a walk
+// that cannot pass it ends there.
 
 // Memory routines (ntdll exports them; the compiler also calls them).
 // `rep` string instructions, so they cannot compile back into calls.
