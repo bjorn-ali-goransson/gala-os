@@ -69,6 +69,9 @@ unsafe extern "system" {
     fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
     fn GetTickCount() -> u32;
     fn SetLastError(code: u32);
+    fn GetProcessHeap() -> usize;
+    fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
+    fn HeapReAlloc(heap: usize, flags: u32, p: *mut u8, size: usize) -> *mut u8;
 }
 
 pub const BORDER: i32 = 1;
@@ -79,7 +82,14 @@ const CAPTION_BUTTON: i32 = 46;
 pub const MENU_BAR: i32 = 20;
 /// The size of a menu item's check mark (SM_CXMENUCHECK, SM_CYMENUCHECK).
 const MENU_CHECK: i32 = 15;
-const MAX_CLASSES: usize = 32;
+/// The first application atom. Every window class has one, which is
+/// what bounds a program's classes here as it does on Windows: there
+/// are 0x10000 - 0xc000 of them.
+const FIRST_ATOM: u16 = 0xc000;
+/// As many classes as there are atoms to name them with.
+const MAX_CLASSES: usize = 0x1_0000 - FIRST_ATOM as usize;
+/// The slots the first registration buys; doubled as they fill.
+const FIRST_CLASSES: usize = 32;
 pub(crate) const MAX_WINDOWS: usize = 512;
 const QUEUE: usize = 256;
 
@@ -124,6 +134,9 @@ const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
 const ERROR_CLASS_DOES_NOT_EXIST: u32 = 1411;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+/// HeapAlloc's and HeapReAlloc's flag for zeroed bytes.
+const HEAP_ZERO_MEMORY: u32 = 8;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Class {
@@ -434,18 +447,119 @@ struct Queued {
     msg: Msg,
 }
 
-const NO_CLASS: Class = Class {
-    used: false,
-    atom: 0,
-    name: [0; 64],
-    spelled: [0; 64],
-    proc_: None,
-    background: 0,
-    style: 0,
-    icon: 0,
-    icon_small: 0,
-    window_extra: 0,
-};
+/// The classes a program has registered, in a block that grows as it
+/// registers more.
+///
+/// A fixed table of a few dozen is a limit real programs reach: Word's
+/// startup registers its own classes and every Office library's, and
+/// died in `IfrRegisterWndClasses` while gala held 32 (ROADMAP OF).
+/// Windows bounds them only by the atom space, and so does this. A
+/// slot's index is its class's atom, so unregistering frees the atom
+/// with the name, and no two live classes can share one.
+pub(crate) struct Classes {
+    p: *mut Class,
+    cap: usize,
+}
+
+impl Classes {
+    const fn new() -> Self {
+        Self { p: core::ptr::null_mut(), cap: 0 }
+    }
+
+    /// A free slot's index, growing the table when every slot is taken:
+    /// None when the heap refuses or every atom is spent, which
+    /// RegisterClassEx reports.
+    fn free(&mut self) -> Option<usize> {
+        if let Some(i) = self.iter().position(|c| !c.used) {
+            return Some(i);
+        }
+        if self.cap >= MAX_CLASSES {
+            return None;
+        }
+        let want = (self.cap * 2).clamp(FIRST_CLASSES, MAX_CLASSES);
+        let bytes = want * core::mem::size_of::<Class>();
+        // SAFETY: plain calls. `p` is null (nothing to move) or this
+        // table's own block, and the bytes it gains are zeroed, which
+        // is a free slot: every field of `Class` is zero when it is
+        // unused, `proc_` being a null function pointer (None).
+        let grown = unsafe {
+            let heap = GetProcessHeap();
+            if self.p.is_null() {
+                HeapAlloc(heap, HEAP_ZERO_MEMORY, bytes)
+            } else {
+                HeapReAlloc(heap, HEAP_ZERO_MEMORY, self.p.cast::<u8>(), bytes)
+            }
+        }
+        .cast::<Class>();
+        if grown.is_null() {
+            return None;
+        }
+        let was = self.cap;
+        self.p = grown;
+        self.cap = want;
+        if was > 0 {
+            // A program that outgrew the first block is worth a row:
+            // nothing else in a run says how many classes it needed,
+            // and the row's own number is the measurement. Taken under
+            // the state lock, which the ledger does not touch
+            // (extra::alloc's note).
+            let mut text = [0u8; 96];
+            let n = grew_text(want, &mut text);
+            reached(&text[..n], want as u64);
+        }
+        Some(was)
+    }
+}
+
+/// `user32.dll!RegisterClassExW(the class table grew to <n>)` for the
+/// ledger: the number is in the name and not only the detail, so a run
+/// that grew the table more than once keeps a row for each size.
+fn grew_text(n: usize, text: &mut [u8; 96]) -> usize {
+    let prefix = b"user32.dll!RegisterClassExW(the class table grew to ";
+    text[..prefix.len()].copy_from_slice(prefix);
+    let mut at = prefix.len();
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    let mut left = n;
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (left % 10) as u8;
+        left /= 10;
+        if left == 0 {
+            break;
+        }
+    }
+    for &d in &digits[i..] {
+        text[at] = d;
+        at += 1;
+    }
+    text[at] = b')';
+    at + 1
+}
+
+impl core::ops::Deref for Classes {
+    type Target = [Class];
+
+    fn deref(&self) -> &[Class] {
+        if self.p.is_null() {
+            return &[];
+        }
+        // SAFETY: `cap` slots at `p`, every one of them written (zeroed
+        // when the block grew, which is an unused class).
+        unsafe { core::slice::from_raw_parts(self.p, self.cap) }
+    }
+}
+
+impl core::ops::DerefMut for Classes {
+    fn deref_mut(&mut self) -> &mut [Class] {
+        if self.p.is_null() {
+            return &mut [];
+        }
+        // SAFETY: as above, and `&mut self` is the only borrow.
+        unsafe { core::slice::from_raw_parts_mut(self.p, self.cap) }
+    }
+}
+
 pub(crate) const NO_WINDOW: Window = Window {
     used: false,
     class: 0,
@@ -494,12 +608,11 @@ const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
 
 pub(crate) struct State {
-    pub(crate) classes: [Class; MAX_CLASSES],
+    pub(crate) classes: Classes,
     pub(crate) windows: [Window; MAX_WINDOWS],
     queue: [Queued; QUEUE],
     /// Messages posted so far (the next one's `seq`).
     posted: u64,
-    pub(crate) next_atom: u16,
 }
 
 struct Shared {
@@ -513,11 +626,10 @@ unsafe impl Sync for Shared {}
 static SHARED: Shared = Shared {
     lock: AtomicBool::new(false),
     state: UnsafeCell::new(State {
-        classes: [NO_CLASS; MAX_CLASSES],
+        classes: Classes::new(),
         windows: [NO_WINDOW; MAX_WINDOWS],
         queue: [Queued { used: false, thread: 0, seq: 0, input: false, msg: NO_MSG }; QUEUE],
         posted: 0,
-        next_atom: 0,
     }),
 };
 
@@ -962,7 +1074,20 @@ fn class_known(class: *const u16) -> bool {
         return true;
     }
     let mut text = [0u8; 96];
-    let prefix = b"user32.dll!CreateWindowExW(";
+    let n = class_text(b"user32.dll!CreateWindowExW(", class, &mut text);
+    // The atom as the detail (0 for a name: one line per class).
+    let atom = if (class as usize) < 0x1_0000 { class as usize as u64 } else { 0 };
+    unsupported(&text[..n], atom);
+    set_last_error(1407); // ERROR_CANNOT_FIND_WND_CLASS
+    false
+}
+
+/// A ledger row's text: `prefix` and then the class, which is a
+/// NUL-terminated name or (under 0x10000) an atom, closed with `)`.
+/// Returns how much of `text` it filled. Non-ASCII goes in as `?`, so a
+/// row is one line of printable bytes whatever a program named its
+/// class.
+fn class_text(prefix: &[u8], class: *const u16, text: &mut [u8; 96]) -> usize {
     text[..prefix.len()].copy_from_slice(prefix);
     let mut n = prefix.len();
     if (class as usize) < 0x1_0000 {
@@ -981,11 +1106,7 @@ fn class_known(class: *const u16) -> bool {
         }
     }
     text[n] = b')';
-    // The atom as the detail (0 for a name: one line per class).
-    let atom = if (class as usize) < 0x1_0000 { class as usize as u64 } else { 0 };
-    unsupported(&text[..=n], atom);
-    set_last_error(1407); // ERROR_CANNOT_FIND_WND_CLASS
-    false
+    n + 1
 }
 
 /// A class by name (or atom: a value under 0x10000).
@@ -1027,12 +1148,18 @@ pub extern "system" fn RegisterClassExW(wc: *const WndClassExW) -> u16 {
     let wc = unsafe { &*wc };
     let r = with(|s| {
         if find_class(s, wc.class_name).is_some() {
-            return Err(ERROR_CLASS_ALREADY_EXISTS);
+            return Err((ERROR_CLASS_ALREADY_EXISTS, 0));
         }
-        let Some(i) = s.classes.iter().position(|c| !c.used) else { return Err(8) };
-        // Class atoms start at 0xC000 (kept as an offset: zero-initialized).
-        let atom = 0xc000 + s.next_atom;
-        s.next_atom += 1;
+        // How many slots the table held says which refusal this is: the
+        // atom space spent, or the heap refusing a table that could
+        // still have grown.
+        let Some(i) = s.classes.free() else {
+            return Err((ERROR_NOT_ENOUGH_MEMORY, s.classes.len() as u64));
+        };
+        // The slot's own atom: freeing the slot frees it, as
+        // unregistering a class frees its name. `i` is under
+        // MAX_CLASSES, which is how many atoms there are.
+        let atom = FIRST_ATOM + i as u16;
         s.classes[i] = Class {
             used: true,
             atom,
@@ -1049,7 +1176,16 @@ pub extern "system" fn RegisterClassExW(wc: *const WndClassExW) -> u16 {
     });
     match r {
         Ok(atom) => atom,
-        Err(e) => {
+        Err((e, held)) => {
+            // A class a program cannot register is a window it cannot
+            // make, so the row names it. Recorded outside the lock (the
+            // ledger takes none of user32's); a name already taken is
+            // the program's own business and not a gap.
+            if e == ERROR_NOT_ENOUGH_MEMORY {
+                let mut text = [0u8; 96];
+                let n = class_text(b"user32.dll!RegisterClassExW(", wc.class_name, &mut text);
+                unsupported(&text[..n], held);
+            }
             // SAFETY: a plain call.
             unsafe { SetLastError(e) };
             0

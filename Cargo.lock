@@ -3320,6 +3320,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wndclass_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wofutil"
 version = "0.1.0"
 dependencies = [

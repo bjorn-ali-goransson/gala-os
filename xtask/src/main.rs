@@ -10960,6 +10960,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("metrics_test", "ntdll.dll", "Windows/System32"),
     ("metrics_test", "kernel32.dll", "Windows/System32"),
     ("metrics_test", "user32.dll", "Windows/System32"),
+    // Window classes, as many as a real program registers
+    // (user/wndclass_test).
+    ("wndclass_test", "ntdll.dll", "Windows/System32"),
+    ("wndclass_test", "kernel32.dll", "Windows/System32"),
+    ("wndclass_test", "user32.dll", "Windows/System32"),
     // The system parameters (user/spi_test).
     ("spi_test", "ntdll.dll", "Windows/System32"),
     ("spi_test", "kernel32.dll", "Windows/System32"),
@@ -11398,6 +11403,7 @@ const USER_PROGRAMS: &[&str] = &[
     "display_test",
     "d3dkmt_test",
     "metrics_test",
+    "wndclass_test",
     "spi_test",
     "caps_test",
     "etw_test",
@@ -16789,6 +16795,29 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "metrics_test: ok",
             r#"ledger: {"service":"user32.dll!GetSystemMetrics(0)","what":"reached""#,
             r#"ledger: {"service":"user32.dll!GetSystemMetrics(32767)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Window classes, as many as a real program registers: 200 of
+        // them, every one answering a distinct application atom and
+        // still there afterwards. Word's startup dies in
+        // IfrRegisterWndClasses (ROADMAP OF), and a class table of a
+        // few dozen is the first reason it could (user/wndclass_test).
+        name: "wndclass_test",
+        cmdline: "qemu_exit run=wndclass_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wndclass_test: registered 200 of 200",
+            "wndclass_test: atoms: 0 below 0xc000, 0 repeated",
+            "wndclass_test: unregistered 200",
+            // The table doubled from its first 32 slots to hold them,
+            // and said so each time: the only record of how many
+            // classes a program needed.
+            "\"service\":\"user32.dll!RegisterClassExW(the class table grew to 64)\",\"what\":\"reached\"",
+            "\"service\":\"user32.dll!RegisterClassExW(the class table grew to 128)\",\"what\":\"reached\"",
+            "\"service\":\"user32.dll!RegisterClassExW(the class table grew to 256)\",\"what\":\"reached\"",
+            "wndclass_test: ok",
             "exited with status 0x00000000",
         ],
     },

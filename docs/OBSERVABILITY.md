@@ -550,6 +550,22 @@ that row is in the dump only when the filter freed the slot it took.
   ("The stack at a system call": `stack_at=NtWriteFile stack_from=user32
   stack_words=400` names the caller and passes over every other write
   the program makes). Scenario `win32_misc_test`.
+  Window classes (user32): a registration with no room left is
+  `user32.dll!RegisterClassExW(<class>)`, "unsupported", with the slots
+  the table held as the detail -- 16384 means the atom space is spent,
+  fewer means the heap refused to grow the table. A class refused is
+  every window of that class the program will not make, and nothing
+  else in a run records it. Each doubling of the table records
+  `user32.dll!RegisterClassExW(the class table grew to <n>)`,
+  "reached", with the size in the name so a run keeps one row per size:
+  that is the only measure of how many classes a program needed, and
+  a program that never outgrew the first 32 slots leaves none. Word's
+  startup grows the table to 64, and while it was a fixed 32 that
+  refusal was silent and cost Word its startup -- `BootRun
+  {"SH_ErrorId": 13, "BootTask": "IfrRegisterWndClasses"}` and a box
+  with a number in it (ROADMAP OF). A name already registered is not
+  this row: that is ERROR_CLASS_ALREADY_EXISTS and the program's own
+  business. Scenario `wndclass_test`.
   Direct2D (d2d1): `d2d1.dll!<interface>::<method>`, "not
   implemented", for each method not built (CreateLayer,
   CreateCompatibleRenderTarget, ...); "unsupported" with the case in the
