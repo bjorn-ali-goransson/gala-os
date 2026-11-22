@@ -10,5 +10,9 @@ crate-type = ["cdylib"]
 test = false
 bench = false
 
+[dependencies]
+# The device tree in the registry, which gala's setupapi.dll reads too.
+gala_pnp = { path = "../gala_pnp" }
+
 [target.'cfg(target_arch = "x86")'.dependencies]
 ntrt = { path = "../ntrt" }

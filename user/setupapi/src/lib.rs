@@ -1,6 +1,6 @@
 //! gala's setupapi.dll: device information sets (setupapi.h) over the
 //! device tree, which is in the registry where Windows keeps it
-//! (`devices`, `kernel/src/nt/registry.seed`). It holds gala's display,
+//! (`gala_pnp`, `kernel/src/nt/registry.seed`). It holds gala's display,
 //! one monitor on one adapter; a class with no device there is a valid,
 //! empty set, as on a machine without that hardware (Chromium's
 //! battery-level provider asks for batteries this way), and that answer
@@ -44,9 +44,9 @@ use gala_heap as _;
 use ntrt as _;
 
 mod cab;
-mod devices;
 
-use devices::{Device, Wide};
+use gala_pnp as devices;
+use gala_pnp::{Device, Wide};
 
 #[cfg(not(target_arch = "x86"))]
 #[allow(dead_code)]
