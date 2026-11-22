@@ -6120,16 +6120,21 @@ of their own, clients of it) is the yardstick.
   CM_Get_Sibling and the relation filters (eject, removal, power, bus,
   transport) have nothing to walk: they answer CR_NO_SUCH_DEVNODE and
   an empty list, and each leaves a ledger row saying which it was.
-  Those rows say the shape is what the caller that matters is after:
-  in `office_word` the display class is asked for sixteen times and
-  each answer is followed by CM_Get_Child on the adapter's devnode,
-  sixteen refusals, which is a monitor asked for as the adapter's
-  child -- the same relation DXVK's "Found monitors not associated
-  with any adapter, using fallback" is about. Windows does not keep
-  that relation in the registry either: its PnP manager holds the tree
-  its bus drivers enumerated. So the shape wants a device tree the
-  kernel keeps, with gala's monitor a child of its adapter, which is
-  ROADMAP item USB's step 5 and the next piece of this. Every list asked for leaves a row naming what was
+  Those rows say the shape is what the caller that matters is after,
+  and a stack capture says who it is. In `office_word` the display
+  class is asked for sixteen times and each answer is followed by
+  CM_Get_Child on the adapter's devnode, sixteen refusals; with
+  `stack_at=NtOpenKey stack_from=cfgmgr32` (OBSERVABILITY "Stack
+  captures") every capture is DXVK's `dxgi.dll` -- gala's own dxgi
+  never calls cfgmgr32 -- so those refusals are what DXVK's three
+  `DXGI: Found monitors not associated with any adapter, using
+  fallback` warnings are: it wants the monitor as the adapter's child.
+  It copes by its fallback, and Word's device and every call on it
+  still answer S_OK, so this is a divergence and not the cause of
+  Word's box. Windows does not keep that relation in the registry
+  either: its PnP manager holds the tree its bus drivers enumerated.
+  So the shape wants a device tree the kernel keeps, with gala's
+  monitor a child of its adapter, which is ROADMAP item USB's step 5. Every list asked for leaves a row naming what was
   asked -- the class by its GUID, otherwise the filter by name -- with
   the number of devices answered as its detail, so a program looking
   for hardware gala has none of shows up with the class it wanted.
