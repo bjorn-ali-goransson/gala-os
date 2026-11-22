@@ -3194,19 +3194,6 @@ need gala's.
      Word's own bookkeeping calls the (13) exit orderly rather than a
      crash, which agrees with its status 0 and with the
      `EvtWordCoreBootStop` it resolves after.
-     One gap of gala's does stand in the graphics path, upstream of
-     everything Word reads about the display: gdi32 exports neither
-     `D3DKMTEnumAdapters2` nor `D3DKMTQueryAdapterInfo`, which Windows'
-     does, and DXVK asks for each of them sixteen times 4.5 s before
-     the box (two `missing export` rows, 16 hits each). Its own log
-     names what follows -- `DXGI: Found monitors not associated with
-     any adapter, using fallback`, three times -- so the monitor is
-     associated with the adapter by DXVK's fallback and not through the
-     kernel-mode thunks. It copes, and Word's device and every call on
-     it answer S_OK, so this is a divergence to close and not a known
-     cause. Next: `d3dkmt_test` measuring both calls on real Windows
-     (the adapter count, each adapter's LUID and handle, and the query
-     types DXVK asks for), then gdi32 answering them.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
