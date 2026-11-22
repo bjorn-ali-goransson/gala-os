@@ -7957,6 +7957,20 @@ Each entry: what, why it matters, the structural fix, the owning item.
   module and hash that -- the packages' pins for `gala-debs-`, the
   prebuilt programs' for `gala-prebuilt-` -- after which a branch that
   adds a scenario shares both caches instead of replacing them.
+- **Three more tables scanned for a free slot**, the pattern the
+  registry's arena no longer has (ARCHITECTURE "Registry"):
+  `fs::ramfs`'s `slot`, `nt::object`'s handle tables and `net::tcp`'s
+  connections all run `nodes.iter().position(Option::is_none)` for every
+  entry they place. None is measured as costly yet and the arithmetic
+  says why: the file tree holds 12 213 nodes after an Office install, so
+  its scans are about 7.5e7 checks against the registry's 9.2e8 -- some
+  75 ms of the 1.1 s that replay takes, inside its own noise -- and the
+  busiest handle table in that run held 153 handles. They are quadratic
+  all the same, in a count no invariant bounds (a program may hold tens
+  of thousands of handles, a file tree may hold a disk's files), and
+  each wants the same free list. The registry's measurement is the
+  argument for doing them before something else grows: 2.1 s to 0.84 s
+  of replay, and a hang watchdog line gone.
 - **`arm_lx_inkscape` stalled once on CI** (1 of 5 runs; 0 of 9
   locally, 4 of them at once beside busy host loops): after glycin
   SIGKILLed its image loader (as it does on every run), Inkscape's main

@@ -120,6 +120,17 @@ pub struct Change {
 /// The registry tree.
 pub struct Registry {
     nodes: Vec<Option<Node>>,
+    /// Slots of `nodes` that hold no key, for the next one to take.
+    /// Placing a key must not look through the table for a hole: a mount
+    /// replays a registry's keys one after another (42956 of them for an
+    /// installed Office), and a scan for each made that replay quadratic
+    /// -- the hang watchdog reported a CPU inside one taking no timer
+    /// interrupt for 5 s.
+    free: Vec<KeyId>,
+    /// A freed slot that `free` had no room for (no memory). The next key
+    /// that finds `free` empty looks the holes up once, so that the table
+    /// does not grow past them for the rest of the boot.
+    free_lost: bool,
     /// Changes are recorded (nt::reglog) while this is on.
     pub recording: bool,
     replaying: bool,
@@ -155,7 +166,8 @@ impl Registry {
     pub fn heap_use(&self) -> HeapUse {
         use core::mem::size_of;
         let mut u = HeapUse {
-            bytes: self.nodes.capacity() * size_of::<Option<Node>>(),
+            bytes: self.nodes.capacity() * size_of::<Option<Node>>()
+                + self.free.capacity() * size_of::<KeyId>(),
             ..HeapUse::default()
         };
         for n in self.nodes.iter().flatten() {
@@ -220,6 +232,8 @@ impl Registry {
     pub fn new() -> Result<Registry, AllocError> {
         let mut r = Registry {
             nodes: Vec::new(),
+            free: Vec::new(),
+            free_lost: false,
             recording: false,
             replaying: false,
             ops: Vec::new(),
@@ -335,6 +349,38 @@ impl Registry {
         Ok(rest.get(end + 1..).unwrap_or(&[]))
     }
 
+    /// A slot of `nodes` holding no key, if there is one. O(1), except
+    /// the once after a freed slot was lost for want of memory.
+    fn take_free(&mut self) -> Option<KeyId> {
+        if let Some(slot) = self.free.pop() {
+            return Some(slot);
+        }
+        if !self.free_lost {
+            return None;
+        }
+        // The holes a `free` that could not grow dropped: found by the
+        // scan this list exists to avoid, once, and kept from here on.
+        self.free_lost = false;
+        for slot in (0..self.nodes.len()).rev() {
+            if self.nodes[slot].is_none() {
+                self.remember_free(slot);
+                if self.free_lost {
+                    break;
+                }
+            }
+        }
+        self.free.pop()
+    }
+
+    /// `slot` of `nodes` holds no key any more and the next one may take
+    /// it. Nothing is lost if the list cannot grow: `free_lost` has the
+    /// next key look for it.
+    fn remember_free(&mut self, slot: KeyId) {
+        if self.free.try_push(slot).is_err() {
+            self.free_lost = true;
+        }
+    }
+
     fn create_child(
         &mut self,
         parent: KeyId,
@@ -363,10 +409,10 @@ impl Registry {
         };
         // Room first, so that a failure leaves the tree as it was.
         self.node_mut(parent)?.children.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
-        let id = match self.nodes.iter().position(Option::is_none) {
-            Some(free) => {
-                self.nodes[free] = Some(node);
-                free
+        let id = match self.take_free() {
+            Some(slot) => {
+                self.nodes[slot] = Some(node);
+                slot
             }
             None => {
                 self.nodes.try_push(Some(node)).map_err(nomem)?;
@@ -436,6 +482,7 @@ impl Registry {
             n.opens = n.opens.saturating_sub(1);
             if n.deleted && n.opens == 0 {
                 self.nodes[id] = None;
+                self.remember_free(id);
             }
         }
     }
@@ -465,6 +512,7 @@ impl Registry {
             n.values = Vec::new();
             if n.opens == 0 {
                 self.nodes[id] = None;
+                self.remember_free(id);
             }
         }
         Ok(())
@@ -1516,6 +1564,60 @@ mod tests {
         )
         .unwrap();
         r
+    }
+
+    /// A key takes a slot a deleted one left, and the table does not
+    /// grow while a slot is free. Placing a key must not look for the
+    /// hole: a mount creates keys one after another, and a scan of the
+    /// table for each is quadratic over a registry's keys.
+    #[test]
+    fn a_new_key_takes_a_freed_slot_and_the_table_does_not_grow() {
+        let mut r = reg();
+        let user = r.lookup(ROOT, &w("USER")).unwrap();
+        let (gone, _) = r.create(user, &w("Gone"), 0, &[], 9).unwrap();
+        let slots = r.nodes.len();
+        r.delete_key(gone, 9).unwrap();
+        assert_eq!(r.free, vec![gone]);
+        let (again, _) = r.create(user, &w("Again"), 0, &[], 9).unwrap();
+        assert_eq!(again, gone);
+        assert_eq!(r.nodes.len(), slots);
+        assert!(r.free.is_empty());
+        // And the next key does grow it: the hole is taken.
+        let (third, _) = r.create(user, &w("Third"), 0, &[], 9).unwrap();
+        assert_eq!(third, slots);
+        assert_eq!(r.nodes.len(), slots + 1);
+    }
+
+    /// A slot freed while a key object still refers to it is free when
+    /// that object goes, not before.
+    #[test]
+    fn a_slot_is_free_when_the_last_key_object_lets_go() {
+        let mut r = reg();
+        let user = r.lookup(ROOT, &w("USER")).unwrap();
+        let (gone, _) = r.create(user, &w("Gone"), 0, &[], 9).unwrap();
+        r.retain(gone);
+        r.delete_key(gone, 9).unwrap();
+        assert!(r.free.is_empty(), "a key object still refers to it");
+        r.release(gone);
+        assert_eq!(r.free, vec![gone]);
+    }
+
+    /// A freed slot the list had no room for is not lost: the next key
+    /// that finds the list empty looks the holes up, once.
+    #[test]
+    fn a_freed_slot_the_list_could_not_keep_is_found_again() {
+        let mut r = reg();
+        let user = r.lookup(ROOT, &w("USER")).unwrap();
+        let (gone, _) = r.create(user, &w("Gone"), 0, &[], 9).unwrap();
+        let slots = r.nodes.len();
+        r.delete_key(gone, 9).unwrap();
+        // As a `free.try_push` that found no memory leaves it.
+        r.free.clear();
+        r.free_lost = true;
+        let (again, _) = r.create(user, &w("Again"), 0, &[], 9).unwrap();
+        assert_eq!(again, gone);
+        assert_eq!(r.nodes.len(), slots);
+        assert!(!r.free_lost);
     }
 
     /// `heap_use` counts every key and value, and the values' data.

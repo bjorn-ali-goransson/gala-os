@@ -1931,6 +1931,15 @@ always on and cheap:
   host's load average and available memory at start and end. After an
   abnormal end (not 33/35, not stopped by xtask) also the last 12 phase
   markers and the last 30 lines of QEMU's log.
+- **What the mount replayed, and in how long**: `persist: replayed
+  59257 changes (0 skipped) in T ms, N of M KiB of log` for C:'s change
+  log and `persist: replayed 163819 registry changes (0 skipped) in T
+  ms` for the registry's. The boot holds each subsystem's lock and
+  takes no preemption across these, so a replay that grew slow is
+  indistinguishable from a hang without the time: the registry's was
+  2.1 s for an installed Office before its arena stopped scanning for
+  free slots (ARCHITECTURE "Registry"), and the only thing that had
+  reported it was a hang watchdog line under a busy host.
 - **CPU count**: xtask compares the kernel's `smp: N CPUs online` with
   the vCPUs it asked for (2, or 1 for `onecpu_*`); a boot short of CPUs
   is booted once more (not with a disk), and a failure on one says first
