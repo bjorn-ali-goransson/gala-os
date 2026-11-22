@@ -15724,7 +15724,17 @@ const BASE_SCENARIOS: &[Scenario] = &[
         name: "registry_test",
         cmdline: "qemu_exit run=registry_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["registry_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "registry_test: ok",
+            // The keys a program looked for and did not find, as the
+            // ledger names them (`nt::registry_calls::absent_name`): the
+            // hive and not the SID of the user whose it is, and for a
+            // name too long for a row the hive it is in and the end that
+            // says which key it was.
+            r#"ledger: {"service":"registry:USER/Software/GalaRegistryTest","what":"absent key""#,
+            r#"ledger: {"service":"registry:USER/.../GalaRegistryTest/Licensing/LicensingNext/Store/Tenants/Default/Subscriptions","what":"absent key""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // Registry change notification (NtNotifyChangeKey,

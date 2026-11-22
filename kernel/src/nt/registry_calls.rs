@@ -441,9 +441,18 @@ fn emit_value(call: &Call<'_>, said: Valued<'_>) {
     );
 }
 
-/// Records an absent key in the ledger ("registry:MACHINE/SOFTWARE/...",
-/// the end of the name if it is long): the keys real programs look for.
+/// Records an absent key in the ledger: the keys real programs look for.
 fn note_absent(start: KeyId, name: &[u16]) {
+    let base = registry::with(|r| r.full_name(start)).unwrap_or_default();
+    let mut entry = [0u8; 96];
+    let n = absent_name(&base, name, &mut entry);
+    super::super::ledger::record_user_bulk(&entry[..n], "absent key", 0);
+}
+
+/// `registry:<key>` in `out`, how many bytes it took: the key the open
+/// was relative to, without the `\REGISTRY\` every name starts with, and
+/// then the name that was not found.
+fn absent_name(base: &[u16], name: &[u16], out: &mut [u8; 96]) -> usize {
     let mut path = [0u8; 160];
     let mut n = 0;
     let mut push = |c: u16| {
@@ -457,7 +466,6 @@ fn note_absent(start: KeyId, name: &[u16]) {
             n += 1;
         }
     };
-    let base = registry::with(|r| r.full_name(start)).unwrap_or_default();
     // Without the leading "\REGISTRY\".
     for &c in base.iter().skip(10) {
         push(c);
@@ -468,13 +476,59 @@ fn note_absent(start: KeyId, name: &[u16]) {
     for &c in name {
         push(c);
     }
+    // A user hive is named by the SID of the user whose it is: 40 of the
+    // 87 bytes a name has, and the same 40 on every row, which left the
+    // name itself starting mid-SID. The row says USER and leaves the SID
+    // out; the `key` events carry the full name (`emit_key`) for whoever
+    // wants the hive and not the key.
+    if let Some(at) = sid_at(&path[..n]) {
+        let after = path[at..n].iter().position(|&c| c == b'/').map_or(n, |i| at + i + 1);
+        path.copy_within(after..n, at);
+        n -= after - at;
+    }
     const PREFIX: &[u8] = b"registry:";
-    let keep = 96 - PREFIX.len();
-    let tail = &path[n.saturating_sub(keep)..n];
-    let mut entry = [0u8; 96];
-    entry[..PREFIX.len()].copy_from_slice(PREFIX);
-    entry[PREFIX.len()..PREFIX.len() + tail.len()].copy_from_slice(tail);
-    super::super::ledger::record_user_bulk(&entry[..PREFIX.len() + tail.len()], "absent key", 0);
+    const ELIDED: &[u8] = b"/.../";
+    out[..PREFIX.len()].copy_from_slice(PREFIX);
+    let mut at = PREFIX.len();
+    if n <= out.len() - at {
+        out[at..at + n].copy_from_slice(&path[..n]);
+        return at + n;
+    }
+    // Still too long: the hive it is in and as much of the end as fits,
+    // cut at a component boundary where one is near the cut. The end
+    // alone did not say which hive the key was in.
+    let hive = path[..n].iter().position(|&c| c == b'/').unwrap_or(0);
+    if hive > 0 && hive + ELIDED.len() + 32 <= out.len() - at {
+        out[at..at + hive].copy_from_slice(&path[..hive]);
+        at += hive;
+        out[at..at + ELIDED.len()].copy_from_slice(ELIDED);
+        at += ELIDED.len();
+    }
+    let mut from = n - (out.len() - at);
+    if let Some(i) = path[from..n].iter().take(16).position(|&c| c == b'/') {
+        from += i + 1;
+    }
+    out[at..at + (n - from)].copy_from_slice(&path[from..n]);
+    at + (n - from)
+}
+
+/// Where a SID component starts in `path`, if one does: a SID is `S-1-`
+/// and then nothing but digits and the dashes between them, so a key
+/// whose own name begins that way is not mistaken for one.
+fn sid_at(path: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    while at < path.len() {
+        let end = path[at..].iter().position(|&c| c == b'/').map_or(path.len(), |i| at + i);
+        let comp = &path[at..end];
+        if comp.len() > 4
+            && comp.starts_with(b"S-1-")
+            && comp[4..].iter().all(|&c| c.is_ascii_digit() || c == b'-')
+        {
+            return Some(at);
+        }
+        at = end + 1;
+    }
+    None
 }
 
 /// NtCreateKey(*KeyHandle, DesiredAccess, ObjectAttributes, TitleIndex,
@@ -1077,5 +1131,60 @@ mod tests {
         assert_eq!(parse_peek("0"), None);
         assert_eq!(parse_peek("-1"), None);
         assert_eq!(parse_peek("lots"), None);
+    }
+    /// What a key that was not found is named in the ledger.
+    fn absent(base: &str, name: &str) -> String {
+        let base: Vec<u16> = base.encode_utf16().collect();
+        let name: Vec<u16> = name.encode_utf16().collect();
+        let mut out = [0u8; 96];
+        let n = absent_name(&base, &name, &mut out);
+        String::from(core::str::from_utf8(&out[..n]).unwrap())
+    }
+
+    /// The user hive of the one interactive user there is
+    /// (docs/SECURITY.md), named by that user's SID.
+    const USER_HIVE: &str = r"\REGISTRY\USER\S-1-5-21-1000000001-1000000002-1000000003-1001";
+
+    #[test]
+    fn a_key_short_enough_is_named_in_full() {
+        assert_eq!(
+            absent(r"\REGISTRY\MACHINE\SOFTWARE\Microsoft", "Direct3D"),
+            "registry:MACHINE/SOFTWARE/Microsoft/Direct3D"
+        );
+    }
+
+    #[test]
+    fn a_user_key_is_named_without_the_sid_that_is_the_same_on_every_row() {
+        // The SID is 40 of the 87 bytes a name has, and the same 40 on
+        // every row: keeping it, the name began mid-SID.
+        assert_eq!(
+            absent(&format!(r"{USER_HIVE}\Software\Microsoft\Office\16.0\Word\Options"), "Vpref"),
+            "registry:USER/Software/Microsoft/Office/16.0/Word/Options/Vpref"
+        );
+    }
+
+    #[test]
+    fn a_component_that_is_not_a_sid_is_kept_whatever_it_looks_like() {
+        assert_eq!(
+            absent(r"\REGISTRY\MACHINE\SOFTWARE\S-1-5-21-Vendor", "Build"),
+            "registry:MACHINE/SOFTWARE/S-1-5-21-Vendor/Build"
+        );
+    }
+
+    #[test]
+    fn a_key_too_long_keeps_the_hive_it_is_in_and_the_end_that_names_it() {
+        let long = format!(
+            "{USER_HIVE}{}",
+            r"\Software\Microsoft\Office\16.0\Common\Licensing\Store\Tenants\Default"
+        );
+        let got = absent(&long, "ProductReleaseId");
+        assert!(got.len() <= 96, "{got}");
+        assert!(got.starts_with("registry:USER/.../"), "{got}");
+        assert!(got.ends_with("/ProductReleaseId"), "{got}");
+    }
+
+    #[test]
+    fn a_name_that_is_not_plain_text_is_not_mistaken_for_one() {
+        assert_eq!(absent(r"\REGISTRY\MACHINE", "a\"b\u{1f600}c"), "registry:MACHINE/a?b??c");
     }
 }

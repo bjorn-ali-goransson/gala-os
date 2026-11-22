@@ -3473,7 +3473,15 @@ shutdown.
   (`registry:MACHINE/...`, "absent key"), which is how the seed grows;
   a name in the 32-bit view is recorded as it was resolved
   (`registry:MACHINE/SOFTWARE/WOW6432Node/...`), so a 32-bit program's
-  missing key shows which view it looked in.
+  missing key shows which view it looked in. A row's name is 96 bytes
+  and the key's is built to fit in them (`absent_name`, host tests):
+  a key under a user hive is named `registry:USER/...` without the SID
+  of the user whose hive it is -- the same 40 bytes on every row, which
+  left the key's own name beginning mid-SID -- and a name too long even
+  then keeps the hive it is in and the end that says which key it was,
+  `/.../` between (`registry:USER/.../Store/Tenants/Default`). Nothing
+  is lost with the SID: the `key` events carry every open's full key
+  name (`registry_test` expects both shapes).
 - **advapi32** (`user/advapi32/src/registry.rs`): the Reg* functions over
   ntdll's Nt*Key services. The predefined HKEYs (zero- or sign-extended,
   as winreg.h's x64 values are) open their key on first use and keep the
