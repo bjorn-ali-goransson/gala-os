@@ -758,15 +758,17 @@ pub fn execve(
     }
     *call.lx.auxv.lock() = aux;
     call.lx.set_comm(call.tid, comm);
-    *call.process.current_name.lock() = name;
-    // The task manager's command line: the new argv.
+    // The new name, and the new argv as the command line: published
+    // together, because the process list reads the pair in one go and
+    // two writes would let it catch this image beside the command line
+    // of the one it replaced (`nt::process::Naming`).
     let mut line: Vec<u8> = Vec::new();
     for (i, a) in argv_refs.iter().enumerate() {
         if (i > 0 && line.try_push(b' ').is_err()) || line.try_extend_from_slice(a).is_err() {
             break;
         }
     }
-    process::set_command_line(&call.process, core::str::from_utf8(&line).unwrap_or(shown));
+    process::set_naming(&call.process, name, core::str::from_utf8(&line).unwrap_or(shown));
     call.lx.release_vfork();
     call.lx.close_on_exec();
     call.lx.signals.lock().exec();

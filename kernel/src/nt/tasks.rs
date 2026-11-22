@@ -377,11 +377,18 @@ mod live {
             if p.wow64.is_some() {
                 t.flags |= FLAG_WOW64;
             }
-            t.texts[1].try_extend_from_slice(&p.command_line.lock()).map_err(no_memory)?;
+            // The name and the command line from the one read: an
+            // execve replaces both, and two reads could fall either side
+            // of it (`nt::process::Naming`).
+            let name = p
+                .with_naming(|name, command_line| {
+                    t.texts[1].try_extend_from_slice(command_line).map(|()| name)
+                })
+                .map_err(no_memory)?;
             user_of(p, &users, &mut t.texts[2])?;
             if p.personality == Personality::Linux {
                 t.flags |= FLAG_LINUX;
-                linux_parts(p, &distros, &mut t)?;
+                linux_parts(p, &distros, name, &mut t)?;
             } else {
                 t.handles = p.handles.lock().iter().count() as u32;
                 t.texts[0].try_extend_from_slice(p.name.as_bytes()).map_err(no_memory)?;
@@ -444,22 +451,25 @@ mod live {
     }
 
     /// A Linux process's image (`comm`), fds and distribution.
+    /// `name` is what the process is called now, taken with its command
+    /// line in the one read (`nt::process::Core::with_naming`) so that
+    /// the two always describe the same image -- not the main thread's
+    /// `comm`, which a program may set to anything it likes and which
+    /// changes a moment before the command line does.
     fn linux_parts(
         p: &Process,
         distros: &[(crate::nt::desktop::linux::Name, NodeId)],
+        name: crate::nt::process::CurrentName,
         t: &mut Task,
     ) -> Result<(), NtStatus> {
+        t.texts[0].try_extend_from_slice(name.as_str().as_bytes()).map_err(no_memory)?;
         let Some(lx) = crate::lx::state::get(p.id) else {
             // Between its start and its Linux state, or after its end.
-            return t.texts[0].try_extend_from_slice(p.name.as_bytes()).map_err(no_memory);
+            return Ok(());
         };
-        let comm = lx.comm(lx.main_tid.load(Ordering::Relaxed));
-        let n = comm.0.iter().position(|&b| b == 0).unwrap_or(comm.0.len());
-        let name = if n == 0 { p.name.as_bytes() } else { &comm.0[..n] };
-        t.texts[0].try_extend_from_slice(name).map_err(no_memory)?;
         t.handles = lx.fds.lock().iter().filter(|s| s.is_some()).count() as u32;
-        if let Some((name, _)) = distros.iter().find(|(_, root)| *root == lx.root) {
-            t.texts[3].try_extend_from_slice(name.as_bytes()).map_err(no_memory)?;
+        if let Some((distro, _)) = distros.iter().find(|(_, root)| *root == lx.root) {
+            t.texts[3].try_extend_from_slice(distro.as_bytes()).map_err(no_memory)?;
         }
         Ok(())
     }

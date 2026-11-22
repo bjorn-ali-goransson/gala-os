@@ -15162,10 +15162,11 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   resident), commit charge, threads, handles (a Linux process's open
   fds), session, flags (Linux, has a taskbar window, elevated, WOW64,
   not responding, uninterruptible), the token's Linux uid, and texts:
-  the image (a Linux process's `comm`, what `ps` shows), the command
-  line, the user (the token user's account name: SYSTEM and the
-  services' names, a local account's, else the SID's string), the WSL
-  distribution, the taskbar window's title and HWND. Op 1 is the load:
+  the image (a Linux process's program file name: "The name and the
+  command line are one fact"), the command line, the user (the token
+  user's account name: SYSTEM and the services' names, a local
+  account's, else the SID's string), the WSL distribution, the taskbar
+  window's title and HWND. Op 1 is the load:
   per processor its busy and idle nanoseconds, physical memory and use,
   the commit charge, disk and network bytes, the process, thread and
   handle counts. Both answer STATUS_BUFFER_TOO_SMALL with the size
@@ -15203,9 +15204,22 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   (`Core::cpu_ended_ns`, each adds its own at its exit) plus its live
   ones'. gala-um reports 0 (the host schedules: the `Threads` trait's
   defaults). ProcessTimes and GetSystemTimes do not use it yet (TODO).
-- **The command line** is kept on the core process when it starts
-  (`process::set_command_line` from `announce_start`) and replaced by
-  a Linux execve (its argv joined by spaces).
+- **The name and the command line are one fact**: a process keeps
+  both under the one lock (`process::Naming`), set when it starts
+  (`set_command_line` from `announce_start`) and replaced together by
+  a Linux execve -- the new program's file name and its argv joined
+  by spaces (`set_naming`). Invariant: whatever shows the two
+  together reads them in one go (`Core::with_naming`), so no row
+  carries one image's name beside another's command line. Two writes
+  read by two reads left a window as wide as an execve's
+  allocations: a child caught in one was listed as `sleep` with the
+  command line `/bin/sh`. A Linux row's image is this name and not
+  the main thread's `comm`, which a program may set to what it likes
+  (prctl) and which changes a moment before the command line does.
+  `taskmgr_test` runs 400 execves in a busybox distribution while
+  reading the list as fast as the queries come, and checks that
+  every row's image is the last component of its argv[0]
+  (`taskmgr_test: one image through <n> samples`).
 - **Distributions**: a Linux process belongs to the distribution whose
   tree is its root (`LxProcess::root`); the names come from the boot
   user's Lxss keys (`desktop::distro_roots`: DistributionName and

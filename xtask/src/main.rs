@@ -21298,6 +21298,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "wsl: bb: imported",
             "taskmgr_test: an ending Linux process is still itself",
+            "taskmgr_test: one image through ",
             "taskmgr_test: ready",
             "(taskmgr_test.exe) is not responding: its input has waited untaken",
             "taskmgr_test: frozen window not responding",
