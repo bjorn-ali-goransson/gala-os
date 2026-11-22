@@ -462,7 +462,14 @@ last dump, not every name of the boot; and bulk reports (the registry's
 and 384 entries, so a rarer gap such as a missing DLL still finds room
 for its name between two dumps. Whether those caps are right is in the
 dump: `?bulk` lines are the caps working as meant, while a `?full` line
-of a rarer kind says a gap was lost and the caps need revisiting.
+of a rarer kind says a gap was lost and the caps need revisiting. A name
+is 96 bytes, and a registry key's is built to fit in them
+(`nt::registry_calls::absent_name`): a key under a user hive is named by
+the hive and not by the SID of the user whose it is, and a name too long
+even then keeps the hive it is in and the end that says which key it was
+(`registry:USER/.../Store/Tenants/Default`) -- the end alone said
+neither which hive nor, with a SID in front of it, which key. The `key`
+events carry every open's full name for whoever wants the hive itself.
 
 - The dispatcher records unknown services and, generically, any
   STATUS_INVALID_INFO_CLASS (with the class argument, per

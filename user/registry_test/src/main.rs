@@ -994,6 +994,14 @@ fn written(c: &mut Checks) -> Result<(), u32> {
         c.ok0(RegDeleteTreeW(software, w("GalaRegistryTest").as_ptr()))?;
         let r = RegOpenKeyExW(software, w("GalaRegistryTest").as_ptr(), 0, KEY_READ, &mut test);
         c.eq(r as u64, ERROR_FILE_NOT_FOUND)?;
+        // A name too long for a ledger row (the scenario expects what the
+        // row says: the hive it is in and the end that names the key).
+        let deep = w(concat!(
+            r"Software\GalaRegistryTest\Licensing\LicensingNext",
+            r"\Store\Tenants\Default\Subscriptions"
+        ));
+        let r = RegOpenKeyExW(HKEY_CURRENT_USER, deep.as_ptr(), 0, KEY_READ, &mut test);
+        c.eq(r as u64, ERROR_FILE_NOT_FOUND)?;
         RegCloseKey(software);
     }
     Ok(())

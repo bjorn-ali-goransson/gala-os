@@ -2057,10 +2057,12 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   scenario's modules too (advapi32 imports it), or it ends with
   0xc0000135 (the ledger names the missing DLL).
 - Registry keys a program needs: boot it and read the ledger's
-  `"what":"absent key"` lines (`registry:MACHINE/...`, the end of long
-  names). Keys a clean Windows has go in `kernel/src/nt/registry.seed`
-  with Windows' values; keys a clean Windows lacks too (policies, other
-  products) stay absent.
+  `"what":"absent key"` lines (`registry:MACHINE/...`, or
+  `registry:USER/...` for a user key, whose SID is not in the row; a
+  name too long for a row keeps its hive and its end,
+  `registry:USER/.../Store/Tenants/Default`). Keys a clean Windows has
+  go in `kernel/src/nt/registry.seed` with Windows' values; keys a clean
+  Windows lacks too (policies, other products) stay absent.
 
 ### Tests in C, C++ and C#
 
