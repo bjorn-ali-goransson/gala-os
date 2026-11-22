@@ -80,13 +80,9 @@ pub struct Core {
     /// Nanoseconds its ended threads ran (each adds its own at its exit;
     /// the live ones' are the scheduler's: `cpu_time_ns`).
     pub cpu_ended_ns: core::sync::atomic::AtomicU64,
-    /// Its command line as it was started (UTF-8; a Linux program's argv
-    /// joined by spaces, replaced by execve), for the task manager
-    /// (`nt::tasks`); empty if there was no memory to keep it.
-    pub command_line: IrqMutex<Vec<u8>>,
-    /// Its program's file name since an execve replaced its first image
-    /// (a Linux process: `set_current_name`); empty before, `name` then.
-    pub current_name: IrqMutex<CurrentName>,
+    /// What it is called now and the command line that goes with it,
+    /// under the one lock (`Naming`).
+    pub naming: IrqMutex<Naming>,
     /// The primary token (nt::token).
     pub token: IrqMutex<ObjectRef>,
     /// Its session (nt::session): its primary token's TokenSessionId when
@@ -1142,8 +1138,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             commit_peak: core::sync::atomic::AtomicU64::new(0),
             commit_ended: core::sync::atomic::AtomicBool::new(false),
             cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
-            command_line: IrqMutex::new(Vec::new()),
-            current_name: IrqMutex::new(CurrentName::EMPTY),
+            naming: IrqMutex::new(Naming::EMPTY),
             token: IrqMutex::new(token),
             session,
             desk,
@@ -1301,24 +1296,73 @@ impl core::fmt::Display for CurrentName {
     }
 }
 
+/// What a process is called and the command line that goes with it.
+/// An execve replaces both, and they are kept under the one lock and
+/// read in one go (`Core::with_naming`): a process list that read them
+/// one after the other could catch an execve between the two and show
+/// the new program's name beside the command line of the image it
+/// replaced.
+pub struct Naming {
+    /// Its program's file name since an execve replaced its first image;
+    /// empty before that, when `name` is its name.
+    pub current: CurrentName,
+    /// Its command line (UTF-8; a Linux program's argv joined by
+    /// spaces), for the task manager (`nt::tasks`); empty if there was
+    /// no memory to keep it.
+    pub command_line: Vec<u8>,
+}
+
+impl Naming {
+    pub const EMPTY: Naming = Naming { current: CurrentName::EMPTY, command_line: Vec::new() };
+}
+
 impl Core {
+    /// Its name now and its command line, both from the one read: what
+    /// shows the two together (`nt::tasks`) must take them this way.
+    pub fn with_naming<T>(&self, f: impl FnOnce(CurrentName, &[u8]) -> T) -> T {
+        let naming = self.naming.lock();
+        let current = if naming.current.len == 0 {
+            CurrentName::of_path(self.name.as_bytes())
+        } else {
+            naming.current
+        };
+        f(current, &naming.command_line)
+    }
+
     /// Its program's name now: the one an execve gave it, else its first
     /// image's (`name`). Logs and the process list show it.
     pub fn name_now(&self) -> CurrentName {
-        let current = *self.current_name.lock();
-        if current.len == 0 { CurrentName::of_path(self.name.as_bytes()) } else { current }
+        self.with_naming(|current, _| current)
     }
 }
 
-/// Keeps `process`'s command line (the task manager's; execve's new one
-/// replaces it). Without the memory it stays as it was (logged).
-pub fn set_command_line(process: &Process, command_line: &str) {
+/// `command_line`'s bytes, or nothing without the memory for them
+/// (logged).
+fn kept(process: &Process, command_line: &str) -> Option<Vec<u8>> {
     let mut copy = Vec::new();
     if copy.try_extend_from_slice(command_line.as_bytes()).is_err() {
         crate::warn!("process: pid {}: no memory to keep its command line", process.id);
-        return;
+        return None;
     }
-    *process.command_line.lock() = copy;
+    Some(copy)
+}
+
+/// Keeps `process`'s command line, its name unchanged (its first
+/// image's: `announce_start`). Without the memory it stays as it was
+/// (logged).
+pub fn set_command_line(process: &Process, command_line: &str) {
+    let Some(copy) = kept(process, command_line) else { return };
+    process.naming.lock().command_line = copy;
+}
+
+/// Keeps what an execve made of `process`: the new program's file name
+/// and the command line of that same image, set together so that no
+/// reader sees one of them beside the other image's (`Naming`). Without
+/// the memory for the command line it is left empty rather than left
+/// behind, since the one it had belongs to the image this one replaced.
+pub fn set_naming(process: &Process, current: CurrentName, command_line: &str) {
+    let command_line = kept(process, command_line).unwrap_or_default();
+    *process.naming.lock() = Naming { current, command_line };
 }
 
 impl Core {
@@ -1394,8 +1438,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
             commit_peak: core::sync::atomic::AtomicU64::new(0),
             commit_ended: core::sync::atomic::AtomicBool::new(false),
             cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
-            command_line: IrqMutex::new(Vec::new()),
-            current_name: IrqMutex::new(CurrentName::EMPTY),
+            naming: IrqMutex::new(Naming::EMPTY),
             token: IrqMutex::new(token),
             session,
             desk,
@@ -1790,8 +1833,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
             commit_peak: AtomicU64::new(0),
             commit_ended: AtomicBool::new(false),
             cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
-            command_line: IrqMutex::new(Vec::new()),
-            current_name: IrqMutex::new(CurrentName::EMPTY),
+            naming: IrqMutex::new(Naming::EMPTY),
             token: IrqMutex::new(token),
             session,
             desk,

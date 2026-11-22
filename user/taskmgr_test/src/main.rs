@@ -747,6 +747,57 @@ fn test(tasks: &Tasks) -> Result<(), u32> {
     c.ok(cat.handles >= 3, "cat's fds")?;
     let wsl_proc = find(&procs, |p| p.image == "wsl.exe" && p.parent == me_pid);
     c.ok(wsl_proc.is_some_and(|p| p.flags & FLAG_LINUX == 0), "wsl.exe a Windows process")?;
+    // A Linux process is one image: while an execve replaces it, the list
+    // must not show the new program name beside the command line of the
+    // one before it. The kernel publishes the pair together
+    // (nt::process::Naming), so every sample agrees: the file name is the
+    // last component of what argv[0] says.
+    let churn = start(
+        &wsl,
+        "-d bb --exec /bin/sh -c \"i=0; while [ $i -lt 400 ]; do /bin/sleep 0; i=$((i+1)); done\"",
+        None,
+    );
+    c.ok(churn.is_some(), "the execve loop started")?;
+    let churn = churn.unwrap_or(core::ptr::null_mut());
+    let mut torn = String::new();
+    let mut samples = 0u32;
+    // SAFETY: plain call.
+    let since = unsafe { GetTickCount() };
+    loop {
+        samples += 1;
+        for p in tasks.processes().iter().filter(|p| p.flags & FLAG_LINUX != 0) {
+            let argv0 = p.command_line.split(' ').next().unwrap_or("");
+            let shown = argv0.rsplit('/').next().unwrap_or(argv0);
+            if !argv0.is_empty() && p.image != shown {
+                let _ = write!(
+                    torn,
+                    "pid {} listed as {:?} with the command line {:?}",
+                    p.pid, p.image, p.command_line
+                );
+                break;
+            }
+        }
+        // SAFETY: plain call.
+        let waited = unsafe { GetTickCount() }.wrapping_sub(since);
+        // SAFETY: a handle this program holds.
+        let ended = unsafe { WaitForSingleObject(churn, 0) } == 0;
+        if !torn.is_empty() || ended || waited > END_WAIT_MS {
+            break;
+        }
+    }
+    let mut s = String::new();
+    if torn.is_empty() {
+        let _ = write!(s, "one image through {samples} samples of 400 execves");
+    } else {
+        let _ = write!(s, "a Linux process mid-execve: {torn}");
+    }
+    line(&s);
+    c.ok(torn.is_empty(), "a Linux process is one image while it execs")?;
+    // SAFETY: a handle this program holds.
+    unsafe {
+        WaitForSingleObject(churn, END_WAIT_MS);
+        CloseHandle(churn);
+    }
     // Windows' own list: no Linux process.
     let nt = nt_pids();
     c.ok(nt.contains(&me_pid) && nt.contains(&b1.pid), "NtQuerySystemInformation's Windows ones")?;
