@@ -10976,6 +10976,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("etwarm_test", "ntdll.dll", "Windows/System32"),
     ("etwarm_test", "kernel32.dll", "Windows/System32"),
     ("etwarm_test", "advapi32.dll", "Windows/System32"),
+    ("etwfields_test", "ntdll.dll", "Windows/System32"),
+    ("etwfields_test", "kernel32.dll", "Windows/System32"),
+    ("etwfields_test", "advapi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11396,6 +11399,7 @@ const USER_PROGRAMS: &[&str] = &[
     "caps_test",
     "etw_test",
     "etwarm_test",
+    "etwfields_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -16869,7 +16873,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "etwarm_test: Gala.Test.Quiet: no session",
             "etwarm_test: Gala.Test.Arm: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=11 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=11",
             "etwarm_test: Gala.Test.Quiet: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
-            "etw: etwarm_test.exe 2542af41-3d78-596e-ff31-017dbbeacc32 level 4 keyword 0x0, 49 bytes",
+            "etw: provider Gala.Test.Arm is 2542af41-3d78-596e-ff31-017dbbeacc32",
+            "etw: etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why=\"armed\"",
             "etwarm_test: ok",
             "etw: 1 event written to the session, from 1 provider (etw=)",
             "exited with status 0x00000000",
@@ -16889,10 +16894,59 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "etwarm_test: Gala.Test.Quiet: calls=1 enabled=1 level=4 any=0x10 all=0x0 ctx=0x5102",
             "etwarm_test: Gala.Test.Arm: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=00",
             "etwarm_test: Gala.Test.Quiet: 0/0x0=11 1/0x0=11 4/0x0=11 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=11 4/0x4000000000000000=00",
-            "etw: etwarm_test.exe 2542af41-3d78-596e-ff31-017dbbeacc32 level 4 keyword 0x0, 49 bytes",
-            "etw: etwarm_test.exe c7be3843-7267-5b9d-1d9c-ebe8fe08d1fd level 4 keyword 0x0, 51 bytes",
+            "etw: provider Gala.Test.Arm is 2542af41-3d78-596e-ff31-017dbbeacc32",
+            "etw: etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why=\"armed\"",
+            "etw: provider Gala.Test.Quiet is c7be3843-7267-5b9d-1d9c-ebe8fe08d1fd",
+            "etw: etwarm_test.exe Gala.Test.Quiet/Started level 4 keyword 0x0, count=7, why=\"armed\"",
             "etwarm_test: ok",
             "etw: 2 events written to the session, from 2 providers (etw=)",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Every field shape TraceLogging can put in an event, written by
+        // a program nobody is listening to: the half that must stay real
+        // Windows' line for line, so the decoded lines below can be read
+        // as the same values (user/etwfields_test).
+        name: "etwfields_test",
+        cmdline: "qemu_exit run=etwfields_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etwfields_test: Gala.Test.Fields registered, nobody is listening",
+            "etwfields_test: Scalars i8=-8, u8=200, i16=-1600, u16=60000, i32=-32000, u32=4000000000, i64=-6400000000, u64=18000000000000000000",
+            "etwfields_test: Numbers f32=1.5, f64=-2.25, yes=true, no=false",
+            "etwfields_test: Texts wide=\"wide string\", ansi=\"ansi string\", cwide=\"counted wide\", cansi=\"counted ansi\"",
+            "etwfields_test: Bytes blob=deadbeef, id=11112222-3333-4444-5555-666677778888, when=134398485030000000 (2026-11-22 19:15:03), hex32=0xdeadbeef, hex64=0x123456789abcdef",
+            "etwfields_test: Shapes three=[10, 20, 30], list=[1, 2, 3, 4], rect={left=-1, top=2}, tagged=99, ashex=0xc0ffee, aserror=5",
+            "etwfields_test: Nothing",
+            "etwfields_test: 6 events written, all accepted",
+            "etwfields_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The decoder: the same six events read back out of the
+        // metadata the program wrote them with, field by field. Every
+        // line here is the one above it in the program's own voice,
+        // which is what makes a decoded value wrong visibly wrong --
+        // and the shapes that carry no value of their own (a struct, a
+        // tagged field, an array's count) are checked by the fields
+        // that follow them coming out right.
+        name: "etwfields_armed",
+        cmdline: "qemu_exit run=etwfields_test.exe etw=Gala.Test.Fields",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for Gala.Test.Fields (d0b5081d-9af0-5ab0-5d8b-82289048fa05), level 5",
+            "etwfields_test: Gala.Test.Fields registered, 1 callback(s), enabled 1 level 5 any 0xffffffffffffffff all 0x0",
+            "etw: provider Gala.Test.Fields is d0b5081d-9af0-5ab0-5d8b-82289048fa05",
+            "etw: etwfields_test.exe Gala.Test.Fields/Scalars level 4 keyword 0x1, i8=-8, u8=200, i16=-1600, u16=60000, i32=-32000, u32=4000000000, i64=-6400000000, u64=18000000000000000000",
+            "etw: etwfields_test.exe Gala.Test.Fields/Numbers level 4 keyword 0x2, f32=1.5, f64=-2.25, yes=true, no=false",
+            "etw: etwfields_test.exe Gala.Test.Fields/Texts level 4 keyword 0x4, wide=\"wide string\", ansi=\"ansi string\", cwide=\"counted wide\", cansi=\"counted ansi\"",
+            "etw: etwfields_test.exe Gala.Test.Fields/Bytes level 4 keyword 0x8, blob=deadbeef, id=11112222-3333-4444-5555-666677778888, when=2026-11-22 19:15:03, hex32=0xdeadbeef, hex64=0x123456789abcdef",
+            "etw: etwfields_test.exe Gala.Test.Fields/Shapes level 4 keyword 0x10, three=[10, 20, 30], list=[1, 2, 3, 4], rect={left=-1, top=2}, tagged=99, ashex=0xc0ffee, aserror=5",
+            "etw: etwfields_test.exe Gala.Test.Fields/Nothing level 4 keyword 0x20",
+            "etwfields_test: ok",
+            "etw: 6 events written to the session, from 1 provider (etw=)",
             "exited with status 0x00000000",
         ],
     },
@@ -21639,6 +21693,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("import_answer_text", "import_strings_test"),
     ("import_answer_bytes", "import_strings_test"),
     ("etw_armed", "etwarm_test"),
+    ("etwfields_armed", "etwfields_test"),
     ("etw_armed_all", "etwarm_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),

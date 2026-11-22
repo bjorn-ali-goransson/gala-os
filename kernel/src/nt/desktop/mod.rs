@@ -3099,20 +3099,12 @@ fn tile_colors(title: &[u16]) -> (u32, u32) {
 
 /// The clock as Windows shows it in the US: "10:52 PM" and "11/1/2026"
 /// (and their lengths) for `minute` (minutes since 1601-01-01 UTC). The
-/// date: the days-to-civil algorithm from Howard Hinnant's
-/// "chrono-Compatible Low-Level Date Algorithms" (public domain).
+/// date itself is `time::Civil`; what is here is the US order and the
+/// twelve-hour clock, which is all that is particular to a taskbar.
 fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
     let hh = (minute / 60 % 24) as u8;
     let mm = (minute % 60) as u8;
-    let z = (minute / (60 * 24)) as i64 - 134_774 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = (yoe + era * 400 + i64::from(m <= 2)).clamp(0, 9999) as u32;
+    let at = crate::time::Civil::from_minutes(minute);
     let mut time = [0u8; 8];
     let mut tn = 0;
     let h12 = match hh % 12 {
@@ -3132,7 +3124,7 @@ fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
     }
     let mut date = [0u8; 10];
     let mut dn = 0;
-    for v in [m as u32, d as u32] {
+    for v in [u32::from(at.month), u32::from(at.day)] {
         if v >= 10 {
             push(&mut date, &mut dn, b'0' + (v / 10) as u8);
         }
@@ -3140,7 +3132,7 @@ fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
         push(&mut date, &mut dn, b'/');
     }
     for div in [1000, 100, 10, 1] {
-        push(&mut date, &mut dn, b'0' + (y / div % 10) as u8);
+        push(&mut date, &mut dn, b'0' + (at.year / div % 10) as u8);
     }
     (time, tn, date, dn)
 }

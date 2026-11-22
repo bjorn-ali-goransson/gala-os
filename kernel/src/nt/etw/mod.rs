@@ -18,12 +18,12 @@
 //! manifest of any kind, and `*` asks for every provider the program
 //! registers.
 //!
-//! What a line says is as much as the records hold: which provider
-//! wrote, at what level and keyword, and how many payload bytes it
-//! built. The metadata TraceLogging ships with each event -- the event's
-//! own name and its fields -- is the decoder's (ROADMAP OT4 step 2);
-//! until then a line is the account that the program wrote at all,
-//! which is what no run had before, and the summary counts them.
+//! A line says what the program said: the provider's name, the event's,
+//! and every field with the name the program gave it, read out of the
+//! metadata TraceLogging ships beside each event (`tracelogging`). An
+//! event whose metadata is not TraceLogging's -- a manifest provider's
+//! -- has no field names anywhere in it, and its line is the account
+//! that the program wrote at all, with the payload's size.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -31,6 +31,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sync::IrqMutex;
 
 pub mod sha1;
+pub mod tracelogging;
 
 /// The longest provider name an `etw=` value may name. TraceLogging's
 /// own names run to half of this; a longer one is refused outright
@@ -64,13 +65,27 @@ pub const ASK_LEN: usize = 32;
 /// registers, whatever its id.
 pub const ASK_EVERY: u8 = 1;
 
-/// The record op 1 of `GalaEtw` hands over: the provider id (16 bytes),
-/// the event descriptor as the program built it (16), and the payload's
-/// length as a little-endian `u32`. The payload itself stays in the
-/// program: the decoder (ROADMAP OT4 step 2) takes the pieces with the
-/// types that say what they are, which this is not, and a count of bytes
-/// is what a line can honestly say until then.
-pub const RECORD_LEN: usize = 36;
+/// The header op 1 of `GalaEtw` hands over, before the three blobs
+/// whose lengths it gives: the provider id (16 bytes), the event
+/// descriptor as the program built it (16), the whole payload's length
+/// as a little-endian `u32`, then the provider's metadata, the event's
+/// metadata and the values as `u16` lengths, and a `u16` of flags. A
+/// fixed layout and not a shared type, for the reason `ASK_LEN` gives.
+pub const RECORD_HEAD: usize = 44;
+
+/// The most one record holds, header and blobs. An event past this is
+/// cut to fit, and its line says so rather than reading as an event that
+/// ended: the whole of it is a stack frame's in both halves, so no
+/// allocation and no lock stands between a program's write and its line.
+/// A Word event runs to a few hundred bytes.
+pub const RECORD_MAX: usize = 2048;
+
+/// Bit 0 of the record's flags: the values did not fit and were cut.
+pub const RECORD_CUT: u16 = 1;
+
+/// Bit 1: the event carried no TraceLogging metadata at all, which is
+/// what a manifest provider's event looks like.
+pub const RECORD_NO_META: u16 = 2;
 
 /// What one `etw=` asks for.
 struct Ask {
@@ -126,18 +141,22 @@ impl Seen {
         Seen { guids: [[0; 16]; SEEN_MAX], count: 0, more: false }
     }
 
-    fn note(&mut self, guid: &[u8; 16]) {
+    /// Notes a provider, and says whether this is the first event it
+    /// wrote: the name it gives itself is said once, where a reader of
+    /// the lines after it needs it.
+    fn note(&mut self, guid: &[u8; 16]) -> bool {
         for i in 0..self.count {
             if self.guids[i] == *guid {
-                return;
+                return false;
             }
         }
         if self.count == SEEN_MAX {
             self.more = true;
-            return;
+            return false;
         }
         self.guids[self.count] = *guid;
         self.count += 1;
+        true
     }
 }
 
@@ -409,17 +428,79 @@ fn take_line() -> Option<u32> {
     }
 }
 
+/// One event a session was given, as op 1's record carries it.
+pub struct Written<'a> {
+    /// The program that wrote it.
+    pub process: &'a str,
+    pub guid: &'a [u8; 16],
+    /// The level and keyword of the event's own descriptor, which are
+    /// the event's and not the session's.
+    pub level: u8,
+    pub keyword: u64,
+    /// Every byte the program built, before anything was cut: what a
+    /// line can say about an event it cannot read.
+    pub bytes: u32,
+    pub provider_meta: &'a [u8],
+    pub event_meta: &'a [u8],
+    pub data: &'a [u8],
+    /// `RECORD_CUT`, `RECORD_NO_META`.
+    pub flags: u16,
+}
+
 /// Records one event the session was given, and says whether the DLL
 /// should keep handing them over: `false` once the budget is spent, so
 /// a program whose session is over stops paying a system call an event.
-pub fn record(process: &str, guid: &[u8; 16], level: u8, keyword: u64, bytes: u32) -> bool {
+pub fn record(event: &Written<'_>) -> bool {
     if !wanted() {
         return false;
     }
     let Some(left) = take_line() else { return false };
-    SEEN.lock().note(guid);
+    let first = SEEN.lock().note(event.guid);
     WRITTEN.fetch_add(1, Ordering::Relaxed);
-    info!("etw: {process} {} level {level} keyword {keyword:#x}, {bytes} bytes", Guid(guid));
+    let cut = event.flags & RECORD_CUT != 0;
+    match tracelogging::Event::parse(event.provider_meta, event.event_meta, event.data, cut) {
+        Some(decoded) => {
+            if first {
+                // The name a provider gives itself, said at its first
+                // event: a run that asked for `*` has nothing else to
+                // read the ids in the lines after this one by.
+                info!(
+                    "etw: provider {} is {}",
+                    tracelogging::Text(decoded.provider),
+                    Guid(event.guid)
+                );
+            }
+            info!(
+                "etw: {} {}/{} level {} keyword {:#x}{}",
+                event.process,
+                tracelogging::Text(decoded.provider),
+                tracelogging::Text(decoded.name),
+                event.level,
+                event.keyword,
+                decoded.fields()
+            );
+        }
+        None => {
+            // Nothing says what the values are: the event is a manifest
+            // provider's, whose names live in a manifest outside the
+            // program, or its own description does not read. Either way
+            // the size is what a line can honestly say, and which of
+            // the two it is decides whether anyone should look.
+            let why = if event.flags & RECORD_NO_META != 0 {
+                "no field metadata: a manifest provider's event"
+            } else {
+                "its field metadata does not read"
+            };
+            info!(
+                "etw: {} {} level {} keyword {:#x}, {} bytes ({why})",
+                event.process,
+                Guid(event.guid),
+                event.level,
+                event.keyword,
+                event.bytes
+            );
+        }
+    }
     left > 0
 }
 
