@@ -6267,7 +6267,7 @@ on the seams item PT prepared: native ARM64 Windows programs
   (14: the handover, idle, busy and blocked programs, versions with
   the `handover_next` build for aarch64, sockets).
 - The event stream on aarch64: a host file written through semihosting
-  (`events_file=`); session_test runs there.
+  the host names per run (`events_host`); session_test runs there.
 - CI runs the aarch64 scenarios in its boot shards, under QEMU's
   emulation (TCG on GitHub's x86-64 runners).
 
