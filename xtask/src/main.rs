@@ -10979,6 +10979,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("etwfields_test", "ntdll.dll", "Windows/System32"),
     ("etwfields_test", "kernel32.dll", "Windows/System32"),
     ("etwfields_test", "advapi32.dll", "Windows/System32"),
+    ("etwraw_test", "ntdll.dll", "Windows/System32"),
+    ("etwraw_test", "kernel32.dll", "Windows/System32"),
+    ("etwraw_test", "advapi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11400,6 +11403,7 @@ const USER_PROGRAMS: &[&str] = &[
     "etw_test",
     "etwarm_test",
     "etwfields_test",
+    "etwraw_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -16990,6 +16994,46 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // A manifest provider's events, which carry no field names of
+        // their own: what a program nobody listens to sees, which is
+        // every write accepted and gone (user/etwraw_test).
+        name: "etwraw_test",
+        cmdline: "qemu_exit run=etwraw_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etwraw_test: 7a1b4e6c-2d3f-4a58-9b0c-1e2f3a4b5c6d: no session",
+            "etwraw_test: wrote 56 18 8 510 bytes",
+            "etwraw_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same four events kept by a session, where nothing in them
+        // says what their fields are: every line says how many bytes
+        // the program built and what text those bytes carried. This is
+        // the shape every event Word's startup writes has, the 494-byte
+        // error before it gives up among them (ROADMAP OF), so it is
+        // the only reading there is of them. A string longer than a
+        // line gives one ends in dots inside its quotes, strings past
+        // the sixth are counted, and a payload of numbers is said to
+        // hold no string at all -- which is a finding and not a
+        // failure to read.
+        name: "etwraw_armed",
+        cmdline: "qemu_exit run=etwraw_test.exe etw=*",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for every provider, level 5 and every keyword",
+            "etwraw_test: 7a1b4e6c-2d3f-4a58-9b0c-1e2f3a4b5c6d: calls=1 enabled=1 level=5 any=0xffffffffffffffff all=0x0",
+            "etw: etwraw_test.exe 7a1b4e6c-2d3f-4a58-9b0c-1e2f3a4b5c6d level 2 keyword 0x1, 56 bytes (no field metadata: a manifest provider's event), strings: \"a manifest event's message\"",
+            "etw: etwraw_test.exe 7a1b4e6c-2d3f-4a58-9b0c-1e2f3a4b5c6d level 4 keyword 0x2, 18 bytes (no field metadata: a manifest provider's event), strings: \"eight bit text\"",
+            "etw: etwraw_test.exe 7a1b4e6c-2d3f-4a58-9b0c-1e2f3a4b5c6d level 5 keyword 0x4, 8 bytes (no field metadata: a manifest provider's event), no string in its bytes",
+            "etw: etwraw_test.exe 7a1b4e6c-2d3f-4a58-9b0c-1e2f3a4b5c6d level 4 keyword 0x8, 510 bytes (no field metadata: a manifest provider's event), strings: \"abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij...\", \"piece-01\", \"piece-02\", \"piece-03\", \"piece-04\", \"piece-05\" and 1 more",
+            "etwraw_test: ok",
+            "etw: 4 events written to the session, from 1 provider (etw=)",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Windows.UI.ViewManagement.UISettings: its factory and objects,
         // weak references, the theme's and accent's colours, the classic
         // elements' system colours (user/uisettings_test).
@@ -21735,6 +21779,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("etw_from", "etwarm_test"),
     ("etw_from_elsewhere", "etwarm_test"),
     ("etwfields_armed", "etwfields_test"),
+    ("etwraw_armed", "etwraw_test"),
     ("etw_armed_all", "etwarm_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),

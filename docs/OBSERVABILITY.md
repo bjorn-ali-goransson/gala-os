@@ -1900,9 +1900,23 @@ etw: 1 event written to the session, from 1 provider (etw=)
 - An event with no TraceLogging metadata is a manifest provider's,
   whose field names live in a manifest outside the program and are in
   no part of the event. Its line is the provider's id, the level and
-  keyword, and the payload's size, with which of the two it was
+  keyword, the payload's size, which of the two it was
   (`no field metadata: a manifest provider's event`, or `its field
-  metadata does not read`) -- so a reader knows whether to look.
+  metadata does not read`) -- so a reader knows whether to look -- and
+  the text those bytes carried (`kernel/src/nt/etw/strings.rs`):
+  `strings: "a manifest event's message"`, six of them at most, each
+  160 characters at most with `...` inside its quotes where it was
+  longer, and `and N more` for the ones the line left out. A string is
+  a run of four or more printable characters with a letter or a digit
+  in it, UTF-16LE tried before 8-bit so that a program's message is
+  not read as its first letter; a quote or a backslash inside one is
+  escaped. `no string in its bytes` is a finding and not a failure to
+  read: the payload was numbers, so no message was in it. Where the
+  record was cut to fit, the line says `strings in the bytes that
+  fit`, because the rest of the event never arrived. This is the whole
+  reading of such an event -- which field a number belonged to is what
+  the manifest would be for, and nothing here guesses at it -- and it
+  is what every event a Word startup writes comes down to.
 - The closing line counts what the session got, and says so when the
   budget ended the session before the program ended: a run must not read
   as a program that stopped writing when it was the session that stopped

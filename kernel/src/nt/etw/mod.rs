@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sync::IrqMutex;
 
 pub mod sha1;
+mod strings;
 pub mod tracelogging;
 
 /// The longest provider name an `etw=` value may name. TraceLogging's
@@ -597,12 +598,13 @@ pub fn record(event: &Written<'_>) -> bool {
                 "its field metadata does not read"
             };
             info!(
-                "etw: {} {} level {} keyword {:#x}, {} bytes ({why})",
+                "etw: {} {} level {} keyword {:#x}, {} bytes ({why}), {}",
                 event.process,
                 Guid(event.guid),
                 event.level,
                 event.keyword,
-                event.bytes
+                event.bytes,
+                strings::In::new(event.data, event.flags & RECORD_CUT != 0)
             );
         }
     }
