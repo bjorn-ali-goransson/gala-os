@@ -1057,13 +1057,20 @@ a new line, since QEMU's end can cut the guest's last one off):
    write-back every N ms: syncs <cause> K, ...; D pages dirty now, at
    most M (limit L); T calls throttled`), each Linux thread (`lx: pid P thread
    T (core C): mask .. pending .. process pending .. blocked|running`),
-   each epoll set's entries (`lx: pid P epoll fd N: fd ..`), each
+   each epoll set's entries (`lx: pid P epoll fd N: fd F events E
+   data D seen S disabled B; now ready R count C`: an entry ready now
+   with a count other than `seen`, in a set a thread waits on, is a
+   wakeup that was lost; then `lx: pid P epoll fd N: W waiting on the
+   set`), each unix fd (`lx: pid P fd N: unix ...` as below: an X or
+   Wayland client's connection, not only named sockets), each
    eventfd (`lx: pid P fd N: eventfd (count C[, semaphore]), W
    waiting`) and every
    futex waiter (`lx: futex waiter: pid P address A bitset B thread
    T`), every named AF_UNIX socket (`dump: unix: stream by pid P,
    node N|abstract NAME, listening (K of B waiting)|connected (side S:
-   Q queued, shutdown F, peer open|gone), W waiting`), the Wayland
+   Q queued (B bytes), A arrivals, shutdown F; peer open|gone: Q
+   queued (B bytes), A arrivals), W waiting`: bytes queued to a side
+   whose reader waits is a wakeup it missed), the Wayland
    server's clients and their objects (`statedump: wayland on PATH: N
    clients; a round would find work: true|false`: true while its thread
    waits is a wakeup it missed, false with a client blocked reading is a

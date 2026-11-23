@@ -8471,30 +8471,22 @@ Each entry: what, why it matters, the structural fix, the owning item.
   wakeup. The state dump now lists each Linux process's children
   (running, zombies) and its wait4/waitid waiters with the pid each
   wants, so the next stall names what the threads waited for.
-- **`arm_lx_xdesktop` timed out once on CI** (its siblings
-  `arm_lx_gtk`, 27 s, and `arm_lx_xterm`, 29.8 s, passed in the same
-  job, as did the longer `arm_lx_inkscape` and `arm_lx_gimp_batch`):
-  after the desktop showed its window (`desktop: shown window
-  'Xwayland on :1'`), a shell forked a child that ran `/usr/bin/xkbcomp`
-  to exit 0 and did it again, three times over, and then the watchdog
-  said `thread 9 (sh) has been in the kernel for 20 s without blocking
-  or reaching user mode (CPU 1, rip 0xffffffff8030b608)`. The flight
-  recorder's last records are that process's `read` calls, one every
-  3 ms or so, to the end of the run. **That watchdog line was the
-  instrument's own fault**: the Linux dispatcher credited no progress
-  when a call ended, so a thread whose work is nearly all kernel time
-  -- and a `read` every 3 ms is a call ending every 3 ms -- was
-  reported as stuck, because the only other thing that counted was a
-  timer tick landing in user mode. A finished Linux call is progress
-  now (OBSERVABILITY "Hang watchdog"), and a watchdog report fails its
-  run, so a report here would be real. What is still unexplained is the
-  timeout itself, 300 s with both CPUs idle: the host was loaded (load
-  8.11 on 4 CPUs, 40.4 s of the run waiting for a host CPU), and what
-  the `read` answers in that loop -- a pipe whose writer is gone,
-  answering 0 forever -- is where to start.
+- **`arm_lx_xdesktop` hangs on CI** (3 of its runs on one day, none
+  of 8 locally): the X root shows with no twm frame and no xterm; xterm
+  has written a 16-byte request and waits in `ppoll` for the reply,
+  while Xwayland's `epoll_pwait`, both clients' connections in its set
+  (`EPOLLIN|EPOLLET`), never returns until the 300 s limit. Reading
+  `unix::Socket::send` and its wake, epoll's `collect` and
+  `Interest::report`, `poll::wait` and the scheduler's
+  `prepare_wait`/`wake` found no window for a lost wakeup. The state
+  dump now shows every connected unix fd (records and bytes queued each
+  way, the arrivals count) and each epoll entry's readiness and count
+  now beside its `seen`, so the next hang tells a lost wakeup (bytes
+  queued, the count past `seen`) from a request that never reached the
+  socket.
 - **`arm_lx_gimp` failed its screen check once on CI** (shard 5; not a
-  timeout, and the same false watchdog report as `arm_lx_xdesktop`
-  above): the line named `thread 4294967304 (sh)`, which is
+  timeout, and a watchdog report from before a finished Linux call
+  counted as progress, OBSERVABILITY "Hang watchdog"): the line named `thread 4294967304 (sh)`, which is
   `0x1_0000_0008`, scheduler slot 8 generation 1, which the thread dump
   gives as `pid 20 tid 24 (gimp-3.2)` -- the scheduler's name is the
   shell's because an `execve` does not rename the thread. The flight

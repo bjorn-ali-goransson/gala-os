@@ -13520,7 +13520,10 @@ names and connections as a Linux program's.
   for such cycles).
 - **Observability**: `unix::dump` in the state dump (`dump: unix:` a
   line per named socket: kind, creator, name, phase, queued, shutdown,
-  peer, waiters); the personality's events (`lx unix`, `lx unix
+  peer, waiters); every Linux process's unix fds, connected ones
+  included (`lx: pid P fd N: unix ...`), a connection showing both
+  directions (records and bytes queued, the arrivals count epoll's
+  EPOLLET compares); the personality's events (`lx unix`, `lx unix
   rights`).
 6. **`net` free of `nt`**: `kernel/src/net/` reaches threads, waits and
    time through `crate::runtime` (`kernel/src/runtime.rs`): the kernel's
