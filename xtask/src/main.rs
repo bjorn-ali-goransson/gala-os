@@ -14467,6 +14467,11 @@ fn is_aarch64_scenario(name: &str) -> bool {
 /// AVX and AVX-512's; aarch64's FP/SIMD).
 const TWIN_MACHINE_FACTS: &[(&str, &str)] = &[("extended state 0xe7", "extended state 0x1")];
 
+/// Expected lines that are x86-64's machine alone, which a twin does not
+/// expect: the event stream through the virtio console (aarch64 writes
+/// it by semihosting, ARCHITECTURE "The event stream's transport").
+const TWIN_X64_ONLY: &[&str] = &["events: the stream goes through the virtio console at "];
+
 /// Every scenario: BASE_SCENARIOS and, for each ARM64_TWINS entry, its
 /// twin `arm_<name>` (its expected lines through TWIN_MACHINE_FACTS).
 fn scenarios() -> &'static [Scenario] {
@@ -14482,6 +14487,7 @@ fn scenarios() -> &'static [Scenario] {
             let expect: Vec<&'static str> = base
                 .expect
                 .iter()
+                .filter(|line| !TWIN_X64_ONLY.contains(line))
                 .map(|&line| {
                     TWIN_MACHINE_FACTS.iter().fold(line, |line, (x64, arm64)| {
                         if line.contains(x64) {
@@ -34227,6 +34233,17 @@ mod health {
     /// A twin does its x64 scenario's work on the slower machine
     /// (aarch64 under TCG), so it cannot have less run time than the
     /// scenario that needed more than the default.
+    #[test]
+    fn a_twin_drops_the_x64_only_lines() {
+        let twin = scenarios().iter().find(|s| s.name == "arm_import_cost").unwrap();
+        let base = scenarios().iter().find(|s| s.name == "import_cost").unwrap();
+        for line in TWIN_X64_ONLY {
+            assert!(base.expect.contains(line), "{line}");
+            assert!(!twin.expect.contains(line), "{line}");
+        }
+        assert_eq!(twin.expect.len(), base.expect.len() - 1);
+    }
+
     #[test]
     fn an_arm64_twin_gets_its_x64_scenario_s_run_time() {
         let twins: Vec<&str> =
