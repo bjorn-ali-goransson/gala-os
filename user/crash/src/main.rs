@@ -85,6 +85,11 @@
 //! continuing: the retried store then succeeds, which is what proves
 //! execution really was continued rather than the process merely
 //! surviving.
+//!
+//! With the argument `panic` (scenario `crash_panic`) it indexes past the
+//! end of an array: Rust panics, and ntrt's handler must print where and
+//! why (`crash: panic at <file>:<line>:<column>: <message>`) and end the
+//! process with 0xC0000409.
 
 #![no_std]
 #![no_main]
@@ -619,6 +624,15 @@ fn raise() -> u32 {
     1
 }
 
+/// Indexes past the end of an array, with an index the compiler cannot
+/// see: Rust's bounds check panics, and ntrt's panic handler must print
+/// the line and the message before ending the process with 0xC0000409.
+fn index_past_end() -> u32 {
+    ntrt::print("crash: indexing past the end of an array\r\n");
+    let three = [1u32, 2, 3];
+    three[core::hint::black_box(three.len())]
+}
+
 /// Raises `code` with no parameters at all, as Office's 0xE0000002 is
 /// raised: all a report has to go on is then the calls that led to it.
 /// RtlRaiseException fills in the address and dispatches; nothing takes
@@ -698,6 +712,9 @@ fn apc() -> u32 {
 }
 
 fn main() -> u32 {
+    if arg_is(*b"panic") {
+        return index_past_end();
+    }
     if arg_is(*b"unhandled_both") {
         return unhandled_both();
     }

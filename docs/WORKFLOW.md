@@ -322,6 +322,12 @@ its debugger, because Windows Error Reporting's event 1000 is never
 written for these -- the runner sets `SEM_NOGPFAULTERRORBOX`, and a
 process with that error mode does not report its fault to WER at all.
 Map the offset to a function with the build's PDB of that module. A
+test program's exit 0xc0000409 with no `fault` is usually a Rust panic
+in the program itself (an index out of range, an `unwrap` on `None`):
+ntrt's handler prints `<program>: panic at <file>:<line>:<col>:
+<message>` just before, so the line is in that program's output
+(windows-output.txt in CI's windows-report artifact; scenario
+`crash_panic` keeps it). A
 program whose non-zero exit is the result rather than a failure (`crash`,
 `go_exit`, `busybox`, and gala's own `cmd`, `conhost`, `gala` and `wsl`, which
 real Windows cannot load) carries an `expected` field beside `exit`. `cargo xtask
