@@ -13469,8 +13469,11 @@ names and connections as a Linux program's.
 - **A connection** (`Conn`) holds a queue toward each side (records:
   bytes, the rights that came with them, the quota charge for them),
   each side's shutdown flags as Linux keeps them (RCV, SEND; a stream
-  or seqpacket side that closes sets both on its peer) and arrival
-  counters (epoll's EPOLLET). It references its sockets' waiters, not
+  or seqpacket side that closes sets both on its peer) and two
+  counters per side for epoll's EPOLLET: arrivals (bytes, a message, a
+  shutdown) and room (each read by the peer that leaves the side
+  writable, its EPOLLOUT edge, which Linux raises from the reader's
+  read); `Socket::changes` is their sum. It references its sockets' waiters, not
   the sockets, so nothing cycles. connect makes the listener's side at
   once and queues it for accept (backlog + 1 may wait, as Linux; then
   `Error::Full` with the listener's waiters to block on).
@@ -14198,8 +14201,9 @@ The running parts (milestone 1; `lxrun=`):
   poll's (`poll::readiness`), masked by the events plus ERR and HUP;
   level-triggered entries report while ready, EPOLLET ones once after
   ADD/MOD and then only after their object moved (`poll::events_count`:
-  a pipe end's change counts, a socket's arrivals, `socket::arrivals`:
-  bytes or connections taken plus queued), EPOLLONESHOT ones once until
+  a pipe end's change counts, a unix socket's arrivals and room,
+  `unix::Socket::changes`, an inet socket's arrivals, `socket::arrivals`:
+  bytes or connections taken plus queued, with no EPOLLOUT edges yet), EPOLLONESHOT ones once until
   MOD. A closed fd whose description lives on (a dup) stays in the set;
   the description's last close removes it from every set
   (`Fd::watchers`, `Epoll::forget`); closing the epoll fd empties its

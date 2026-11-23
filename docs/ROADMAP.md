@@ -8485,7 +8485,16 @@ Each entry: what, why it matters, the structural fix, the owning item.
   way, the arrivals count) and each epoll entry's readiness and count
   now beside its `seen`, so the next hang tells a lost wakeup (bytes
   queued, the count past `seen`) from a request that never reached the
-  socket.
+  socket. A unix socket's EPOLLOUT edge was missing (a peer's read that
+  left room moved no count, so an EPOLLET writer waiting for room slept
+  on; `room` now counts it, epoll_test "EPOLLET|EPOLLOUT on a unix
+  stream socket"), but the hung entries asked for EPOLLIN only, so that
+  is not this hang's explanation.
+- **An inet socket has no EPOLLOUT edges** (open): `socket::arrivals`
+  counts bytes and connections received, not send-buffer room coming
+  back, so an EPOLLET writer on a full TCP socket is not woken again;
+  the unix socket's `room` count is the shape of the fix, with an
+  epoll_test case on a loopback TCP pair first.
 - **`arm_lx_gimp` failed its screen check once on CI** (shard 5; not a
   timeout, and a watchdog report from before a finished Linux call
   counted as progress, OBSERVABILITY "Hang watchdog"): the line named `thread 4294967304 (sh)`, which is

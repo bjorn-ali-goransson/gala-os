@@ -238,6 +238,10 @@ struct ConnState {
     open: [bool; 2],
     /// Grows with each thing that arrives for side i (epoll's EPOLLET).
     arrivals: [u64; 2],
+    /// Grows with each read by side i's peer that leaves side i writable:
+    /// its EPOLLOUT edges, which nothing arriving for it marks (Linux
+    /// wakes the writer with EPOLLOUT from the reader's read).
+    room: [u64; 2],
 }
 
 /// A connection (or a pair's link): no references to its sockets, only to
@@ -258,6 +262,7 @@ impl Conn {
                 shutdown: [0; 2],
                 open: [true; 2],
                 arrivals: [0; 2],
+                room: [0; 2],
             }),
             waiters: [a.waiters.clone(), b.waiters.clone()],
         })
@@ -689,7 +694,7 @@ impl Socket {
                 };
             }
             let st = &mut *st;
-            if self.kind == Kind::Stream {
+            let got = if self.kind == Kind::Stream {
                 let mut n = 0;
                 let mut i = 0;
                 while n < out.len() {
@@ -727,7 +732,13 @@ impl Socket {
                     let _ = gone.try_push(r);
                 }
                 (k, full)
+            };
+            // An edge for the writer (`room`) when what it sent no longer
+            // keeps it from writing (`readiness`' writable).
+            if !peek && st.queued[side] * 4 <= CAPACITY {
+                st.room[1 - side] += 1;
             }
+            got
         };
         drop(gone);
         if !peek {
@@ -796,9 +807,9 @@ impl Socket {
     }
 
     /// A count that grows with each arrival (bytes, a message, a
-    /// connection, a shutdown): epoll's EPOLLET reports again only after
-    /// it moved.
-    pub fn arrivals(&self) -> u64 {
+    /// connection, a shutdown) and each read by the peer that leaves room
+    /// to write: epoll's EPOLLET reports again only after it moved.
+    pub fn changes(&self) -> u64 {
         let (conn, side) = {
             let st = self.state.lock();
             match &st.phase {
@@ -807,7 +818,8 @@ impl Socket {
                 Phase::Connected { conn, side } => (conn.clone(), *side),
             }
         };
-        conn.state.lock().arrivals[side]
+        let st = conn.state.lock();
+        st.arrivals[side] + st.room[side]
     }
 
     /// The last reference of its personality went: its name is free
@@ -865,11 +877,12 @@ impl Socket {
                 let peer = 1 - side;
                 write!(
                     out,
-                    ", connected (side {side}: {} queued ({} bytes), {} arrivals, shutdown {}; \
+                    ", connected (side {side}: {} queued ({} bytes), {} arrivals, {} room, shutdown {}; \
                      peer {}: {} queued ({} bytes), {} arrivals)",
                     c.queue[*side].len(),
                     c.queued[*side],
                     c.arrivals[*side],
+                    c.room[*side],
                     c.shutdown[*side],
                     if c.open[peer] { "open" } else { "gone" },
                     c.queue[peer].len(),
@@ -1020,6 +1033,11 @@ mod tests {
             mine.contains(&alloc::format!("peer open: 1 queued ({size} bytes), 1 arrivals")),
             "{mine}"
         );
+        // b's read leaves a room to write: a's EPOLLOUT edge, its count's
+        // other half beside the arrivals.
+        recv(&b, 16).unwrap();
+        let mine = alloc::format!("{}", described(&a));
+        assert!(mine.contains("side 0: 0 queued (0 bytes), 0 arrivals, 1 room"), "{mine}");
     }
 
     #[test]
@@ -1105,6 +1123,29 @@ mod tests {
             m.send(&alloc::vec![0; CAPACITY], &mut Vec::new(), None),
             Err(Error::TooLong)
         ));
+    }
+
+    #[test]
+    fn the_peers_read_that_leaves_room_is_a_change_for_the_writer() {
+        // The writer's EPOLLOUT edge (epoll_test's "writable again"): its
+        // count moves with the read that makes it writable, not before.
+        let (a, b) = Socket::pair(Kind::Stream, ME).unwrap();
+        let chunk = alloc::vec![7u8; 4096];
+        while a.send(&chunk, &mut Vec::new(), None).is_ok() {}
+        assert!(!a.readiness().writable);
+        let full = a.changes();
+        let mut peeked = [0u8; 16];
+        b.recv(&mut peeked, true).unwrap();
+        assert_eq!(a.changes(), full, "a peek leaves no room");
+        while !a.readiness().writable {
+            assert_eq!(a.changes(), full, "still not writable");
+            recv(&b, 4096).unwrap();
+        }
+        assert!(a.changes() > full);
+        // Reading is no change for the reader itself.
+        let before = b.changes();
+        recv(&b, 4096).unwrap();
+        assert_eq!(b.changes(), before);
     }
 
     #[test]
