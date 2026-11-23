@@ -7577,16 +7577,18 @@ among the slowest hand-offs.
    thread, the address as module+offset and what was read or written,
    and a ledger row beside it (`nt::crashreport::continued`, scenarios
    `crash_continued` and `crash_continued_other` and their ARM64 twins,
-   OBSERVABILITY "Crash reports"). A process keeps one note, so the
-   withdrawal takes it only when it is the withdrawing thread's -- for
-   an exception raised in user mode that note is the only description
-   there is, and taking another thread's would lose the crash report
-   wholesale. What is left is the slot itself: two unhandled exceptions
-   in a process and the later note writes over the earlier. The fix is
-   a note per thread, boxed when the thread first takes an exception
-   (a note is large and most threads never take one), with the
-   process's slot kept for the kernel's own context; then a withdrawal
-   needs no guard, because it has only its own note to reach.
+   OBSERVABILITY "Crash reports"). A thread keeps its own notes, made
+   the first time it takes an exception (a note is large and most
+   threads never take one), so a withdrawal has only its own note to
+   reach and two threads' exceptions do not write over one another: the
+   report is written from the notes of the thread whose exception ends
+   the process, moved into the process as it is ended, and another
+   thread's unhandled exception gets a line saying the report is not
+   written from it (scenario `crash_unhandled_both`). The process's own
+   slots are what is left for the kernel's own context and for a thread
+   whose notes could not be allocated, where one slot serves every
+   thread and a second exception does write over the first -- which it
+   says.
 
    What this is for: every program whose compatibility is worked on
    next runs into the same wall Word did, and the answer should not be

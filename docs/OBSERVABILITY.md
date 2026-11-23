@@ -1129,18 +1129,37 @@ failed and kept no note -- so an exception that went on to end the
 process was described by nothing at all. The CONTEXT beside it is one
 size and is read whole.
 
-**A process keeps one note**, so the withdrawal takes it only when the
-note is the withdrawing thread's. Another thread's note in the slot is
-an unhandled exception still on its way to ending the process, and when
-that one was raised in user mode (`RtlRaiseException`: the kernel saw no
-fault and has nothing of its own to describe it with) the note is the
-only account of it there is -- a withdrawal that took it would lose the
-whole crash report. The line then says whose note it left instead. What
-is left is the slot: two unhandled exceptions in one process and the
-later note writes over the earlier, so the report describes the second
-(ROADMAP: a note per thread). Scenarios `crash`, `crash_dispatched`,
-`crash_filtered`, `crash_continued` and `crash_continued_other`, each
-with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
+**A thread keeps its own notes**, made the first time it takes an
+exception (a note is large and most threads never take one), so two
+threads' exceptions do not write over one another. The crash report is
+written from the notes of the thread whose exception ends the process --
+the thread that set its exit status -- which `process::terminate` moves
+into the process there and then (`nt::crashreport::promote`): the last
+moment a note can be had from its thread, because the report itself is
+written once the process's last thread has exited and no thread is left
+to ask. A withdrawal reaches only the withdrawing thread's own note.
+
+Another thread's unhandled exception, still on its way to ending the
+process, stays where it is and gets a line of its own:
+
+```
+exception note: crash.exe (pid 4) thread 12 took an unhandled 0xe0000045 (exception) too, and the crash report is not written from it: the process ends with 0xe0000044 (exception), which thread 8 took
+```
+
+so an exception that happened and ended nothing is still named
+somewhere. The kernel's fault notes are not named that way: one is kept
+for every fault, including the faults a handler goes on to take, so a
+fault note left behind says nothing by itself.
+
+The process's own slots remain, for a note no thread can keep: the
+kernel's own context, and a thread whose notes could not be allocated --
+which says so (`there was no room for the thread's notes`), because one
+slot serves every thread of the process and the next exception there
+does write over this one. That is also the only case left where a
+withdrawal can meet a note which is not its own, and it leaves it, for
+the crash report. Scenarios `crash`, `crash_dispatched`,
+`crash_filtered`, `crash_continued`, `crash_continued_other` and
+`crash_unhandled_both`, each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
 eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`

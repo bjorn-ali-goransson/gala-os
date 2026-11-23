@@ -587,7 +587,7 @@ fn unhandled_note(call: &mut Call<'_>) -> NtStatus {
         }
         note.seh_end |= frame == u32::MAX;
     }
-    *call.process.unhandled_exception.lock() = Some(note);
+    crate::nt::crashreport::keep_unhandled(&call.process, note);
     NtStatus::SUCCESS
 }
 
@@ -608,7 +608,7 @@ pub(in crate::nt) fn keep_note(
     let mut regs = frame.user_regs();
     regs.set_ip(rip);
     let note = crate::nt::crashreport::Note::new(process, status, access, regs, is_compat(frame));
-    *process.last_exception.lock() = Some(note);
+    crate::nt::crashreport::keep_fault(process, note);
 }
 
 /// The dispatcher frame on the user stack: the CONTEXT at the new rsp,

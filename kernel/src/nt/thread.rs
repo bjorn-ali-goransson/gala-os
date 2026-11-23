@@ -9,6 +9,7 @@ use super::platform;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use super::crashreport::{Note, Notes};
 use super::layout::{self, teb};
 use super::object::{KObject, ObjectBody, ObjectRef};
 use super::platform::PAGE_SIZE;
@@ -82,6 +83,17 @@ pub struct NtThread {
     apc_mark: IrqMutex<Option<UserApc>>,
     /// Set while the thread is in an alertable wait (an APC wakes it).
     alertable: core::sync::atomic::AtomicBool,
+    /// The exceptions it took, kept for the crash report of its process
+    /// (`crashreport::Notes`): made the first time it takes one, because
+    /// a note is large and most threads never take any. The process has
+    /// a slot of its own as well, for the kernel's own context and for a
+    /// thread these could not be made for; `process::terminate` moves
+    /// the notes of the thread whose exception ends the process into it,
+    /// because the report is written once the last thread has exited
+    /// (`process::finish`) and no thread is there to ask by then. Not
+    /// carried across a kernel handover: a note is the kernel's own
+    /// memory, and the kernel it was made in is gone.
+    notes: IrqMutex<Option<alloc::boxed::Box<super::crashreport::Notes>>>,
     /// Mutants it owns (abandoned if it exits).
     owned_mutants: IrqMutex<Vec<ObjectRef>>,
     /// While suspended on its way to user mode: the registers it will
@@ -828,6 +840,7 @@ fn create_inner(
         exit_status: IrqMutex::new(None),
         suspend_count: IrqMutex::named("thread.suspend_count", u32::from(suspended)),
         suspend_mark: IrqMutex::named("thread.suspend_mark", None),
+        notes: IrqMutex::named("thread.notes", None),
         suspends: AtomicU32::new(0),
         terminate_request: IrqMutex::new(None),
         ended_by_other: core::sync::atomic::AtomicBool::new(false),
@@ -1170,6 +1183,99 @@ pub fn take_user_apc(special_only: bool) -> Option<UserApc> {
     Some(apc)
 }
 
+/// What became of a note a thread was given to keep
+/// (`crashreport::keep_fault`, `keep_unhandled`).
+pub enum Kept {
+    /// The thread keeps it.
+    Thread,
+    /// There is no NT thread to keep it for: the kernel's own context.
+    NoThread,
+    /// Its notes could not be made (no room).
+    NoRoom,
+}
+
+/// The notes of thread `object`, for anything but the running thread.
+fn notes_of(object: &ObjectRef) -> Option<&IrqMutex<Option<alloc::boxed::Box<Notes>>>> {
+    match &object.body {
+        ObjectBody::Thread(t) => Some(&t.notes),
+        _ => None,
+    }
+}
+
+/// The running thread's notes, made if it has none yet.
+fn with_notes<R>(f: impl FnOnce(&mut Notes) -> R) -> Result<R, Kept> {
+    let Some(object) = current() else {
+        return Err(Kept::NoThread);
+    };
+    let thread = as_thread(&object);
+    // Made before the lock is taken, so the heap is never reached with
+    // it held; a thread makes its notes once and keeps them.
+    let fresh = if thread.notes.lock().is_none() {
+        match crate::mm::heap::try_box(Notes::default()) {
+            Ok(notes) => Some(notes),
+            Err(_) => return Err(Kept::NoRoom),
+        }
+    } else {
+        None
+    };
+    let mut slot = thread.notes.lock();
+    if slot.is_none() {
+        *slot = Some(fresh.ok_or(Kept::NoRoom)?);
+    }
+    // Just made, or there already: a thread's notes are never taken away
+    // from it, only emptied (`take_notes`).
+    Ok(f(slot.as_mut().ok_or(Kept::NoRoom)?))
+}
+
+/// Keeps the kernel's own account of the fault the running thread took.
+pub fn keep_fault(note: Note) -> Kept {
+    match with_notes(|notes| notes.fault = Some(note)) {
+        Ok(()) => Kept::Thread,
+        Err(why) => why,
+    }
+}
+
+/// Keeps the report ntdll made of an exception no handler took, for the
+/// thread that took it.
+pub fn keep_unhandled(note: Note) -> Kept {
+    match with_notes(|notes| notes.unhandled = Some(note)) {
+        Ok(()) => Kept::Thread,
+        Err(why) => why,
+    }
+}
+
+/// Takes the running thread's report of an unhandled exception out of
+/// its notes: its top-level filter continued past it, so no crash report
+/// will be written from it (`crashreport::continued`).
+pub fn take_unhandled() -> Option<Note> {
+    let object = current()?;
+    as_thread(&object).notes.lock().as_mut()?.unhandled.take()
+}
+
+/// Empties the notes of thread `object` and answers what was in them:
+/// the exception it took is what ends its process, so they move into the
+/// process while there is still a thread to take them from
+/// (`crashreport::promote`). The notes themselves stay with the thread,
+/// so an exception it takes on its way out is still its own and writes
+/// over nothing.
+pub fn take_notes(object: &ObjectRef) -> Option<(Option<Note>, Option<Note>)> {
+    let mut slot = notes_of(object)?.lock();
+    let notes = slot.as_mut()?;
+    Some((notes.fault.take(), notes.unhandled.take()))
+}
+
+/// The report ntdll made for thread `object` and nobody withdrew,
+/// without taking it: the thread and the exception no handler took.
+/// What a line about a note no crash report is written from says. The
+/// kernel's fault notes are not asked for: one is kept for every fault,
+/// including those a handler goes on to take, so a fault note left
+/// behind says nothing.
+pub fn unhandled_left(object: &ObjectRef) -> Option<(u64, NtStatus)> {
+    let notes = notes_of(object)?.lock();
+    let note = notes.as_ref()?.unhandled?;
+    Some((note.tid, note.status))
+}
+
 /// The last user APC the current thread was given, with who queued it:
 /// what a crash report names the thread that decided an exception the
 /// APC's routine raised. A note takes it as the exception is recorded,
@@ -1487,6 +1593,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         // A handover carries the count, not who asked: a thread suspended
         // across it says so (`dump`).
         suspend_mark: IrqMutex::named("thread.suspend_mark", None),
+        notes: IrqMutex::named("thread.notes", None),
         suspends: AtomicU32::new(0),
         terminate_request: IrqMutex::new(None),
         ended_by_other: core::sync::atomic::AtomicBool::new(false),
