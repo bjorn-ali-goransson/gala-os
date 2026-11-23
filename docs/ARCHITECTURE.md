@@ -391,9 +391,13 @@ faults, its exit).
   QEMU with `-semihosting-config enable=on`), with x86-64's statuses (33
   success, 35 failure). There is no ISA bus: the debug console (the event
   stream) is a host file written through semihosting too (SYS_OPEN,
-  SYS_WRITE; `debugcon`): the one the command line names
-  (`events_file=<host path>`, which xtask gives every aarch64 image: its
-  `<image>.events.jsonl`), opened at the first write, nothing without it;
+  SYS_WRITE; `debugcon`): with `events_host` on the command line (which
+  xtask gives every aarch64 test image) the kernel asks the host for the
+  file's name (SYS_GET_CMDLINE: the run's `-semihosting-config
+  ...,arg=<path>`, its `<image>.events.jsonl`), says it on the serial log
+  (`events: file <path>`), and opens it at the first write; nothing
+  without the flag. The image carries no path, so each copy of an image
+  (an `XTASK_REPEAT` boot's) writes its own file;
   no phase port (`bootphase` marks are no-ops). No PS/2 controller on
   `virt`: the keyboard and mouse are virtio-input devices (xtask gives
   every aarch64 machine `virtio-keyboard-pci` and `virtio-mouse-pci`;
@@ -6499,7 +6503,8 @@ holds a line until its newline and hands it to the virtio console
 (`virtio_console.rs`) when the machine has one, which every boot
 scenario's QEMU does; otherwise, and for the lines before the device
 starts, it writes the line to port 0xe9. aarch64 writes the stream to a
-file by semihosting (`events_file=`) and has no virtio console.
+file by semihosting (the file the host names, `events_host`) and has no
+virtio console.
 
 - **Why**: under KVM every byte written to an I/O port leaves the
   guest, `rep outsb` included, about 12 us each, so a line of 200 bytes

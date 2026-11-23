@@ -4848,13 +4848,13 @@ fn make_iso_unchecked(
         copy(&limine.join(file), &boot.join("limine").join(file))?;
     }
     // aarch64's event stream: a host file the kernel writes through
-    // semihosting (`arch::aarch64::debugcon`), the one x86-64's debugcon
-    // device writes (`<image>.events.jsonl`, beside the image).
-    // Test images only: a downloadable one (`iso`, gala-*) names no file
-    // of the machine that made it.
+    // semihosting (`arch::aarch64::debugcon`). The image says only that
+    // a semihosting host takes it (`events_host`); the run names the file
+    // (`semihosting_config`), so each copy of the image writes its own.
+    // Test images only: a downloadable one (`iso`, gala-*) may boot where
+    // no semihosting host answers the trap.
     let cmdline = if aarch64_image(name) && !name.starts_with("gala-") {
-        let events = out.join(format!("{name}.events.jsonl"));
-        format!("{cmdline} events_file={}", events.display())
+        format!("{cmdline} events_host")
     } else {
         cmdline.to_string()
     };
@@ -5549,6 +5549,29 @@ fn find_aavmf() -> Result<Firmware> {
         })
 }
 
+/// QEMU's semihosting on aarch64: the kernel's exit, and its event
+/// stream's file, which the run names as the semihosting command line
+/// (the kernel asks for it, `arch::aarch64::debugcon`): this image's
+/// `<image>.events.jsonl`, where x86-64's device writes, so each copy of
+/// an image (`XTASK_REPEAT`) has its own. QEMU's option syntax doubles a
+/// comma.
+fn semihosting_config(iso: &Path) -> String {
+    let events = iso.with_extension("events.jsonl");
+    format!("enable=on,target=native,arg={}", events.display().to_string().replace(',', ",,"))
+}
+
+#[test]
+fn each_copy_of_an_aarch64_image_names_its_own_event_file() {
+    let a = semihosting_config(Path::new("/t/debug/test-arm_lx_x.r0.iso"));
+    let b = semihosting_config(Path::new("/t/debug/test-arm_lx_x.r1.iso"));
+    assert_eq!(a, "enable=on,target=native,arg=/t/debug/test-arm_lx_x.r0.events.jsonl");
+    assert_ne!(a, b);
+    assert_eq!(
+        semihosting_config(Path::new("/w,1/test-arm_x.iso")),
+        "enable=on,target=native,arg=/w,,1/test-arm_x.events.jsonl"
+    );
+}
+
 /// QEMU for the aarch64 scenarios (`Boot::UefiAarch64`): the `virt`
 /// machine (GICv3, a PL011, virtio over PCIe) with the `max` CPU, booted
 /// by UEFI from the image on a virtio-scsi CD, semihosting on (the
@@ -5565,7 +5588,7 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
         cmd.args(["-accel", "tcg"]);
     }
     cmd.args(["-no-reboot", "-nic", "none"]);
-    cmd.args(["-semihosting-config", "enable=on,target=native"]);
+    cmd.arg("-semihosting-config").arg(semihosting_config(iso));
     // No boot-menu countdown: the firmware's (ArmVirtQemu's `Timeout`,
     // 5 s by default) is taken from QEMU's splash time when the menu is
     // on (QemuBootOrderLib's GetFrontPageTimeoutFromQemu), and 0 skips
@@ -16616,7 +16639,7 @@ fn run_vm_once(
     // x86-64's ISA devices: the kernel's event stream (`events=` on its
     // command line) and the exit device. aarch64's virt machine has no ISA
     // bus: its kernel exits through semihosting (`qemu_aarch64`) and has
-    // its event stream through semihosting (`events_file=`, `make_iso`).
+    // its event stream through semihosting (`events_host`, `semihosting_config`).
     if boot != Boot::UefiAarch64 {
         add_event_devices(&mut cmd, &events);
         cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
@@ -23479,7 +23502,18 @@ fn dumps_become_files() {
 /// host never wrote (a run that ended before the device took it) would
 /// otherwise leave a stream that quietly lacks its end. Recordings'
 /// `rec` lines are not counted by the kernel, so the file may hold more.
-fn stream_complete(serial: &str, events: &str) -> Result {
+/// aarch64's kernel says which file the host named it (`events: file
+/// <path>`): another than the one read is said first, as the cause.
+fn stream_complete(serial: &str, events: &str, file: &Path) -> Result {
+    let named = serial.lines().find_map(|l| {
+        l.split_once("events: file ")?.1.strip_suffix(" (named by the semihosting host)")
+    });
+    if let Some(named) = named.filter(|n| Path::new(n) != file) {
+        return Err(format!(
+            "the kernel wrote the event stream to {named}, not {} (the file the host reads)",
+            file.display()
+        ));
+    }
     let written = serial
         .lines()
         .rev()
@@ -23502,12 +23536,20 @@ fn stream_complete_counts_the_host_s_lines() {
     let serial = "[info ] events: the stream goes through the virtio console at 00:1e.0\n\
                   [info ] events: 3 written: 1 through the debug console, 2 through the virtio \
                   console\n";
-    assert!(stream_complete(serial, "{}\n{}\n{}\n").is_ok());
-    assert!(stream_complete(serial, "{}\n{}\n{}\n{\"ev\":\"rec\"}\n").is_ok());
-    let lost = stream_complete(serial, "{}\n").unwrap_err();
+    let file = Path::new("/t/x.events.jsonl");
+    assert!(stream_complete(serial, "{}\n{}\n{}\n", file).is_ok());
+    assert!(stream_complete(serial, "{}\n{}\n{}\n{\"ev\":\"rec\"}\n", file).is_ok());
+    let lost = stream_complete(serial, "{}\n", file).unwrap_err();
     assert!(lost.contains("has 1 lines and the kernel wrote 3: 2 lost"), "{lost}");
     // No stream asked for: no summary, nothing to count.
-    assert!(stream_complete("[info ] run: begin x.exe\n", "").is_ok());
+    assert!(stream_complete("[info ] run: begin x.exe\n", "", file).is_ok());
+    // aarch64's kernel names the file it wrote: another one is the cause.
+    let arm = "[info ] events: file /t/y.events.jsonl (named by the semihosting host)\n\
+               [info ] events: 1 written\n";
+    let elsewhere = stream_complete(arm, "", file).unwrap_err();
+    assert!(elsewhere.starts_with("the kernel wrote the event stream to /t/y.events.jsonl"));
+    let here = "[info ] events: file /t/x.events.jsonl (named by the semihosting host)\n";
+    assert!(stream_complete(here, "", file).is_ok());
 }
 
 /// Judges one scenario from the exit status and its part of the log.
@@ -24389,7 +24431,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
                 // A resumed run's file starts at the restore, its count
                 // at the boot.
                 .and_then(|()| match restore {
-                    None => stream_complete(&serial, &events),
+                    None => stream_complete(&serial, &events, &iso.with_extension("events.jsonl")),
                     Some(_) => Ok(()),
                 })
                 // A snapshot's disk moved into it; a resumed run's is a layer.

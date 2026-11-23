@@ -1623,7 +1623,7 @@ its image back and checks the checksum. It runs in the `release` environment, wi
 `release.yml`'s R2 variables and secrets. The aarch64 demo is
 `DEMO_CMDLINE_AARCH64` (the desktop on virtio-gpu, hello.exe); a
 downloadable image's command line names no file of the machine that
-built it (no `events_file=`). The website's "Try it" section links
+built it (no `events_host`: no semihosting host need answer). The website's "Try it" section links
 them, with the QEMU commands that boot them (`images` in
 `web/src/content.ts`; a change to the image names or the demo changes it
 too).
@@ -4739,7 +4739,11 @@ before blaming CI:
   `target/failed/<name>.r<i>.log`) and ends with "n of 12 boots failed".
   With `XTASK_REPEAT` a scenario's exact name selects it alone
   (`handover_upgrade`, not also `handover_upgrade_uefi`), and the
-  filter must select one scenario of its own VM.
+  filter must select one scenario of its own VM. The copies are hard
+  links of one image, so a file a boot writes is named by the run (QEMU's
+  arguments), never by the image, or every copy writes the first one's
+  (aarch64's event stream: `events: file <path>` on the serial log names
+  the one the kernel wrote).
 - `XTASK_QEMU_ARGS="-accel tcg,thread=single"` boots any scenario
   without host-level parallelism (to tell a guest race from an emulator
   one); `-accel tcg,thread=multi` boots a JIT scenario multi-threaded.
