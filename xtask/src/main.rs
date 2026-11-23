@@ -8768,6 +8768,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("advapi32_test", "secur32.dll", "Windows/System32"),
     ("advapi32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("advapi32_test", "bcrypt.dll", "Windows/System32"),
+    // The credential manager's store, which gala keeps none of
+    // (user/credman_test/main.c, mingw).
+    ("credman_test", "ntdll.dll", "Windows/System32"),
+    ("credman_test", "kernel32.dll", "Windows/System32"),
+    ("credman_test", "msvcrt.dll", "Windows/System32"),
+    ("credman_test", "advapi32.dll", "Windows/System32"),
+    ("credman_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("credman_test", "user/bin/credman_test.exe", "gala"),
+    // The same source through WOW64 (user/credman_test/build.sh).
+    ("wow64_credman_test", "wow64.dll", "Windows/System32"),
+    ("wow64_credman_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_credman_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_credman_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_credman_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_credman_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_credman_test", "user/bin/wow64_credman_test.exe", "gala"),
     ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_system_test", "psapi.dll", "Windows/System32"),
     ("kernel32_system_test", "kernelbase.dll", "Windows/System32"),
@@ -9499,6 +9515,31 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("user32_test", "imm32.dll", "Windows/System32"),
     ("user32_test", "user/bin/user32_test.exe", "gala"),
+    // WaitForInputIdle, which answers for another process
+    // (user/waitidle_test/main.c, mingw): the test and the child it waits
+    // for are the same source built twice, as a console program and as a
+    // GUI one, because the subsystem byte is what the answer comes from.
+    ("waitidle_test", "ntdll.dll", "Windows/System32"),
+    ("waitidle_test", "kernel32.dll", "Windows/System32"),
+    ("waitidle_test", "msvcrt.dll", "Windows/System32"),
+    ("waitidle_test", "user32.dll", "Windows/System32"),
+    ("waitidle_test", "gdi32.dll", "Windows/System32"),
+    ("waitidle_test", "imm32.dll", "Windows/System32"),
+    ("waitidle_test", "msctf.dll", "Windows/System32"),
+    ("waitidle_test", "advapi32.dll", "Windows/System32"),
+    ("waitidle_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("waitidle_test", "user/bin/waitidle_test.exe", "gala"),
+    ("waitidle_test", "user/bin/waitidle_child.exe", "gala"),
+    // The same source through WOW64, child and all
+    // (user/waitidle_test/build.sh).
+    ("wow64_waitidle_test", "wow64.dll", "Windows/System32"),
+    ("wow64_waitidle_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_waitidle_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_waitidle_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_waitidle_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_waitidle_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_waitidle_test", "user/bin/wow64_waitidle_test.exe", "gala"),
+    ("wow64_waitidle_test", "user/bin/wow64_waitidle_child.exe", "gala"),
     ("windows_across_test", "ntdll.dll", "Windows/System32"),
     ("windows_across_test", "kernel32.dll", "Windows/System32"),
     ("windows_across_test", "msvcrt.dll", "Windows/System32"),
@@ -15623,6 +15664,32 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // OF: the credential manager's store, which Office's shared
+        // runtime enumerates while it starts -- as a delay load, so a
+        // gala without CredEnumerateW ends the process instead of being
+        // told there are none (user/credman_test/main.c, mingw).
+        // Measured on Windows 11 24H2 first: the validation order and the
+        // three errors, and that an empty store is ERROR_NOT_FOUND with
+        // both out parameters written anyway, which is what gala answers
+        // and what the ledger's row says it answered.
+        name: "credman_test",
+        cmdline: "qemu_exit run=credman_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "credman_test: ok",
+            r#"ledger: {"service":"advapi32.dll!CredEnumerateW(no credential store)","what":"unsupported""#,
+            r#"ledger: {"service":"advapi32.dll!CredEnumerateW(an unknown flag)","what":"reached""#,
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same source through WOW64, on SysWOW64's advapi32.
+        name: "wow64_credman_test",
+        cmdline: "qemu_exit run=wow64_credman_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_credman_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // Security model S1 (docs/SECURITY.md): access tokens as kernel
         // objects (user/token_test).
         name: "token_test",
@@ -17880,6 +17947,38 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "user32_test: ok",
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // OF: WaitForInputIdle, which Office's shared runtime waits for a
+        // process it started with -- as a delay load, so a gala without
+        // the export ends the process instead of being probed
+        // (user/waitidle_test/main.c, mingw). Measured on Windows 11 24H2
+        // first: the latch a process sets the first time it waits on an
+        // empty message queue and never loses, the subsystem byte that
+        // decides who can be waited for at all (a console program with a
+        // window up and its queue pumped is still ERROR_NOT_GUI_PROCESS),
+        // and which answers touch the last error. The child it waits for
+        // is this same source linked as a GUI program.
+        name: "waitidle_test",
+        cmdline: "qemu_exit run=waitidle_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "waitidle_test: ok",
+            r#"ledger: {"service":"user32.dll!GetMessage(the process is input idle)","what":"reached""#,
+            r#"ledger: {"service":"user32.dll!WaitForInputIdle(idle)","what":"reached""#,
+            r#"ledger: {"service":"user32.dll!WaitForInputIdle(timed out)","what":"reached""#,
+            r#"ledger: {"service":"user32.dll!WaitForInputIdle(not a GUI process)","what":"reached""#,
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same source through WOW64, on SysWOW64's user32: the wait
+        // crosses the 32-bit boundary (GalaWindowWaitIdle's descriptor)
+        // and the child is the 32-bit child.
+        name: "wow64_waitidle_test",
+        cmdline: "qemu_exit run=wow64_waitidle_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_waitidle_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // ROADMAP SD: on a machine with no screen and no `presenter=` (a
@@ -23191,6 +23290,8 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_sock_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("pk_install_inno32", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_waitidle_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_credman_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_regnotify_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_actctx_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_runas_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -23203,6 +23304,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
+    ("waitidle_test", "a child process to wait for (one NT process per Linux process)"),
     (
         "rpc_test",
         "a child process: the RPC client of `rpc_test.exe client` (one NT process per Linux process)",

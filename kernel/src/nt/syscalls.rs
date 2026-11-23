@@ -217,6 +217,10 @@ pub const GALA_WINDOW_DRAG: u32 = 0x7f54;
 pub const GALA_WINDOW_RESIZE: u32 = 0x7f55;
 /// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
 pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
+/// The caller is input idle (user32's message wait), and waiting for
+/// another process to be (WaitForInputIdle).
+pub const GALA_WINDOW_IDLE: u32 = 0x7f6b;
+pub const GALA_WINDOW_WAIT_IDLE: u32 = 0x7f6c;
 /// WinEvents across processes (SetWinEventHook, UnhookWinEvent,
 /// NotifyWinEvent, the hooking thread's records; nt::winevent).
 pub const GALA_WIN_EVENT_HOOK: u32 = 0x7f70;
@@ -472,6 +476,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_DRAG, "GalaWindowDrag", 1, gala_window_drag),
     (GALA_WINDOW_RESIZE, "GalaWindowResize", 2, gala_window_resize),
     (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
+    (GALA_WINDOW_IDLE, "GalaWindowIdle", 0, gala_window_idle),
+    (GALA_WINDOW_WAIT_IDLE, "GalaWindowWaitIdle", 2, gala_window_wait_idle),
     (GALA_WIN_EVENT_HOOK, "GalaWinEventHook", 6, gala_win_event_hook),
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
     (GALA_WIN_EVENT_NOTIFY, "GalaWinEventNotify", 4, gala_win_event_notify),
@@ -2815,6 +2821,70 @@ fn gala_window_send_wait(call: &mut Call<'_>) -> NtStatus {
             tri!(call.write_u32(arg!(call, 4), out.len() as u32));
             NtStatus::SUCCESS
         }
+    }
+}
+
+/// GalaWindowIdle(): the calling process has waited on an empty message
+/// queue, so it is "input idle" from now on and the threads waiting for
+/// it wake (user32's message wait reports it once per process; the latch
+/// is never cleared, as on Windows). STATUS_NO_MEMORY is the only
+/// failure.
+fn gala_window_idle(call: &mut Call<'_>) -> NtStatus {
+    let pid = call.process.id as u32;
+    match call.process.desk.windows.mark_idle(pid) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => e,
+    }
+}
+
+/// GalaWindowWaitIdle(ProcessHandle, Milliseconds): waits until that
+/// process has been input idle -- a thread of it waiting on an empty
+/// message queue -- which is what user32's WaitForInputIdle is.
+/// STATUS_SUCCESS once it has, at once when it already had (the latch is
+/// never cleared); STATUS_TIMEOUT while it has not, including a process
+/// with no message queue at all, which Windows also waits out rather
+/// than refusing; STATUS_NOT_SUPPORTED for a process whose image is not
+/// a GUI one, which is what Windows answers ERROR_NOT_GUI_PROCESS for --
+/// the subsystem byte in the PE header decides it and nothing else, even
+/// with a window up and a queue being pumped (`waitidle_test`), and a
+/// process of another personality has no PE image at all;
+/// STATUS_PROCESS_IS_TERMINATING for a process that has ended. The
+/// handle wants PROCESS_QUERY_INFORMATION or the limited one (which the
+/// full one implies), and Windows answers through either; a thread
+/// handle is STATUS_OBJECT_TYPE_MISMATCH.
+fn gala_window_wait_idle(call: &mut Call<'_>) -> NtStatus {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const IMAGE_SUBSYSTEM_WINDOWS_CUI: u16 = 3;
+    const INFINITE: u32 = u32::MAX;
+    let (handle, ms) = (arg!(call, 0), arg!(call, 1) as u32);
+    let target = tri!(call.dup_process(handle, PROCESS_QUERY_LIMITED_INFORMATION));
+    let pid = target.id as u32;
+    // A GUI image, or there is nothing here to wait for.
+    let subsystem = target.layout().map(|l| l.info.subsystem);
+    if !matches!(subsystem, Some(s) if s != IMAGE_SUBSYSTEM_WINDOWS_CUI) {
+        return NtStatus::NOT_SUPPORTED;
+    }
+    let windows = &target.desk.windows;
+    let (event, already) = tri!(windows.idle_event(pid));
+    if !already {
+        let timeout = if ms == INFINITE {
+            wait::Timeout::from_nt(None)
+        } else {
+            wait::Timeout::from_nt(Some(-(i64::from(ms) * 10_000)))
+        };
+        let waited = wait::wait_for(core::slice::from_ref(&event), false, timeout);
+        if waited == NtStatus::THREAD_IS_TERMINATING {
+            return waited;
+        }
+    }
+    if windows.is_idle(pid) {
+        return NtStatus::SUCCESS;
+    }
+    // Woken by the process's end, or not woken at all.
+    if target.exit_status().is_some() {
+        NtStatus::PROCESS_IS_TERMINATING
+    } else {
+        NtStatus::TIMEOUT
     }
 }
 

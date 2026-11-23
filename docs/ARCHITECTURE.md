@@ -4498,8 +4498,9 @@ ntdll imports.
   memory (ERROR_SUCCESS, never ERROR_BUSY); other memory is refused and
   recorded. SetThreadIdealProcessor(Ex) is the kernel's
   ThreadIdealProcessor ("Threads"); WinExec is CreateProcessA with the
-  show state, waiting for input idle only when user32 is loaded and has
-  WaitForInputIdle (gala's has not yet). OpenFile (`ansi.rs`) is
+  show state, waiting for input idle when user32 is loaded and has
+  WaitForInputIdle, which it now does ("Windows across processes: input
+  idleness"). OpenFile (`ansi.rs`) is
   CreateFileA under the style bits, and fills the OFSTRUCT whether it
   opens the file or not: the structure's own size, a fixed disk, the full
   path in upper case and, when the open failed, the last error in
@@ -5034,6 +5035,20 @@ definition for both layouts, "Plan: WOW64").
   (PERF_COUNTERSET_INSTANCE, the data block at the counters' offsets, the
   name) in memory; values are updated atomically; nothing reads them (no
   counter consumers).
+- **The credential store** (`cred.rs`; `credman_test`): gala has none, and
+  CredEnumerateW answers as a machine with no credentials does. It
+  validates first, as Windows does: an unknown flag bit is
+  ERROR_INVALID_PARAMETER and beats the known one,
+  CRED_ENUMERATE_ALL_CREDENTIALS (0x1) with a filter is
+  ERROR_INVALID_FLAGS, and an empty filter is not a missing one. Then
+  FALSE with ERROR_NOT_FOUND, Count 0 and Credentials NULL -- both out
+  parameters are written, as Windows writes them. One deliberate
+  difference: Windows faults inside advapi32 on a NULL Count or
+  Credentials, where gala refuses with ERROR_INVALID_PARAMETER and a row
+  (a test that asserts a fault is a test that crashes). CredFree frees
+  nothing, since nothing was handed out, and records a buffer it is
+  given. CredReadW, CredWriteW and CredDeleteW are still in
+  `unimplemented_exports!` (ROADMAP OF).
 
 ### Cryptography: bcrypt, ncrypt, crypt32
 
@@ -8873,6 +8888,7 @@ registry ("Plan: windows across processes").
 | 0x7f3e | GalaWindowSetIcon(id, *pixels, size) | size x size 0xAARRGGBB, straight alpha, size at most 64; none: the letter tile |
 | 0x7f58 | GalaDesktopAction | named desktop actions ("Server and desktop workloads") |
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
+| 0x7f6b-0x7f6c | GalaWindowIdle, GalaWindowWaitIdle | the input-idle latch ("Windows across processes: input idleness") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
 | 0x7f74 | GalaTrayIcon(op, *request, length, *rect) | Shell_NotifyIcon's NIM_* on the notification area, or 0x10: an icon's screen rectangle ("The notification area") |
 | 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter (the console switch), a Test frame's pixels and injected input ("Presenters (B3a)") |
@@ -10303,6 +10319,51 @@ process never reach the kernel's check (one level).
   (`window::may_act_on`).
 - Not done: uiAccess, hooks across levels; the always-passing list is
   not documented by Microsoft (to verify on Windows).
+
+### Windows across processes: input idleness
+
+WaitForInputIdle, as `waitidle_test` measures it on Windows 11 24H2 --
+which is not as it is documented. The answer is a **latch**, not a
+reading: a process is input idle from the first time a thread of it
+waits on an empty message queue, and stays so however busy it becomes
+afterwards (the test's `idlebusy` child pumps once, then spins without
+pumping, and is still 0 when asked with a 0 ms timeout, so no wait can
+hide it). A process that never pumps at all is the other side of that
+latch: WAIT_TIMEOUT. The documented "returns immediately for a process
+with no message queue" is not what it does either -- a console program
+waits the timeout out -- and what counts as a GUI process is the
+subsystem byte of the image's PE header and nothing else: a console
+program with a window up and its queue being pumped is still
+ERROR_NOT_GUI_PROCESS.
+
+- The latch lives in the window registry (`nt::window`: `Idle { pid,
+  idle, event }`), which already owns the cross-process part of
+  windowing, as win32k does. `GalaWindowIdle()` 0x7f6b sets the calling
+  process's latch and signals its event. `GalaWindowWaitIdle(process,
+  ms)` 0x7f6c duplicates the handle for
+  PROCESS_QUERY_LIMITED_INFORMATION, refuses an image that is not a GUI
+  subsystem image with STATUS_NOT_SUPPORTED, and waits on the event:
+  STATUS_SUCCESS, STATUS_TIMEOUT, or STATUS_PROCESS_IS_TERMINATING for a
+  process that has ended. The waiter makes the entry as well as the
+  reporter, so a report between the call and the wait is not missed, and
+  the entry goes with the process -- a later process of the same id
+  starts out not idle, and the waiters of one that ends are woken.
+- user32 reports it once per process, from `window::wait_wake` (every
+  message wait: GetMessage, and MsgWaitForMultipleObjects(Ex) waiting on
+  the queue beside its handles), so being waited for costs one system
+  call in a process's life. `WaitForInputIdle` maps the statuses to 0,
+  WAIT_TIMEOUT and WAIT_FAILED with ERROR_NOT_GUI_PROCESS (1471),
+  ERROR_INVALID_PARAMETER (87, a thread handle) or ERROR_INVALID_HANDLE
+  (6, a handle that is none and a process handle without the right,
+  which Windows does not tell apart here). 0, WAIT_TIMEOUT and a process
+  that has ended leave the last error exactly as it was, so a caller
+  cannot tell those two failures apart by GetLastError at all.
+- kernel32's WinExec waits through user32's export when user32 is
+  loaded and has it (`process.rs`), which it now does.
+  `uiautomationcore`'s Window pattern does not consult the latch: its
+  WaitForInputIdle still answers TRUE for a window that is there
+  (gala's choice; a provider that waits needs a two-process test of its
+  own, ROADMAP UIA).
 
 ### Windows across processes: WinEvents
 
@@ -16598,8 +16659,9 @@ under the root), with its items as children.
   window; IsTopmost = WS_EX_TOPMOST; WindowVisualState from
   IsIconic/IsZoomed; WindowInteractionState BlockedByModalWindow while
   disabled, else ReadyForUserInteraction (gala's reading; unverified);
-  WaitForInputIdle answers TRUE at once (gala does not track input
-  idleness).
+  WaitForInputIdle answers TRUE at once for a window that is there,
+  without consulting the kernel's input-idle latch ("Windows across
+  processes: input idleness"); gala's choice.
 - **Transform** pattern: Move and Resize are SetWindowPos (SWP_NOZORDER
   | SWP_NOACTIVATE); CanMove unless maximized or minimized, CanResize
   also needs WS_THICKFRAME; CanRotate FALSE and Rotate
@@ -16935,6 +16997,8 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 | GalaWindowSurfaceOpen(hwnd, \*section, \*info) | 0x7f53 | a handle to any window's surface section on the caller's desktop |
 | GalaWindowDrag(id) | 0x7f54 | the caller's window follows the pointer while the left button is down (its own caption) |
 | GalaWindowResize(id, edges) | 0x7f55 | the caller's window is resized from those edges by the pointer, placed when the button goes up (its own border) |
+| GalaWindowIdle() | 0x7f6b | the calling process is input idle (latched for its life) |
+| GalaWindowWaitIdle(process, ms) | 0x7f6c | waits for that process's latch (WaitForInputIdle) |
 
 **The registry and its record** (step 1):
 

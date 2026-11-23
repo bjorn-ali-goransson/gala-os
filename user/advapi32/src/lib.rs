@@ -69,6 +69,7 @@ unsafe extern "system" {
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
 }
 
+mod cred;
 mod etw;
 mod layout;
 mod objsec;

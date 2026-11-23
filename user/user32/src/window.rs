@@ -747,6 +747,11 @@ fn wake_others(except: u32) {
 /// (the process's event: input, messages from other processes, sent
 /// messages) may be another thread's: they are all told.
 fn wait_wake(handles: &[Handle], ms: u32) -> u32 {
+    // Nothing in the queue and about to block: the process is input
+    // idle, which another process may be waiting for
+    // (WaitForInputIdle). Reported once, and only here, where a thread
+    // is known to be waiting on its queue.
+    crate::foreign::report_idle();
     let n = handles.len();
     let mut all = [0 as Handle; 66];
     all[..n].copy_from_slice(handles);

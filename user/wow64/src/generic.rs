@@ -441,6 +441,8 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f55, &[U, U]),                   // GalaWindowResize
     (0x7f58, &[U, U, U, U, U]),          // GalaDesktopAction
     (0x7f6a, &[U, Hi, U, U, U]),         // GalaWindowFilter
+    (0x7f6b, &[]),                       // GalaWindowIdle
+    (0x7f6c, &[H, U]),                   // GalaWindowWaitIdle
     (0x7f70, &[U, U, U, U, U, U]),       // GalaWinEventHook
     (0x7f71, &[U]),                      // GalaWinEventUnhook
     (0x7f72, &[U, U, Hi, U, U]),         // GalaWinEventNotify

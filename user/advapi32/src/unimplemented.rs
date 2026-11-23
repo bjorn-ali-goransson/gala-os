@@ -25,7 +25,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     SetServiceBits
     UnlockServiceDatabase
     CredDeleteW
-    CredFree
     CredReadW
     CredWriteW
     CryptSignHashA

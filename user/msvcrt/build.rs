@@ -64,6 +64,7 @@ fn main() {
                 "printf",
                 "sprintf",
                 "_snprintf",
+                "_snwprintf",
                 "sscanf",
                 "_setjmp",
                 "longjmp",

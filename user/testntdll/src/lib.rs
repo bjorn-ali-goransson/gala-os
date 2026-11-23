@@ -454,6 +454,10 @@ syscall_stubs! {
     GalaWindowResize = 0x7f55, fn(id: u32, edges: u32);
     // UIPI's message filters (ChangeWindowMessageFilter(Ex)).
     GalaWindowFilter = 0x7f6a, fn(hwnd: u64, message: u32, action: u32, ext_status: *mut u32);
+    // Input idleness (WaitForInputIdle): reported by a message wait,
+    // waited for through a process handle.
+    GalaWindowIdle = 0x7f6b, fn();
+    GalaWindowWaitIdle = 0x7f6c, fn(process: usize, ms: u32);
     // WinEvents across processes (SetWinEventHook, NotifyWinEvent).
     GalaWinEventHook = 0x7f70, fn(min: u32, max: u32, pid: u32, tid: u32, flags: u32, id: *mut u32);
     GalaWinEventUnhook = 0x7f71, fn(id: u32);

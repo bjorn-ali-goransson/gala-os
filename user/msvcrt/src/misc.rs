@@ -788,6 +788,25 @@ pub extern "C" fn wcschr(s: *const u16, c: u16) -> *mut u16 {
     }
 }
 
+/// wcsrchr(s, c): the last `c` in `s` (its terminator if `c` is 0), null
+/// if it holds none (`msvcrt_test`).
+#[unsafe(no_mangle)]
+pub extern "C" fn wcsrchr(s: *const u16, c: u16) -> *mut u16 {
+    let mut found = null_mut();
+    let mut i = 0;
+    loop {
+        // SAFETY: the caller's NUL-terminated wide string.
+        let x = unsafe { *s.add(i) };
+        if x == c {
+            found = s.wrapping_add(i).cast_mut();
+        }
+        if x == 0 {
+            return found;
+        }
+        i += 1;
+    }
+}
+
 /// _ultoa(value, buffer, radix): `value` (an unsigned long: 32 bits) in
 /// `radix` (2 to 36, lower-case digits).
 #[unsafe(no_mangle)]
