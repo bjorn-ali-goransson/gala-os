@@ -58,7 +58,8 @@ WORKFLOW "gala-um") with `--cpus=2` (as the QEMU tests' `-smp 2`), the scenario'
 `extra_modules` from `user/bin`, its `args=` (percent-decoded) and its
 `clock=` as `--clock=` (`quota=` as `--quota=`), and checks the scenario's expected lines except
 those only a QEMU boot has (`kernel_only`: the boot marker, the NMI part
-of a state dump, `flight:`, clock calibration lines). Debugging recipes
+of a state dump and the check that every CPU still ticks after it,
+`flight:`, clock calibration lines). Debugging recipes
 (gdb, signals to ignore): WORKFLOW "gala-um".
 
 ## How a Windows program runs inside a Linux process

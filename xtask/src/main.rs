@@ -15167,6 +15167,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "flight: the last",
             "statedump: NMI part done",
             "statedump: threads",
+            // The NMI left each CPU's interrupt mask as it found it: the
+            // spinning thread's CPU, interrupted in user mode, still
+            // ticks (aarch64's mask is not restored by the return).
+            "statedump: every CPU took timer interrupts since the NMI part",
             "NtWaitForSingleObject from rip",
             "Event signal 0",
             "in user mode at rip",
@@ -23396,14 +23400,15 @@ fn runs_in_um(s: &Scenario) -> bool {
 }
 
 /// Expected lines that only a QEMU boot has: the boot marker, the NMI
-/// part of a state dump and xtask's own line about it, a user rip from
-/// the timer tick.
+/// part of a state dump, the check that every CPU still ticks after it,
+/// and xtask's own line about it, a user rip from the timer tick.
 fn kernel_only(line: &str) -> bool {
     line == BOOT_OK_MARKER
         || ["statedump: begin", "statedump: cpu", "statedump: locks", "statedump: heap"]
             .iter()
             .any(|p| line.starts_with(p))
         || line.starts_with("statedump: NMI")
+        || line.starts_with("statedump: every CPU took timer interrupts")
         || line.starts_with("flight:")
         || line == "in user mode at rip"
         || line.starts_with("the guest's state dump")
@@ -34446,6 +34451,17 @@ mod um_scenarios {
         }
         let schannel = scenarios().iter().find(|s| s.name == "schannel_test").unwrap();
         assert!(um_gap(schannel).is_some_and(|why| why.starts_with("kernel flag start=nginx.exe")));
+    }
+
+    /// The state dump's check that every CPU still ticks after the NMI
+    /// part needs the NMI part and timer interrupts, which gala-um has
+    /// neither of: statedump_test expects it of a QEMU boot only.
+    #[test]
+    fn the_tick_check_after_the_nmi_part_is_a_qemu_line() {
+        let s = scenarios().iter().find(|s| s.name == "statedump_test").unwrap();
+        let line = "statedump: every CPU took timer interrupts since the NMI part";
+        assert!(s.expect.contains(&line));
+        assert!(kernel_only(line));
     }
 }
 

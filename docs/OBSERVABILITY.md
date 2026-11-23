@@ -1013,7 +1013,11 @@ a new line, since QEMU's end can cut the guest's last one off):
    thread each CPU runs, whether the scheduler, heap, frame and console
    locks are free (a lock held for the whole dump is the deadlock), heap
    and frame figures, the flight recorder.
-2. From the boot thread (may take locks): every NT thread's start
+2. From the boot thread (may take locks): first whether every CPU took
+   timer interrupts since part 1 (20 ms at least; `statedump: every CPU
+   took timer interrupts since the NMI part`, else `statedump: CPU N took
+   no timer interrupt ...`: an NMI that left its CPU's interrupt mask
+   off, ARCHITECTURE "Interrupt masking and the pseudo-NMI"), then every NT thread's start
    routine (`start 0x...`, its Win32 start address: which thread it is,
    a pool worker or the program's own; also in triage's thread lines)
    and its name if the program gave it one (` name "CrBrowserMain"`,

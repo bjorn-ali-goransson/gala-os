@@ -335,7 +335,15 @@ faults, its exit).
   on and set "off" first thing. The NMI is SGI 1 (`gic::NMI_SGI`,
   `smp::send_nmi`), taken with PSTATE.I set (no nesting) and handed to
   `interrupts::nmi` (the state dump's and the profiler's handler, kept
-  in an atomic: it may interrupt any lock's holder). An ordinary IRQ is
+  in an atomic: it may interrupt any lock's holder). **Invariant: an NMI
+  leaves the mask as it found it**: `gic::dispatch` reads ICC_PMR_EL1
+  before the handler and writes it back after (`cpu::set_pmr`). The
+  exception return restores PSTATE, not this mask, and an `IrqMutex`
+  taken inside the NMI (the dump's console) writes "off" and, PSTATE.I
+  being set there, never writes "on" back: an NMI that interrupted user
+  mode returned to it with the CPU's ticks stopped for good
+  (`arm_statedump_test`'s spinner; the dump's threads part checks that
+  every CPU ticks after it). An ordinary IRQ is
   taken only with interrupts on; its handler runs with them off by
   priority and PSTATE.I clear, so an NMI reaches it too; its exit sets
   PSTATE.I and the mask back to "on" before the `eret`. A thread
