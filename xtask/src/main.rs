@@ -8441,6 +8441,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("xstate_test", "ntdll.dll", "Windows/System32"),
     ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
+    ("suspend_test", "ntdll.dll", "Windows/System32"),
     ("snapshot_machine", "ntdll.dll", "Windows/System32"),
     ("hotswap_machine", "ntdll.dll", "Windows/System32"),
     ("hotswap_machine", "hotswap_dll.dll", "gala"),
@@ -11278,6 +11279,7 @@ const USER_PROGRAMS: &[&str] = &[
     "smpcow_test",
     "vmcycle_test",
     "xmodify_test",
+    "suspend_test",
     "smpsem_test",
     "smprace_test",
     "xstate_test",
@@ -14155,6 +14157,7 @@ const ARM64_TWINS: &[&str] = &[
     "smpcow_test",
     "vmcycle_test",
     "statedump_test",
+    "suspend_test",
     "smprace_test",
     "sshfwd_test",
     "winsock_test",
@@ -15064,6 +15067,47 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "(value there 0x6a1a); queued for it: (waiters, releasers, all entries) Some((1, 0, 1))",
             "statedump: end",
             "the guest's state dump (NMI) took",
+        ],
+    },
+    Scenario {
+        // Who suspended a thread, where from, and where it is parked
+        // (nt/thread.rs, OBSERVABILITY "Suspensions"). suspend_test makes
+        // every kind of call -- two suspensions, three resumes (the last
+        // of a thread that is not suspended), a thread created suspended
+        // and resumed, one created suspended and left so, a suspension of
+        // an invalid handle and one of a handle that is not a thread's --
+        // and then leaves its worker suspended and
+        // waits for ever, so the dump at the timeout must name the
+        // suspension's cause and the rip it is parked at. Without the
+        // record the run prints a suspend count and nothing else, which
+        // is what Word's parked main thread showed (ROADMAP OF).
+        name: "suspend_test",
+        cmdline: "qemu_exit run=suspend_test.exe",
+        exit_status: XTASK_DUMPS,
+        expect: &[
+            "suspend_test: ok",
+            // The live record: who asked and where that thread called
+            // from (its own code, above ntdll's stub).
+            "suspended by pid",
+            "(suspend_test.exe+0x",
+            ": count 1",
+            "resumed by pid",
+            "resumed while not suspended by pid",
+            // The two refusals, which the program only sees as a failure.
+            "no suspension on handle 0x1234 for pid",
+            ": 0xc0000008",
+            ": 0xc0000024",
+            // The dump at the timeout.
+            "suspend_test: waiting",
+            "statedump: threads",
+            "suspensions, resumes and refusals so far",
+            "a thread's own creation (not printed)",
+            "thread:   suspended by pid",
+            "thread:   parked at rip",
+            // The thread created suspended and never resumed: the pair
+            // the log leaves out, which the dump still explains.
+            "thread:   created suspended by pid",
+            "statedump: end",
         ],
     },
     Scenario {
