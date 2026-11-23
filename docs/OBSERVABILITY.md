@@ -532,7 +532,14 @@ that row is in the dump only when the filter freed the slot it took.
   `reached` (not a gap at all: the first call that reached a method gala
   answers, so that a program stopping in the middle of a path leaves the
   path it took; it is told from a call answered S_OK, which `other`
-  records with the HRESULT as its detail) and `other`. Both
+  records with the HRESULT as its detail), `waited` (not a gap either:
+  a lock inside one of gala's own DLLs that a thread has been waiting
+  a second for, named `<dll>!<what the lock protects>` with a suffix
+  saying whether the thread waited for it, found another thread
+  holding it, or re-entered it -- `user/gala_lock`, what a DLL writes
+  down instead of spinning silently, and the row that would have
+  named the holder of the trace lock Word's main thread hung in) and
+  `other`. Both
   `stub` and `not implemented` are also logged as they happen, because a
   run cut short by a snapshot never dumps the ledger; only `stub`'s line
   says the process ended. The Windows Runtime's:

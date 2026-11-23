@@ -4845,8 +4845,11 @@ definition for both layouts, "Plan: WOW64").
   traits are set, EventUnregister gives the block back, and a handle no
   live registration holds -- an unregistered one, or a value a program
   invented -- is answered ERROR_INVALID_HANDLE rather than
-  dereferenced (blocks are reused and never freed, so a stale handle
-  cannot reach memory that was something else). The answers are
+  dereferenced (a block is never freed, and an unregistered one is
+  reused only by a registration of the same provider, so a stale
+  handle reaches that provider or nothing at all, never a block that
+  became something else -- which is what lets a write read the list
+  with no lock, below). The answers are
   Windows' own, measured function by function on the pinned build: the
   four write forms (EventWrite, EventWriteTransfer, EventWriteEx,
   EventWriteString) succeed on a live registration and validate the
@@ -4901,7 +4904,8 @@ definition for both layouts, "Plan: WOW64").
   session's buffers as its provider, descriptor and payload bytes
   (nothing in gala consumes a buffering session's events; what reads
   an event is the session gala starts, below); one that does not fit
-  counts towards the EventsLost a query reports. Two answers are gala's
+  counts towards the EventsLost a query reports, and a write waits for
+  nothing ("ETW, what a write may not wait for"). Two answers are gala's
   reading where Windows is not measured: what MatchAllKeyword means
   when several sessions ask for one (a session that demands no
   particular bits frees the provider of the other's demand), and how
@@ -4920,6 +4924,53 @@ definition for both layouts, "Plan: WOW64").
   GetTraceLoggerHandle fails ERROR_INVALID_PARAMETER with no buffer
   and ERROR_BAD_LENGTH with a buffer that is no session's (Windows'
   own two answers).
+- **ETW, what a write may not wait for** (`etw.rs`, `trace.rs`):
+  nothing a program's write path reaches takes a lock. A write walks
+  the provider list, the session list and the enable list lock-free and
+  makes its two `GalaEtw` calls with nothing held, and so do
+  EventEnabled and the enable a registration finds. That is not a
+  performance choice: Office suspends its own threads to walk their
+  stacks while the process is tracing, so a lock on this path is one a
+  stopped thread can be holding, and every other writer then spins for
+  good -- silently, which is the part that costs the most. gala's
+  advapi32 took three such locks per event, and Word's main thread sat
+  in one of them. `user/etwlock_test` is that shape as a test: 4000
+  events written while another thread is suspended inside the write
+  path, which the pinned Windows build does in 16-78 ms, and gala in a
+  120-second deadlock before this and 170 ms after (scenarios
+  `etwlock_test` and `etwlock_armed`, the second with `etw=*` so that
+  every event is a system call and the suspension lands inside one).
+
+  What makes reading without a lock sound is that the three lists are
+  append-only and never freed, and that a block's identity is written
+  before it is published and never changed after: its GUID and its
+  `next`, with `live` stored last (Release) and loaded first
+  (Acquire), and a dead block reused only by a registration of the
+  same provider or an enable of the same provider. Every other field a
+  reader can see is atomic. *Changing* a list is still done under a
+  lock (`user/gala_lock`), which no write waits for and which, after a
+  second of waiting, records a `waited` row naming the lock and
+  whether another thread holds it rather than spinning without saying
+  so (OBSERVABILITY "Missing-features ledger").
+
+  A session's buffer is the one deliberate cost: it is never freed.
+  ControlTraceW's stop unpublishes it and leaves it, because a
+  lock-free writer may be copying into it at that moment and there is
+  no point at which the last of them is known to be out of it without
+  putting the wait back. The leak is bounded per process -- 256 MiB of
+  trace buffers, past which StartTraceW fails with a row naming the
+  capacity it wanted -- and that is the trade taken: a bounded leak
+  for a write path a suspended thread cannot stop. Room in the buffer
+  is reserved with a compare-exchange on its write offset, so writers
+  do not serialise on each other either, and an event that does not
+  fit counts towards EventsLost.
+
+  One thing a reader may see, which Windows' reader may see too: a
+  write that lands on a concurrent EnableTraceEx2 can read the level
+  from one side of the change and the keywords from the other. A
+  provider's demands are not atomic across a session's change on
+  Windows either, and nothing beyond that one event's reach depends on
+  it.
 - **The session gala starts** (`etw=`; `trace.rs` and the kernel's
   `nt::etw`, OBSERVABILITY "A session gala starts"): a run can ask for
   a program's telemetry without the program asking for it, which is

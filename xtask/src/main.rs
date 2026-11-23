@@ -10994,6 +10994,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("etwarm_test", "ntdll.dll", "Windows/System32"),
     ("etwarm_test", "kernel32.dll", "Windows/System32"),
     ("etwarm_test", "advapi32.dll", "Windows/System32"),
+    ("etwlock_test", "ntdll.dll", "Windows/System32"),
+    ("etwlock_test", "kernel32.dll", "Windows/System32"),
+    ("etwlock_test", "advapi32.dll", "Windows/System32"),
     ("etwfields_test", "ntdll.dll", "Windows/System32"),
     ("etwfields_test", "kernel32.dll", "Windows/System32"),
     ("etwfields_test", "advapi32.dll", "Windows/System32"),
@@ -11422,6 +11425,7 @@ const USER_PROGRAMS: &[&str] = &[
     "caps_test",
     "etw_test",
     "etwarm_test",
+    "etwlock_test",
     "etwfields_test",
     "etwraw_test",
     "tray_test",
@@ -12128,6 +12132,9 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "setup"]))?;
     // The XML reader galapkg and msxml6.dll share.
     run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
+    // The lock gala's DLLs change their own tables under: what it does
+    // on each failed try, and the row it writes when it waits.
+    run_cmd(cargo().args(["test", "--package", "gala_lock"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
     run_cmd(cargo().args(["test", "--package", "schannel_tls"]))?;
     // The update feed's TUF metadata and the client's refusals (R8).
@@ -14238,6 +14245,7 @@ const ARM64_TWINS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "etwlock_test",
     "stack_at_test",
     "iocp_test",
     "symlink_test",
@@ -16954,6 +16962,58 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "etwarm_test: Gala.Test.Quiet: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
             "etwarm_test: wrote 4",
             "etwarm_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // A thread suspended in the middle of writing an event while
+        // another thread writes: what real Windows costs the writers
+        // for it, which is nothing (user/etwlock_test's header has the
+        // three measured runs). Office suspends its own threads to
+        // walk their stacks while it traces, so nothing on gala's
+        // provider side that a writer waits for may be held by a
+        // thread that is stopped -- and the lock the lists had was
+        // such a thing, which is where Word's main thread sat
+        // (ROADMAP OF).
+        name: "etwlock_test",
+        cmdline: "qemu_exit run=etwlock_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "advapi32.dll!StartTraceW(gala-etwlock-test)",
+            "etwlock_test: wrote 4000 events while the other thread was suspended, in 200 \
+             rounds taking ",
+            "advapi32.dll!ControlTraceW(stopped)",
+            "etwlock_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same suspensions with the whole write path armed
+        // (`etw=*`): every event is a system call now, so the window a
+        // suspension can land in is a call into the kernel rather than
+        // a few instructions, and the budget running out makes a write
+        // tell every provider the session is over. Nothing of that may
+        // be behind a lock either.
+        name: "etwlock_armed",
+        cmdline: "qemu_exit run=etwlock_test.exe etw=*",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for every provider, level 5 and every keyword, 256 events at most \
+             (etw=)",
+            "advapi32.dll!EventRegister(a session is asking)",
+            "etw: etwlock_test.exe 2b8e5c91-4d07-4f3a-91c6-5e0d8a7b4f12 level 4 keyword 0x1, \
+             4 bytes (no field metadata: a manifest provider's event), no string in \
+             its bytes",
+            "etwlock_test: wrote 4000 events while the other thread was suspended, in 200 \
+             rounds taking ",
+            "etwlock_test: ok",
+            // The budget goes first, which a write says and the session
+            // is ended by: the telling of every provider that it is over
+            // happens inside an `EventWrite`, and holds nothing while it
+            // does.
+            "advapi32.dll!EventWrite(the session etw= asked for is full)",
+            "etw: 256 events written to the session, from 1 provider (etw=); the budget is \
+             spent, so the session ends here, not the program",
             "exited with status 0x00000000",
         ],
     },
@@ -22086,6 +22146,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("etwfields_armed", "etwfields_test"),
     ("etwraw_armed", "etwraw_test"),
     ("etw_armed_all", "etwarm_test"),
+    ("etwlock_armed", "etwlock_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),
