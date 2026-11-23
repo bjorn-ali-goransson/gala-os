@@ -1188,6 +1188,50 @@ fn a_frame_of_another_size_lays_the_desktop_out_again() {
     frame_matches(&d);
 }
 
+/// `n` client pixels of a pattern no two neighbours share, with a fourth
+/// byte the window must not show.
+fn pattern(n: usize, seed: u32) -> Vec<u32> {
+    (0..n as u32)
+        .map(|i| 0xab00_0000 | (i.wrapping_mul(2_654_435_761) ^ seed) & 0x00ff_ffff)
+        .collect()
+}
+
+#[test]
+fn windows_pixels_nothing_covers_are_copied_and_the_rest_composed() {
+    let mut d = Desktop::new();
+    d.set_screen(640, 480).unwrap();
+    d.s.live = true;
+    // Bottom to top: a maximized window, a framed (rounded) one, a
+    // frameless one over its right half, a popup over the frameless
+    // one's bottom, and the pointer over the framed one.
+    let m = d.create(9, 0, 0, 640, 440, &title("Max"), 0).unwrap();
+    let a = d.create(9, 40, 30, 300, 200, &title("Framed"), 0).unwrap();
+    let f = d.create(9, 200, 100, 200, 150, &title("own frame"), STYLE_FRAMELESS).unwrap();
+    let p = d.create(9, 260, 220, 120, 60, &[], STYLE_POPUP).unwrap();
+    for (id, seed) in [(m, 1), (a, 2), (f, 3), (p, 4)] {
+        d.show(id, 9, true).unwrap();
+        let (cw, ch) = d.s.window(id).unwrap().client_size();
+        let px = pattern((cw * ch) as usize, seed);
+        d.present(id, Rect { x: 0, y: 0, w: cw.into(), h: ch.into() }, &px, cw as usize).unwrap();
+    }
+    d.s.windows.iter_mut().find(|w| w.id == m).unwrap().maximized = true;
+    d.s.raise(a);
+    d.s.raise(f);
+    d.s.raise(p);
+    d.pointer = (100, 150);
+    d.set_presenter(Presenter::Test(Frame::new(640, 480).unwrap())).unwrap();
+    // The whole screen again, now with every layer in place: what reaches
+    // the frame is the composition, pixel for pixel ...
+    let copied = redraw(&mut d, Rect { x: 0, y: 0, w: 640, h: 480 });
+    frame_matches(&d);
+    // ... and the popup (on top, square, nothing over it) was copied
+    // whole, not composed, and so was much of the framed window's client
+    // area (but not the pointer's box over it).
+    let popup = 120 * 60;
+    assert!(copied >= popup + 100 * 100, "copied {copied}");
+    assert!(copied < 640 * 480, "copied {copied}");
+}
+
 #[test]
 fn a_frame_reads_areas_inside_it_only() {
     assert!(Frame::new(0, 10).is_none());

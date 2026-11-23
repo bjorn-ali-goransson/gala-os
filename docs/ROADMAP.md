@@ -8433,6 +8433,19 @@ Each entry: what, why it matters, the structural fix, the owning item.
   the whole kernel. Item R1 (invariants).
 
 ### Defects known, not yet fixed
+- **`arm_lx_gimp`'s key release came about 940 ms late** (open): GTK
+  took the late release for its autorepeat and typed a key twice. A
+  client's input waits while the Wayland server is in a round, so a
+  slow round holds it: the server warns when input waited more than
+  half the autorepeat delay (`wayland: pid N's input waited ...`, event
+  `wayland input late`), naming whether the server was busy and what
+  the round composed. Under TCG on the debug kernel, rounds of about
+  2 million composed pixels ran 0.5 to 1.4 s, nearly all of it lockdep
+  scanning every held-lock slot on each take; the compositor now copies
+  the pixels nothing covers straight from the window
+  (ARCHITECTURE "Compositor and look") and lockdep reads only the locks
+  held (R3), and `lx_gimp` then logged no late input. What is left is
+  to see the warning stay quiet on CI's `arm_lx_gimp`.
 
 - **CI caches keyed on what every branch changes**: every cache key in
   `ci.yml` ends in `hashFiles('xtask/src/main.rs')`, and test-first makes
