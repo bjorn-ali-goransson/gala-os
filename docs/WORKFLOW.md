@@ -5170,6 +5170,12 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   minutes, 92% of samples there); one frame goes through `allocate`'s
   word search from a hint. Profile (`XTASK_EVENTS=sample`, `cargo xtask
   profile`) before guessing at a slow file workload.
+- **xtask feeding a child through pipes writes from a thread**: a tool
+  that answers as it reads (`llvm-symbolizer` in `cargo xtask profile`)
+  fills its stdout pipe while xtask is still writing its stdin, and both
+  block for good if xtask writes everything before it reads (a long
+  run's kernel addresses did). Write stdin on a thread of its own and
+  read the output meanwhile (`wait_with_output`).
 - **The seams**: core code (`net/`, and anything a second personality
   shares) reaches threads, waits and time through `crate::runtime`, not
   `crate::nt::platform` (the NT layer's seam) and not
