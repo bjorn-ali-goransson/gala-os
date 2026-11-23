@@ -679,11 +679,12 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if events::written() > 0 {
         use core::sync::atomic::Ordering::Relaxed;
         info!(
-            "events: {} written: {} through the virtio console, {} writes of the debug console's port (OBSERVABILITY \"What the stream costs\"); profiler samples: {} asked of another CPU, {} in user mode, {} in the kernel, {} lost (interrupts off too long), {} of the writing of samples (not kept)",
+            "events: {} written: {} through the virtio console, {} writes of the debug console's port (OBSERVABILITY \"What the stream costs\"); profiler samples: {} asked of another CPU, {} not asked (the last NMI not yet taken), {} in user mode, {} in the kernel, {} lost (interrupts off too long), {} of the writing of samples (not kept)",
             events::written(),
             virtio_console::lines(),
             arch::debugcon::writes(),
             time::SAMPLES_ASKED.load(Relaxed),
+            time::SAMPLES_UNTAKEN.load(Relaxed),
             time::SAMPLES_USER.load(Relaxed),
             time::SAMPLES_KERNEL.load(Relaxed),
             time::SAMPLES_LOST.load(Relaxed),
