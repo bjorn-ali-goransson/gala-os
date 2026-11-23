@@ -375,10 +375,17 @@ fn symbolize_at(obj: &std::path::Path, base: u64, offsets: &[u64]) -> Vec<Option
     else {
         return none();
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = std::io::Write::write_all(&mut stdin, input.as_bytes());
-    }
+    // Written from a thread of its own while the answers are read here:
+    // the symbolizer answers as it reads, and a pipe holds only so much,
+    // so writing everything first blocks both sides once its stdout is
+    // full (a long run's kernel addresses did).
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || std::io::Write::write_all(&mut stdin, input.as_bytes()))
+    });
     let Ok(output) = child.wait_with_output() else { return none() };
+    if let Some(Ok(Err(e))) = writer.map(|w| w.join()) {
+        eprintln!("xtask: profile: writing addresses to llvm-symbolizer failed: {e}");
+    }
     let text = String::from_utf8_lossy(&output.stdout);
     // One block per address, blank-line separated: function, location,
     // (inlined frames...); the innermost function of each.
@@ -520,5 +527,17 @@ mod tests {
         pe[0x80 + 25] = 0x02;
         pe[0x80 + 24 + 24..0x80 + 24 + 32].copy_from_slice(&0x1_8000_0000u64.to_le_bytes());
         assert_eq!(image_base(&pe), Some(0x1_8000_0000));
+    }
+
+    /// Many addresses at once (a long run's distinct kernel rips): the
+    /// symbolizer's answers fill its stdout pipe long before all the
+    /// addresses are written, so they must be read while they are
+    /// written, or both sides block for good. Without llvm-symbolizer
+    /// every name is None and this only checks the count.
+    #[test]
+    fn many_addresses_do_not_deadlock_the_symbolizer() {
+        let exe = std::env::current_exe().expect("the test binary");
+        let rips: Vec<u64> = (0..50_000u64).map(|k| 0x1000 + 16 * k).collect();
+        assert_eq!(symbolize_at(&exe, 0, &rips).len(), rips.len());
     }
 }
