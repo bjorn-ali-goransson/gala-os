@@ -13441,6 +13441,47 @@ fn add_aarch64_cd(cmd: &mut Command, iso: &Path) {
         .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0"]);
 }
 
+/// x86-64's event stream (`events=` on the kernel's command line): two
+/// devices appending to one file. The debug console (port 0xe9) carries
+/// what the kernel writes before it has found its PCI devices; the
+/// virtio console (`virtconsole`, port 0 of a `virtio-serial-pci`)
+/// carries the rest, by DMA with one notify a line -- KVM leaves the
+/// guest at every byte written to a port, which made an event cost
+/// 2-3 ms (ARCHITECTURE "The event stream's transport"). Both open the
+/// file to append (`append=on`), so neither writes over the other's
+/// lines; the file is removed first, which is what truncating it was.
+/// The virtio console sits at slot 0x1e, past the devices QEMU numbers
+/// from slot 2 up, so adding it moves none of theirs.
+fn add_event_devices(cmd: &mut Command, events: &Path) {
+    let _ = fs::remove_file(events);
+    let path = events.display();
+    cmd.arg("-chardev")
+        .arg(format!("file,id=gala_events,path={path},append=on"))
+        .args(["-device", "isa-debugcon,iobase=0xe9,chardev=gala_events"])
+        .arg("-chardev")
+        .arg(format!("file,id=gala_events_virtio,path={path},append=on"))
+        .args(["-device", "virtio-serial-pci,id=gala_serial,addr=0x1e"])
+        .args(["-device", "virtconsole,chardev=gala_events_virtio,bus=gala_serial.0,nr=0"]);
+}
+
+#[cfg(test)]
+mod event_devices_tests {
+    use super::*;
+
+    /// Both devices append to the same file, so neither overwrites the
+    /// other's lines (see add_event_devices).
+    #[test]
+    fn both_devices_append_to_the_events_file() {
+        let mut cmd = Command::new("qemu-system-x86_64");
+        add_event_devices(&mut cmd, Path::new("/nonexistent/x.events.jsonl"));
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let files: Vec<&String> = args.iter().filter(|a| a.starts_with("file,")).collect();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|a| a.ends_with("path=/nonexistent/x.events.jsonl,append=on")));
+        assert!(args.iter().any(|a| a == "virtio-serial-pci,id=gala_serial,addr=0x1e"));
+    }
+}
+
 #[cfg(test)]
 mod aarch64_cd_tests {
     use super::*;
@@ -14426,6 +14467,11 @@ fn is_aarch64_scenario(name: &str) -> bool {
 /// AVX and AVX-512's; aarch64's FP/SIMD).
 const TWIN_MACHINE_FACTS: &[(&str, &str)] = &[("extended state 0xe7", "extended state 0x1")];
 
+/// Expected lines that are x86-64's machine alone, which a twin does not
+/// expect: the event stream through the virtio console (aarch64 writes
+/// it by semihosting, ARCHITECTURE "The event stream's transport").
+const TWIN_X64_ONLY: &[&str] = &["events: the stream goes through the virtio console at "];
+
 /// Every scenario: BASE_SCENARIOS and, for each ARM64_TWINS entry, its
 /// twin `arm_<name>` (its expected lines through TWIN_MACHINE_FACTS).
 fn scenarios() -> &'static [Scenario] {
@@ -14441,6 +14487,7 @@ fn scenarios() -> &'static [Scenario] {
             let expect: Vec<&'static str> = base
                 .expect
                 .iter()
+                .filter(|line| !TWIN_X64_ONLY.contains(line))
                 .map(|&line| {
                     TWIN_MACHINE_FACTS.iter().fold(line, |line, (x64, arm64)| {
                         if line.contains(x64) {
@@ -20211,6 +20258,13 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: 4999 later calls recorded of 1048576 (imports_repeat=)",
             "imports: 10000 quotes of 1048576, carried by 5000 calls \
              (imports_strings=)",
+            // The stream leaves the guest by DMA, a notify a line, and
+            // not through port 0xe9, which KVM leaves the guest for at
+            // every byte: 5000 events of about 214 bytes were 97 s of a
+            // CI runner's 120 s that way (OBSERVABILITY "What the
+            // stream costs"). The host's file holding every line the
+            // kernel wrote is checked for every run (`stream_complete`).
+            "events: the stream goes through the virtio console at ",
         ],
     },
     Scenario {
@@ -24368,9 +24422,8 @@ fn run_vm_once(
     // bus: its kernel exits through semihosting (`qemu_aarch64`) and has
     // its event stream through semihosting (`events_file=`, `make_iso`).
     if boot != Boot::UefiAarch64 {
-        cmd.arg("-debugcon")
-            .arg(format!("file:{}", events.display()))
-            .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
+        add_event_devices(&mut cmd, &events);
+        cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -31256,6 +31309,44 @@ fn dumps_become_files() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The host's copy of the event stream holds every line the kernel says
+/// it wrote (its summary, `events: N written ...`). Two devices write the
+/// file -- the debug console until the virtio console starts, the virtio
+/// console after -- and a line the kernel handed to the second that the
+/// host never wrote (a run that ended before the device took it) would
+/// otherwise leave a stream that quietly lacks its end. Recordings'
+/// `rec` lines are not counted by the kernel, so the file may hold more.
+fn stream_complete(serial: &str, events: &str) -> Result {
+    let written = serial
+        .lines()
+        .rev()
+        .find_map(|l| l.split_once("events: ")?.1.split_once(" written")?.0.parse::<u64>().ok());
+    let Some(written) = written else { return Ok(()) };
+    let lines = events.lines().count() as u64;
+    if lines >= written {
+        Ok(())
+    } else {
+        Err(format!(
+            "the event stream's file has {lines} lines and the kernel wrote {written}: {} \
+             lost between the kernel and the host (ARCHITECTURE \"The event stream's transport\")",
+            written - lines
+        ))
+    }
+}
+
+#[test]
+fn stream_complete_counts_the_host_s_lines() {
+    let serial = "[info ] events: the stream goes through the virtio console at 00:1e.0\n\
+                  [info ] events: 3 written: 1 through the debug console, 2 through the virtio \
+                  console\n";
+    assert!(stream_complete(serial, "{}\n{}\n{}\n").is_ok());
+    assert!(stream_complete(serial, "{}\n{}\n{}\n{\"ev\":\"rec\"}\n").is_ok());
+    let lost = stream_complete(serial, "{}\n").unwrap_err();
+    assert!(lost.contains("has 1 lines and the kernel wrote 3: 2 lost"), "{lost}");
+    // No stream asked for: no summary, nothing to count.
+    assert!(stream_complete("[info ] run: begin x.exe\n", "").is_ok());
+}
+
 /// Judges one scenario from the exit status and its part of the log.
 /// Judges a run; on failure the serial log is kept in
 /// `target/failed/<scenario>.log` (rare failures need it), with its
@@ -32119,6 +32210,12 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
                     } else {
                         Err(format!("event stream lacks (or, for a '!' entry, has) {missing:?}"))
                     }
+                })
+                // A resumed run's file starts at the restore, its count
+                // at the boot.
+                .and_then(|()| match restore {
+                    None => stream_complete(&serial, &events),
+                    Some(_) => Ok(()),
                 })
                 // A snapshot's disk moved into it; a resumed run's is a layer.
                 .and_then(|()| match disk.as_deref() {
@@ -34172,6 +34269,17 @@ mod health {
     /// A twin does its x64 scenario's work on the slower machine
     /// (aarch64 under TCG), so it cannot have less run time than the
     /// scenario that needed more than the default.
+    #[test]
+    fn a_twin_drops_the_x64_only_lines() {
+        let twin = scenarios().iter().find(|s| s.name == "arm_import_cost").unwrap();
+        let base = scenarios().iter().find(|s| s.name == "import_cost").unwrap();
+        for line in TWIN_X64_ONLY {
+            assert!(base.expect.contains(line), "{line}");
+            assert!(!twin.expect.contains(line), "{line}");
+        }
+        assert_eq!(twin.expect.len(), base.expect.len() - 1);
+    }
+
     #[test]
     fn an_arm64_twin_gets_its_x64_scenario_s_run_time() {
         let twins: Vec<&str> =
