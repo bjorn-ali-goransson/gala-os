@@ -8,9 +8,18 @@
  * Expected values are from Microsoft's documentation (learn.microsoft.com:
  * PropVariantClear, ReleaseStgMedium, OleRun, OleLockRunning,
  * OleSetContainedObject, CoSetProxyBlanket) and Wine's conformance tests
- * (dlls/ole32/tests/propvariant.c test_validtypes, validated on Windows);
- * no Windows machine was available to run this one, so it still needs a
- * run-all.ps1 check there. In short:
+ * (dlls/ole32/tests/propvariant.c test_validtypes, validated on Windows).
+ * The program is run on Windows 11 itself, which is what the answers
+ * below are, and where five of them turned out not to be what the
+ * documentation and Wine's tests say: revoking a bind-context object
+ * parameter that is not registered is E_FAIL and not S_FALSE,
+ * CreateBindCtx takes a reserved 1 as well as 0, PropVariantCopy
+ * answers an invalid type with DISP_E_BADVARTYPE where
+ * PropVariantClear gives STG_E_INVALIDPARAMETER, a stream whose
+ * block was freed under it faults (STG_E_READFAULT,
+ * STG_E_WRITEFAULT) instead of reading as empty, and CoFileTimeNow
+ * comes at a SYSTEMTIME's resolution and so can sit behind a
+ * GetSystemTimeAsFileTime taken just before it. In short:
  *
  * - PropVariantClear frees what the PROPVARIANT owns (strings with the
  *   task allocator or SysFreeString, interfaces released, vectors and
@@ -34,8 +43,10 @@
  *   STGM_READWRITE and the rest 0; options round-trip; bound objects
  *   are held (AddRef) until revoked (MK_E_NOTBOUND after) or
  *   ReleaseBoundObjects; object parameters by name (E_FAIL for an
- *   unknown one, S_FALSE revoking it twice) until revoked or the context
- *   ends; a reserved value other than 0 is E_INVALIDARG.
+ *   unknown one, and E_FAIL revoking one that is not there -- not the
+ *   documented S_FALSE) until revoked or the context ends; a reserved
+ *   reserved value of 0 or 1 is taken, 2 and above are E_INVALIDARG
+ *   and leave the caller's pointer untouched.
  * - CoImpersonateClient / CoRevertToSelf outside a COM call:
  *   RPC_E_CALL_COMPLETE (there is no call context).
  *
@@ -57,9 +68,27 @@
  * - RoGetAgileReference: Resolve gives the object; E_NOINTERFACE for an
  *   interface it lacks; the reference is released with the agile one.
  * - CoRegisterMessageFilter outside an STA: CO_E_NOT_SUPPORTED.
+ * - CoRegisterActivationFilter (Word's MSO.DLL delay-loads it, which is
+ *   where Office stopped): the filter belongs to the process, not to an
+ *   apartment, so it registers before CoInitializeEx and outlives
+ *   CoUninitialize; nothing asks it for an interface or holds a
+ *   reference on it; the first filter wins (the same pointer again S_OK,
+ *   a different one CO_E_NOT_SUPPORTED) and a NULL filter is
+ *   E_INVALIDARG and removes nothing. It is consulted on every
+ *   activation, CoGetClassObject as well as CoCreateInstance, with the
+ *   activation type 0 and a replacement CLSID that is GUID_NULL on
+ *   entry: a filter that names another class has that one activated and
+ *   is asked about it too, and a filter that fails turns the activation
+ *   into E_ACCESSDENIED whatever it returned. How many times it is
+ *   consulted for one CoCreateInstance is not fixed -- activating a
+ *   class can activate others, and the filter is asked about those as
+ *   well (CUIAutomation brings two with it on Windows) -- so what is
+ *   checked is the order the classes come in. ole32's entry and
+ *   combase's are the same function.
  * - PropVariantCopy: a VT_LPWSTR is copied (a new string), a VT_UNKNOWN
  *   AddRef'd, a vector of strings copied element by element; an invalid
- *   type is STG_E_INVALIDPARAMETER.
+ *   type is DISP_E_BADVARTYPE -- not the STG_E_INVALIDPARAMETER
+ *   PropVariantClear answers with for the very same type.
  * - CreateStreamOnHGlobal with an HGLOBAL (Wine's
  *   dlls/ole32/tests/hglobalstream.c): the stream starts with the
  *   block's contents and GlobalSize; writes past the end grow the block
@@ -67,16 +96,22 @@
  *   changes); GetHGlobalFromStream gives the handle (E_INVALIDARG for a
  *   NULL argument or another stream); clones share the block and size
  *   but have their own position, starting at the original's; the block
- *   is freed with the last stream when fDeleteOnRelease. A freed block
- *   reads as empty and fails SetSize and Write with E_OUTOFMEMORY.
+ *   is freed with the last stream when fDeleteOnRelease. A block freed
+ *   under the stream keeps the handle and size it cached, and every
+ *   call that touches the memory faults: STG_E_READFAULT and
+ *   STG_E_WRITEFAULT, while SetSize and a write past the cached end
+ *   are E_OUTOFMEMORY.
  *   Seek takes the low 32 bits of the move as signed and keeps the
  *   position in 32 bits: a result below 0 or past 4 GiB is
  *   STG_E_SEEKERROR (so is an unknown origin), which still reports the
  *   position; SetSize ignores the high 32 bits. CopyTo reads from this
  *   stream and writes what it read to the other.
- * - CoFileTimeNow: the system time as a FILETIME (between two
- *   GetSystemTimeAsFileTime calls). CoGetCurrentProcess: non-zero, the
- *   same on each call in a thread, another number in another thread.
+ * - CoFileTimeNow: the system time as a FILETIME at a SYSTEMTIME's
+ *   resolution -- truncated to whole milliseconds, so always a
+ *   multiple of 10000 and able to sit a millisecond behind a
+ *   GetSystemTimeAsFileTime taken just before the call.
+ *   CoGetCurrentProcess: non-zero, the same on each call in a thread,
+ *   another number in another thread.
  *
  * - A server process's lifetime (Delphi's ComServer looks these up; Inno
  *   Setup): CoAddRefServerProcess returns the new count (1, 2),
@@ -180,7 +215,14 @@ static void time_and_numbers(void) {
     ULONGLONG b = ((ULONGLONG)before.dwHighDateTime << 32) | before.dwLowDateTime;
     ULONGLONG n = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
     ULONGLONG a = ((ULONGLONG)after.dwHighDateTime << 32) | after.dwLowDateTime;
-    CHECK(b <= n && n <= a);
+    /* The time comes at a SYSTEMTIME's resolution: whole milliseconds,
+       the system time truncated rather than rounded, so it is a multiple
+       of 10000 and sits between the reading before the call truncated the
+       same way and the reading after it -- never between the two
+       untruncated readings, which is what a program comparing its stamp
+       against a finer clock relies on. */
+    CHECK(n % 10000 == 0);
+    CHECK(b - b % 10000 <= n && n <= a);
     DWORD mine = CoGetCurrentProcess(), theirs = 0;
     CHECK(mine != 0 && CoGetCurrentProcess() == mine);
     HANDLE t = CreateThread(NULL, 0, other_thread, &theirs, 0, NULL);
@@ -302,23 +344,144 @@ static void hglobal_streams(void) {
     CHECK(got2 == got && size == 0x8000);
     CHECK(IStream_Release(s) == 0 && IStream_Release(clone) == 0);
 
-    /* A block freed under the stream. */
+    /* A block freed under the stream: the handle and size the stream
+       cached stay as they were, and every call that touches the memory
+       faults -- STG_E_READFAULT and STG_E_WRITEFAULT, not the
+       E_OUTOFMEMORY SetSize and a write past the cached end give, which
+       fail in GlobalReAlloc before any memory is touched. A read at the
+       end and the zero-size calls touch nothing and are S_OK. (CopyTo
+       over such a block answers differently again -- out of one
+       STG_E_INSUFFICIENTMEMORY with the counts left as they were, into
+       one S_OK with nothing written -- and is not asserted here: gala
+       reports the fault underneath instead.) */
     h = GlobalAlloc(GMEM_MOVEABLE, sizeof text);
     memcpy(GlobalLock(h), text, sizeof text);
     GlobalUnlock(h);
     CHECK(CreateStreamOnHGlobal(h, FALSE, &s) == S_OK);
     CHECK(GlobalFree(h) == NULL);
+    stream_info(s, &got, &size, &pos);
+    CHECK(got == h && size == sizeof text && pos == 0);
     memset(buf, 0, sizeof buf);
     n = 7;
-    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 0 && buf[0] == 0);
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == STG_E_READFAULT && n == 0 && buf[0] == 0);
+    n = 7;
+    CHECK(IStream_Read(s, buf, 0, &n) == S_OK && n == 0);
+    n = 7;
+    CHECK(IStream_Write(s, buf, 0, &n) == S_OK && n == 0);
+    n = 7;
+    CHECK(IStream_Write(s, buf, 8, &n) == STG_E_WRITEFAULT && n == 0);
     to.QuadPart = 64;
     CHECK(IStream_SetSize(s, to) == E_OUTOFMEMORY);
+    move.QuadPart = 0;
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_END, &to) == S_OK && to.QuadPart == sizeof text);
+    n = 7;
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 0);
+    move.QuadPart = 100;
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_SET, &to) == S_OK);
     n = 7;
     CHECK(IStream_Write(s, buf, 8, &n) == E_OUTOFMEMORY && n == 0);
     CHECK(IStream_Release(s) == 0);
 }
 
+/* CoRegisterActivationFilter and IActivationFilter, which mingw-w64's
+ * headers do not declare (Microsoft's documentation: objidlbase.h,
+ * IID_IActivationFilter {00000017-0000-0000-C000-000000000046}). */
+typedef struct IActivationFilter IActivationFilter;
+typedef struct IActivationFilterVtbl {
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IActivationFilter *, REFIID, void **);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IActivationFilter *);
+    ULONG (STDMETHODCALLTYPE *Release)(IActivationFilter *);
+    HRESULT (STDMETHODCALLTYPE *HandleActivation)(IActivationFilter *, DWORD, REFCLSID, CLSID *);
+} IActivationFilterVtbl;
+struct IActivationFilter { IActivationFilterVtbl *vtbl; };
+HRESULT WINAPI CoRegisterActivationFilter(IActivationFilter *filter);
+
+/* The filter this process registers. It records what it was asked about
+ * and does what filter_mode says; a registration cannot be taken back,
+ * so one filter serves the whole program. */
+enum { FILTER_COUNT, FILTER_REPLACE, FILTER_FAIL };
+static int filter_mode;
+static CLSID filter_replacement, filter_replace_when;
+static int filter_queried, filter_addrefs;
+/* What the filter was asked about since the last filter_watch(). The
+   count is not a property of ole32: activating one class can activate
+   others, and the filter is asked about those too (on Windows
+   CUIAutomation brings two with it), so what is asserted is the order
+   the classes come in. */
+static int filter_calls;
+static CLSID filter_seen[4];
+static DWORD filter_type[4];
+static int filter_entry_was_null[4];
+
+static void filter_watch(void) {
+    filter_calls = 0;
+}
+
+static HRESULT STDMETHODCALLTYPE f_qi(IActivationFilter *me, REFIID riid, void **out) {
+    (void)me;
+    (void)riid;
+    filter_queried++;
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE f_addref(IActivationFilter *me) {
+    (void)me;
+    filter_addrefs++;
+    return 2;
+}
+static ULONG STDMETHODCALLTYPE f_release(IActivationFilter *me) {
+    (void)me;
+    return 1;
+}
+static HRESULT STDMETHODCALLTYPE f_handle(IActivationFilter *me, DWORD type, REFCLSID rclsid,
+                                          CLSID *replacement) {
+    static const CLSID zero;
+    (void)me;
+    if (filter_calls < 4) {
+        filter_seen[filter_calls] = *rclsid;
+        filter_type[filter_calls] = type;
+        filter_entry_was_null[filter_calls] =
+            replacement != NULL && IsEqualCLSID(replacement, &zero);
+    }
+    filter_calls++;
+    /* Only the one class it was told to replace: a filter that replaces
+       every class it is asked about replaces the ones its own
+       replacement activates too, and recurses until the stack is gone
+       (measured on Windows, which bounds none of this). */
+    if (filter_mode == FILTER_REPLACE && replacement
+        && IsEqualCLSID(rclsid, &filter_replace_when)) {
+        *replacement = filter_replacement;
+    }
+    return filter_mode == FILTER_FAIL ? E_FAIL : S_OK;
+}
+static IActivationFilterVtbl FILTER_VTBL = {f_qi, f_addref, f_release, f_handle};
+static IActivationFilter the_filter = {&FILTER_VTBL};
+static IActivationFilter another_filter = {&FILTER_VTBL};
+
 int main(void) {
+    /* CoRegisterActivationFilter, before any apartment exists: the filter
+       belongs to the process, so it needs no CoInitializeEx, and it
+       outlives CoUninitialize. The first filter wins -- the same pointer
+       again is S_OK, a different one CO_E_NOT_SUPPORTED -- and a NULL
+       filter is E_INVALIDARG and removes nothing, so this registration
+       stands for the rest of the program. Nothing asks the filter for an
+       interface or holds a reference on it. */
+    CHECK(CoRegisterActivationFilter(NULL) == E_INVALIDARG);
+    CHECK(CoRegisterActivationFilter(&the_filter) == S_OK);
+    CHECK(CoRegisterActivationFilter(&the_filter) == S_OK);
+    CHECK(CoRegisterActivationFilter(&another_filter) == CO_E_NOT_SUPPORTED);
+    CHECK(CoRegisterActivationFilter(NULL) == E_INVALIDARG);
+    CHECK(filter_calls == 0 && filter_queried == 0 && filter_addrefs == 0);
+    filter_watch();
+    /* ole32 and combase answer with one and the same function: Windows
+       forwards ole32's entry to combase's, gala combase's to ole32's. */
+    {
+        HMODULE combase = LoadLibraryW(L"combase.dll");
+        FARPROC mine = GetProcAddress(GetModuleHandleW(L"ole32.dll"),
+                                      "CoRegisterActivationFilter");
+        CHECK(combase != NULL && mine != NULL);
+        CHECK(GetProcAddress(combase, "CoRegisterActivationFilter") == mine);
+    }
     CHECK(SUCCEEDED(CoInitializeEx(NULL, COINIT_MULTITHREADED)));
     PROPVARIANT pv;
 
@@ -472,6 +635,49 @@ int main(void) {
     CHECK(one.hr == REGDB_E_CLASSNOTREG && one.pItf == NULL);
     CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 0, &one) == E_INVALIDARG);
 
+    /* The activation filter is consulted on every activation: the class
+       asked for first, with the activation type 0 and a replacement
+       CLSID that is GUID_NULL on entry. */
+    IUnknown *made = NULL;
+    filter_watch();
+    CHECK(CoCreateInstance(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, &IID_IUnknown,
+                           (void **)&made) == S_OK && made);
+    IUnknown_Release(made);
+    made = NULL;
+    CHECK(filter_calls >= 1 && filter_type[0] == 0 && filter_entry_was_null[0]);
+    CHECK(IsEqualCLSID(&filter_seen[0], &clsid_uia));
+    /* CoGetClassObject asks it too, not only CoCreateInstance; nothing is
+       created, so it is asked about that class alone. */
+    IClassFactory *cf = NULL;
+    filter_watch();
+    CHECK(CoGetClassObject(&clsid_uia, CLSCTX_INPROC_SERVER, NULL, &IID_IClassFactory,
+                           (void **)&cf) == S_OK && cf);
+    IClassFactory_Release(cf);
+    CHECK(filter_calls == 1 && IsEqualCLSID(&filter_seen[0], &clsid_uia));
+    /* A filter that names another class has that one activated instead,
+       and is asked about the replacement as well; it stops replacing when
+       it leaves the replacement alone (here: when it is asked about the
+       class it names). A class nothing is registered under is activated
+       this way. */
+    filter_mode = FILTER_REPLACE;
+    filter_replace_when = iid_none;
+    filter_replacement = clsid_uia;
+    filter_watch();
+    CHECK(CoCreateInstance(&iid_none, NULL, CLSCTX_INPROC_SERVER, &IID_IUnknown,
+                           (void **)&made) == S_OK && made);
+    IUnknown_Release(made);
+    made = NULL;
+    CHECK(filter_calls >= 2 && IsEqualCLSID(&filter_seen[0], &iid_none));
+    CHECK(IsEqualCLSID(&filter_seen[1], &clsid_uia));
+    /* A filter that fails makes the activation E_ACCESSDENIED, whatever
+       it returned, and nothing is created or asked about. */
+    filter_mode = FILTER_FAIL;
+    filter_watch();
+    CHECK(CoCreateInstance(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, &IID_IUnknown,
+                           (void **)&made) == E_ACCESSDENIED && made == NULL);
+    CHECK(filter_calls == 1);
+    filter_mode = FILTER_COUNT;
+
     /* CreateBindCtx: bound objects, parameters, bind options. */
     IBindCtx *ctx = NULL;
     CHECK(CreateBindCtx(0, &ctx) == S_OK && ctx != NULL);
@@ -499,14 +705,28 @@ int main(void) {
     got = (IUnknown *)1;
     CHECK(IBindCtx_GetObjectParam(ctx, L"other", &got) == E_FAIL && got == NULL);
     CHECK(IBindCtx_RevokeObjectParam(ctx, L"gala") == S_OK && param.refs == 1);
-    CHECK(IBindCtx_RevokeObjectParam(ctx, L"gala") == S_FALSE);
+    /* A name that is not registered is E_FAIL, not the documented
+       S_FALSE, and so is L"". A NULL name is not asked for: Windows
+       reads the name without checking it and faults once the context has
+       held a parameter, so there is nothing to compare gala's E_FAIL
+       with. */
+    CHECK(IBindCtx_RevokeObjectParam(ctx, L"gala") == E_FAIL);
+    CHECK(IBindCtx_RevokeObjectParam(ctx, L"") == E_FAIL);
     CHECK(IBindCtx_RevokeObjectBound(ctx, (IUnknown *)&bound) == S_OK && bound.refs == 1);
     CHECK(IBindCtx_RevokeObjectBound(ctx, (IUnknown *)&bound) == MK_E_NOTBOUND);
     CHECK(IBindCtx_RegisterObjectBound(ctx, (IUnknown *)&bound) == S_OK && bound.refs == 2);
     CHECK(IBindCtx_RegisterObjectParam(ctx, L"gala", (IUnknown *)&param) == S_OK && param.refs == 2);
     CHECK(IBindCtx_ReleaseBoundObjects(ctx) == S_OK && bound.refs == 1);
     CHECK(IBindCtx_Release(ctx) == 0 && param.refs == 1);
-    CHECK(CreateBindCtx(1, &ctx) == E_INVALIDARG);
+    /* The reserved argument: documented as having to be 0, and 1 is
+       taken too; 2 and above are E_INVALIDARG, and then the caller's
+       pointer is left as it was rather than cleared. */
+    CHECK(CreateBindCtx(1, &ctx) == S_OK && ctx != NULL);
+    CHECK(IBindCtx_Release(ctx) == 0);
+    ctx = (IBindCtx *)1;
+    CHECK(CreateBindCtx(2, &ctx) == E_INVALIDARG && ctx == (IBindCtx *)1);
+    CHECK(CreateBindCtx(0xffffffff, &ctx) == E_INVALIDARG && ctx == (IBindCtx *)1);
+    CHECK(CreateBindCtx(0, NULL) == E_INVALIDARG);
 
     /* Outside a COM call there is no client to impersonate. */
     CHECK(CoImpersonateClient() == RPC_E_CALL_COMPLETE);
@@ -622,8 +842,17 @@ int main(void) {
         CHECK(PropVariantClear(&b) == S_OK);
         CoTaskMemFree(items[0]);
         CoTaskMemFree(items[1]);
+        /* An invalid type is DISP_E_BADVARTYPE with the destination
+           zeroed, not the STG_E_INVALIDPARAMETER PropVariantClear gives
+           for those very same types. */
+        memset(&a, 0x55, sizeof a);
         a.vt = 0x5555;
-        CHECK(PropVariantCopy(&b, &a) == STG_E_INVALIDPARAMETER);
+        CHECK(PropVariantCopy(&b, &a) == DISP_E_BADVARTYPE && zeroed(&b));
+        a.vt = VT_VECTOR | VT_DISPATCH;
+        a.caub.cElems = 0;
+        a.caub.pElems = NULL;
+        CHECK(PropVariantCopy(&b, &a) == DISP_E_BADVARTYPE && zeroed(&b));
+        CHECK(PropVariantClear(&a) == STG_E_INVALIDPARAMETER);
     }
 
     hglobal_streams();

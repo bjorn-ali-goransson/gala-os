@@ -140,6 +140,13 @@ pub fn missing(function: &[u8], detail: u64) {
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, detail) };
 }
 
+/// A row for an answer gala did give ("reached"), so a program's path
+/// through COM is in the ledger even where nothing is missing.
+pub fn reached(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer.
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 9, detail) };
+}
+
 // ---- Memory ----
 
 pub fn alloc(size: usize) -> *mut u8 {
@@ -182,14 +189,22 @@ pub extern "system" fn CoTaskMemFree(p: *mut u8) {
     free(p);
 }
 
-/// CoFileTimeNow: the current time as a FILETIME (UTC).
+/// CoFileTimeNow: the current time as a FILETIME (UTC), at a
+/// SYSTEMTIME's resolution. Measured on Windows 11 (`ole32_test`) the
+/// value is always a multiple of 10000, equal to the system time
+/// truncated to whole milliseconds, so it can be a millisecond behind a
+/// GetSystemTimeAsFileTime taken just before the call; programs that
+/// stamp with it and compare against a finer clock depend on that.
 #[unsafe(no_mangle)]
 pub extern "system" fn CoFileTimeNow(time: *mut u64) -> HResult {
     if time.is_null() {
         return E_INVALIDARG;
     }
+    let mut now = 0u64;
+    // SAFETY: a u64 of ours.
+    unsafe { GetSystemTimeAsFileTime(&mut now) };
     // SAFETY: the caller's FILETIME.
-    unsafe { GetSystemTimeAsFileTime(time) };
+    unsafe { time.write(now - now % 10_000) };
     S_OK
 }
 

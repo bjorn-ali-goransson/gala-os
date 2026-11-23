@@ -29,6 +29,7 @@ unsafe extern "system" {
 const IID_IRUNNABLEOBJECT: Guid = ole_iid(0x126);
 const IID_ICLIENTSECURITY: Guid = ole_iid(0x13d);
 const STG_E_INVALIDPARAMETER: HResult = 0x8003_0057u32 as i32;
+const DISP_E_BADVARTYPE: HResult = 0x8002_0008u32 as i32;
 
 /// The export `name` (NUL-terminated) of the DLL `dll` (NUL-terminated
 /// UTF-16), loading it; 0 if either is missing.
@@ -294,7 +295,9 @@ fn copy_element(t: u16, v: usize) -> Option<usize> {
 /// PropVariantCopy(dest, src): a copy that owns its own data: strings,
 /// BSTRs, blobs, clipboard data and vectors copied, interfaces AddRef'd,
 /// SAFEARRAYs copied with SafeArrayCopy; by-reference values copied as
-/// they are. An invalid type is STG_E_INVALIDPARAMETER (dest zeroed).
+/// they are. An invalid type is DISP_E_BADVARTYPE (dest zeroed), not the
+/// STG_E_INVALIDPARAMETER PropVariantClear gives for the very same type;
+/// measured on Windows 11 (`ole32_test`).
 #[unsafe(no_mangle)]
 pub extern "system" fn PropVariantCopy(dest: *mut PropVariant, src: *const PropVariant) -> HResult {
     if dest.is_null() || src.is_null() {
@@ -390,7 +393,7 @@ pub extern "system" fn PropVariantCopy(dest: *mut PropVariant, src: *const PropV
         _ => {
             // SAFETY: the caller's PROPVARIANT.
             unsafe { dest.write(PropVariant { vt: VT_EMPTY, reserved: [0; 3], value: [0; 2] }) };
-            return STG_E_INVALIDPARAMETER;
+            return DISP_E_BADVARTYPE;
         }
     };
     match ok {
