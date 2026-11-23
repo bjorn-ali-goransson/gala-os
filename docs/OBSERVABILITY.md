@@ -842,7 +842,11 @@ keep one each: `target/failed/<name>.r<i>.log`), which ends with:
   CPUs, heap (peak) and frames (fewest free), warning/error counts and
   the first error, panic/exception/watchdog/leak/out-of-memory/
   missing-function lines, programs begun and not ended, processes that
-  failed, the gaps hit last and the ledger's top five, the state
+  failed, the gaps hit last, the ledger's top five and every missing
+  export or import it holds (a function gala lacks is never the
+  program's own doing and one hit is enough to end a program -- Word
+  died on a delay load with a single hit -- so those are named in full,
+  up to thirty of them), the state
   dump's CPUs, locks and threads, each thread's last system calls (event stream, else flight
   recorder), user faults, a TSC under 500 MHz as a suspicious clock,
   `triage: clock WRONG`, the last lines. `cargo xtask triage <log>
