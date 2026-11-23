@@ -504,9 +504,17 @@ fn run_pid(serial: &str) -> Option<&str> {
 /// as one its death kills, is not it); None if the log has no end line
 /// for it.
 pub fn transcript_from_log(serial: &str) -> Option<String> {
+    transcript_skipping(serial, &[])
+}
+
+/// [`transcript_from_log`] without the log's lines at `skip`.
+fn transcript_skipping(serial: &str, skip: &[usize]) -> Option<String> {
     let run = run_pid(serial)?;
     let (mut stdout, mut stderr, mut end) = (String::new(), String::new(), None);
-    for line in serial.lines() {
+    for (i, line) in serial.lines().enumerate() {
+        if skip.contains(&i) {
+            continue;
+        }
         let Some((_, rest)) = line.split_once("lx: pid ") else { continue };
         let Some((pid, rest)) = rest.split_once(' ') else { continue };
         if let Some(text) = rest.strip_prefix("stdout: ") {
@@ -528,6 +536,54 @@ pub fn transcript_from_log(serial: &str) -> Option<String> {
     out += &end;
     out.push('\n');
     Some(out)
+}
+
+/// Lines of stderr that real Linux prints in some runs and not in others,
+/// by a race inside the program itself (not gala's): the scenario's
+/// transcript is recorded without them, and [`check_boot`] accepts a run
+/// that prints them, naming each one it accepted. Each entry is (the
+/// scenario, the end of the line, why). A line is in this list only when
+/// the race has been read in the program's source and seen on Linux.
+const RACY_LINES: &[(&str, &str, &str)] = &[(
+    "lx_gimp_batch",
+    ": gimp_flush(): error: Broken pipe",
+    "GIMP 3.2 closes a plug-in's pipes when the plug-in's procedure returns \
+     (gimp_plug_in_handle_proc_return), while the plug-in still writes its \
+     GP_QUIT after detaching its shared memory: when the close comes first \
+     the write fails with EPIPE and libgimp warns. Ubuntu 26.04's GIMP 3.2.2 \
+     printed it for file-png in 1 of 11 runs of batch.sh",
+)];
+
+/// The serial log's lines (indices into `serial.lines()`) that hold
+/// stderr lines [`RACY_LINES`] lists for `scenario`, each with the blank
+/// line its process wrote just before it (GLib starts a warning with a
+/// newline), and the lines' text.
+fn racy_lines(scenario: &str, serial: &str) -> (Vec<usize>, Vec<String>) {
+    let racy =
+        |text: &str| RACY_LINES.iter().any(|(s, end, _)| *s == scenario && text.ends_with(end));
+    let (mut skip, mut taken) = (Vec::new(), Vec::new());
+    // Each process's last stderr line so far: (its index, whether blank).
+    let mut last: Vec<(&str, usize, bool)> = Vec::new();
+    for (i, line) in serial.lines().enumerate() {
+        let Some((_, rest)) = line.split_once("lx: pid ") else { continue };
+        let Some((pid, rest)) = rest.split_once(' ') else { continue };
+        let Some(text) = rest.strip_prefix("stderr: ") else { continue };
+        let before = last.iter().position(|(p, _, _)| *p == pid);
+        if racy(text) {
+            skip.push(i);
+            taken.push(text.to_string());
+            if let Some(at) = before
+                && last[at].2
+            {
+                skip.push(last[at].1);
+            }
+        }
+        match before {
+            Some(at) => last[at] = (pid, i, text.is_empty()),
+            None => last.push((pid, i, text.is_empty())),
+        }
+    }
+    (skip, taken)
 }
 
 /// For a boot scenario that runs a user/lx program (`lxrun=/lx/<binary>`):
@@ -572,6 +628,16 @@ pub fn check_boot(
         return Err(format!("{binary}: no `lx: pid N -- exit status` line in the log"));
     };
     if got == want {
+        return Ok(());
+    }
+    let (skip, taken) = racy_lines(scenario, serial);
+    if !skip.is_empty() && transcript_skipping(serial, &skip).is_some_and(|t| t == want) {
+        for line in &taken {
+            eprintln!(
+                "xtask: {scenario}: accepted a line real Linux prints in some runs only \
+                 (lx_expect.rs RACY_LINES): {line}"
+            );
+        }
         return Ok(());
     }
     Err(format!(
@@ -645,6 +711,32 @@ mod tests {
             transcript_from_log(log).unwrap(),
             "ok\n-- stderr:\nfrom the child\n-- exit status 0\n"
         );
+    }
+
+    /// GIMP's own race (RACY_LINES): the plug-in's warning and the blank
+    /// line its process wrote before it are taken out, for its scenario
+    /// only, wherever the other processes' lines fall (the log of a CI
+    /// run's arm_lx_gimp_batch, shortened).
+    #[test]
+    fn racy_lines_are_taken_out_for_their_scenario() {
+        let log = "[info ] process sh (pid 4, session 1): starting at 0x1000, personality linux\n\
+                   [info ] lx: pid 36 stderr: GIMP-Warning: Welcome to GIMP 3.2.2!\n\
+                   [info ] lx: pid 36 stderr: \n\
+                   [info ] lx: pid 108 stderr: \n\
+                   [info ] lx: pid 36 stderr: PNG image-Warning: Operation not supported\n\
+                   [info ] lx: pid 108 stderr: (file-png:108): LibGimp-WARNING **: 13:38:12.259: file-png: gimp_flush(): error: Broken pipe\n\
+                   [info ] lx: pid 36 stderr: \n\
+                   [info ] lx: pid 4 stdout: done\n\
+                   [info ] lx: pid 4 -- exit status 0\n";
+        let want = "done\n-- stderr:\nGIMP-Warning: Welcome to GIMP 3.2.2!\n\n\
+                    PNG image-Warning: Operation not supported\n\n-- exit status 0\n";
+        let (skip, taken) = racy_lines("lx_gimp_batch", log);
+        assert_eq!(skip, [5, 3]);
+        assert_eq!(taken.len(), 1);
+        assert!(taken[0].starts_with("(file-png:108)"), "{taken:?}");
+        assert_eq!(transcript_skipping(log, &skip).unwrap(), want);
+        assert_ne!(transcript_from_log(log).unwrap(), want);
+        assert_eq!(racy_lines("lx_inkscape_batch", log), (vec![], vec![]));
     }
 
     #[test]

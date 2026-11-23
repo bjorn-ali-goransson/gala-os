@@ -2936,6 +2936,20 @@ A root is what its workload opened on real 26.04, traced:
   env -i HOME=<home> PATH=/usr/bin:/bin BB= DIR=<a copy of user/lx/gimp>
   sh <that copy>/batch.sh`, stdout, then `-- stderr:` and stderr, then
   `-- exit status 0`. Run it twice: the transcripts must be the same.
+- **GIMP's own race**: GIMP 3.2 closes a plug-in's pipes as soon as the
+  plug-in's procedure returns (`gimp_plug_in_handle_proc_return`), while
+  the plug-in still detaches its shared memory and then writes GP_QUIT.
+  When the close comes first, the write fails with EPIPE and the plug-in
+  warns `(file-png:<pid>): LibGimp-WARNING **: <time>: file-png:
+  gimp_flush(): error: Broken pipe`, after a blank line of its own. It
+  exits 0 all the same. Ubuntu's GIMP 3.2.2 printed it in 1 of 11 runs.
+  The transcript is recorded without it, and `lx_expect::check_boot`
+  accepts it: `RACY_LINES` lists such lines with their evidence, takes
+  each out of the log together with its process's blank line before it,
+  and prints `xtask: <scenario>: accepted a line real Linux prints in
+  some runs only`. A line goes in `RACY_LINES` only when the race has
+  been read in the program's source and seen on Linux. A gala bug that
+  ended a pipe early shows as some other difference.
 - **The saved file is compared byte for byte**, so it carries nothing
   that changes between runs: the gimprc turns off exporting the colour
   profile, Exif, XMP and IPTC (their dates and document ids), and
