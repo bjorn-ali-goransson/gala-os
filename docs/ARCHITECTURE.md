@@ -56,7 +56,9 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/lx/machine/       Linux's ABI on this architecture (x86_64.rs: registers, signal frame)
   src/hosted/           gala-um's platform (feature `hosted`; memfd, host threads, signals) [unsafe allowed]
 user/                   freestanding Windows programs and DLLs (x86_64-pc-windows-msvc)
-  ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
+  ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access, and the
+                        panic handler (`<program>: panic at <file>:<line>:<col>: <message>`,
+                        then exit 0xC0000409)
                         (x64.rs; x86.rs for 32-bit programs, "Plan: WOW64")
   wow64/                wow64.dll, the 64-bit side of 32-bit processes
   <name>_test/          test programs (one per feature)

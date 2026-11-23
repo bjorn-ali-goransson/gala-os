@@ -21000,6 +21000,22 @@ const BASE_SCENARIOS: &[Scenario] = &[
             BOOT_OK_MARKER,
         ],
     },
+    Scenario {
+        // A Rust panic in a test program (an index past an array's end):
+        // ntrt's handler prints where and why before it ends the process
+        // with 0xC0000409, so a program that panics now and then on real
+        // Windows names its line in the run's output.
+        name: "crash_panic",
+        cmdline: "qemu_exit run=crash.exe args=panic",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: indexing past the end of an array",
+            "crash: panic at user/crash/src/main.rs:",
+            ": index out of bounds: the len is 3 but the index is 3",
+            "process crash.exe (pid 4) exited with status 0xc0000409",
+            BOOT_OK_MARKER,
+        ],
+    },
     // The Linux personality (ROADMAP LX milestone 1): each user/lx program,
     // static and static-pie, with the arguments and environment `cargo
     // xtask lx-expect` gives it on Linux.
