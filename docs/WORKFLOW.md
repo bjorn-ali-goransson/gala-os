@@ -4113,6 +4113,17 @@ named after the line (`office_word-desktop-shown-window-1s.png`):
 
     XTASK_SHOTS='desktop: shown window+1' cargo xtask boot-test office_word
 
+The moments nobody can name in advance are the kernel's to ask for:
+`hook=window=shot` on the kernel command line takes a screendump as each
+top-level window becomes visible, `+<secs>` after it if asked, and
+`hook=window/<text>:<n>=shot` only of the windows whose program or title
+holds the text, `n` at most. The files are named after the program and
+the window (`hook_test-hook-hook-test-exe-w4.png`), so a run with no idea
+when its windows go up still comes back with a picture of each
+(OBSERVABILITY "Hooks"; scenarios `hook_test`, `hook_match_test`):
+
+    cargo xtask boot-test office_word   # with hook=window=shot+1 in its cmdline
+
 A second guessed from the outside is missed as often as it is caught --
 Word's splash lives about 2 s of a 90 s run, and the run is as fast as
 the host is free that minute -- while the log knows when the window is

@@ -9580,6 +9580,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winevent_test", "gdi32.dll", "Windows/System32"),
     ("winevent_test", "bcryptprimitives.dll", "Windows/System32"),
     ("winevent_test", "user/bin/winevent_test.exe", "gala"),
+    ("hook_test", "ntdll.dll", "Windows/System32"),
+    ("hook_test", "kernel32.dll", "Windows/System32"),
+    ("hook_test", "msvcrt.dll", "Windows/System32"),
+    ("hook_test", "user32.dll", "Windows/System32"),
+    ("hook_test", "gdi32.dll", "Windows/System32"),
+    ("hook_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("hook_test", "user/bin/hook_test.exe", "gala"),
     ("uia_test", "ntdll.dll", "Windows/System32"),
     ("uia_test", "kernel32.dll", "Windows/System32"),
     ("uia_test", "msvcrt.dll", "Windows/System32"),
@@ -11662,7 +11669,9 @@ commands:
                and the named DLLs into the resumed machine (docs/WORKFLOW.md,
                Hot swapping DLLs and the kernel);
                XTASK_SHOTS=<secs>|<serial log line>[+<secs>],...: screendumps
-               of the screen as the run goes, in target/screenshots/
+               of the screen as the run goes, in target/screenshots/ (the
+               kernel asks for its own there too, at an event rather than a
+               second: hook=window=shot, docs/OBSERVABILITY.md, Hooks)
   snapshots    list the machine snapshots (target/snapshots): what, when, size,
                build; snapshots rm <name> deletes one
   hotswap-diff what a hot swap would patch: hotswap-diff <old> <old.map>
@@ -13840,6 +13849,9 @@ const UEFI_SCENARIOS: &[&str] = &[
     "selftest",
     "fault-pagefault",
     "gui_test",
+    // A framebuffer for the windows a hook takes pictures of (nt::hooks).
+    "hook_test",
+    "hook_match_test",
     "paint_thread_test",
     "virtio_gpu",
     "virtio_gpu_reset",
@@ -17891,6 +17903,54 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // A hook on the window event, taking a screendump of each window
+        // as it goes up (user/hook_test/main.c, mingw; nt::hooks,
+        // docs/OBSERVABILITY.md "Hooks"). What it proves is that the
+        // kernel asked for a picture of every one of the four windows
+        // and that the host wrote each to its own file: the count the
+        // arming line states is the count the run spends, and the files
+        // are named after the program and the window and not after a
+        // second of the run.
+        name: "hook_test",
+        cmdline: "qemu_exit hook=window=shot run=hook_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hook: armed: window shown -> screendump, 4 shots, 0.000 s after each (hook=)",
+            "window 'hook_test one' shown by hook_test.exe (pid",
+            "window 'hook_test two' shown by hook_test.exe (pid",
+            "window 'hook_test three' shown by hook_test.exe (pid",
+            "window 'hook_test three again' shown by hook_test.exe (pid",
+            "hook_test-hook-hook-test-exe-w",
+            "hook_test: all 4 windows shown",
+            "hook_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same four windows, with a hook that wants only the ones
+        // whose name holds "three" and has one picture to give. Two of
+        // the four hold it, so the fourth window finds the count spent:
+        // the line that says so carries the number of windows the match
+        // passed over, which is the only thing that can prove the match
+        // chose rather than the count (an expectation is a line that
+        // must appear, never one that must not). The second `hook=` word
+        // asks for an action there is none of: the warning says what the
+        // grammar is, and the run goes on with the first hook armed.
+        name: "hook_match_test",
+        cmdline: "qemu_exit hook=window/three:1=shot+1 hook=window=dump run=hook_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hook: hook=window=dump is not <event>[/<text>][:<n>]=<action>[+<secs>]",
+            "no hook armed",
+            "hook: armed: window shown -> screendump, 1 shot, 1.000 s after each (hook=), only \
+             those whose program or title holds \"three\" (either case)",
+            "window 'hook_test three' shown by hook_test.exe (pid",
+            "hook: window: no shots left of the 1 asked for (2 windows passed over by the match)",
+            "hook_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // UI Automation's client (gala's UIAutomationCore.dll) over the
         // window tree: elements, conditions, Invoke/Value/Toggle
         // (user/uia_test/main.c, mingw).
@@ -21870,6 +21930,7 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("hook_match_test", "hook_test"),
     ("d2d1_window", "d2d1_test"),
     ("d2d1_window", "d2d1_window"),
     ("office_install_gui", "office_install"),
@@ -22978,6 +23039,8 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("busybox", "child processes (pipelines are child processes)"),
     ("cmd_test", "child processes (one NT process per Linux process)"),
     ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
+    ("hook_test", "needs a screen (the hook's screendumps come from QEMU's monitor)"),
+    ("hook_match_test", "needs a screen (the hook's screendumps come from QEMU's monitor)"),
     ("paint_thread_test", "needs a screen (the square must reach the desktop)"),
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
@@ -24370,7 +24433,7 @@ fn run_vm_once(
         serial.push('\n');
     }
     serial += &snap_note;
-    serial += &shots.missed();
+    serial += &shots.notes();
     if let Some(note) = dump_note {
         serial += &note;
     }
@@ -24564,9 +24627,34 @@ fn fewer_cpus(got: u32, want: u32) -> String {
 /// is missed as often as it is caught (Word's splash lives about 2 s of a
 /// 90 s run, and the run is as fast as the host is free), while
 /// `XTASK_SHOTS='desktop: shown window+1'` catches it on every run.
+///
+/// A line only works when the line is known in advance, which the first
+/// window of a run is and the ones after it are not. Those the kernel
+/// asks for itself (`hook=window=shot`, `nt::hooks`, OBSERVABILITY
+/// "Hooks"): it writes a request to the serial log as the event happens,
+/// and [`Shots::hook_requests`] turns each into one of these, written to
+/// `target/screenshots/<scenario>-hook-<name>.png`.
 struct Shots {
     shots: Vec<Shot>,
+    /// The scenario the files are named after. A hook's request arrives
+    /// while the run goes, so its file cannot be named in advance.
+    scenario: String,
+    /// How far the serial log has been read for hook requests.
+    scanned: u64,
+    /// What was written and what failed, for the serial log ([`notes`]).
+    ///
+    /// [`notes`]: Shots::notes
+    took: String,
+    /// Whether the line saying the host will take no more hook shots has
+    /// been written.
+    full: bool,
 }
+
+/// The most screendumps one run's hooks may ask the host for. The kernel
+/// bounds what it asks for (`nt::hooks`); this is the host's own guard,
+/// because the requests come from a guest and each picture is about a
+/// quarter of a megabyte.
+const MAX_HOOK_SHOTS: usize = 64;
 
 /// One screendump: what it waits for, how long it waits after that, the
 /// file it is written to, and where it has got to.
@@ -24602,14 +24690,82 @@ impl Shots {
         // The timed ones in their order, so their files are written in
         // it; the ones a line brings are taken when it comes.
         shots.sort_by(|a, b| a.order().total_cmp(&b.order()));
-        Ok(Self { shots })
+        Ok(Self {
+            shots,
+            scenario: scenario.to_string(),
+            scanned: 0,
+            took: String::new(),
+            full: false,
+        })
+    }
+
+    /// A screendump for every hook request the serial log has grown
+    /// since the last poll: `hook: shot +<secs> <name>: ...`, which the
+    /// kernel writes as it happens (`nt::hooks`). The delay counts from
+    /// here and not from the event, which is at most one poll earlier.
+    ///
+    /// The log is read from where the last poll stopped, so watching a
+    /// long run for requests costs its new bytes and not the whole file.
+    fn hook_requests(&mut self, elapsed: Duration, log: &Path) {
+        use std::io::{Read, Seek, SeekFrom};
+        const MARK: &str = "hook: shot +";
+        let Ok(mut file) = fs::File::open(log) else { return };
+        if file.seek(SeekFrom::Start(self.scanned)).is_err() {
+            return;
+        }
+        let mut grown = Vec::new();
+        if file.read_to_end(&mut grown).is_err() {
+            return;
+        }
+        // Whole lines only; what is left of one is read again next poll,
+        // when the rest of it has been written.
+        let Some(end) = grown.iter().rposition(|&b| b == b'\n') else { return };
+        self.scanned += end as u64 + 1;
+        for line in String::from_utf8_lossy(&grown[..end]).lines() {
+            let Some(at) = line.find(MARK) else { continue };
+            let Some((after, name)) = hook_request(&line[at + MARK.len()..]) else {
+                let note = format!("xtask: screenshot: {line:?} is not a hook request\n");
+                eprint!("{note}");
+                self.took += &note;
+                continue;
+            };
+            if self.shots.len() >= MAX_HOOK_SHOTS {
+                if !self.full {
+                    self.full = true;
+                    self.took += &format!(
+                        "xtask: screenshot: {MAX_HOOK_SHOTS} hook shots is all one run takes; \
+                         the requests after that are left\n"
+                    );
+                }
+                return;
+            }
+            // A window shown, hidden and shown again asks twice, and the
+            // second picture must not write over the first.
+            let base = format!("{}-hook-{name}", self.scenario);
+            let mut png = format!("{base}.png");
+            let mut nth = 2;
+            while self.shots.iter().any(|s| s.file == png) {
+                png = format!("{base}-{nth}.png");
+                nth += 1;
+            }
+            self.shots.push(Shot {
+                when: When::At(elapsed.as_secs_f64() + after),
+                after: 0.0,
+                file: png,
+                seen: None,
+                taken: false,
+            });
+        }
     }
 
     /// Takes the screendumps whose time has come; one that fails is
     /// reported on stderr and the run goes on (a picture is not a verdict).
     fn take_due(&mut self, socket: &Path, elapsed: Duration, log: &Path) {
+        self.hook_requests(elapsed, log);
         // Read once a poll, and only while a line is still waited for.
         let mut serial: Option<Vec<u8>> = None;
+        // Gathered as the shots are walked, which holds a borrow of them.
+        let mut took = String::new();
         for shot in self.shots.iter_mut().filter(|s| !s.taken) {
             if shot.seen.is_none() {
                 shot.seen = match &shot.when {
@@ -24631,13 +24787,23 @@ impl Shots {
             let taken = fs::create_dir_all(&dir)
                 .map_err(|e| format!("creating {dir:?}: {e}"))
                 .and_then(|()| screendump_png(socket, &png));
-            match taken {
+            let note = match taken {
                 Ok(()) => {
-                    eprintln!("xtask: wrote {} ({:.0} s in)", png.display(), elapsed.as_secs_f64())
+                    format!("xtask: wrote {} ({:.0} s in)\n", png.display(), elapsed.as_secs_f64())
                 }
-                Err(e) => eprintln!("xtask: screenshot {}: {e}", shot.file),
-            }
+                Err(e) => format!("xtask: screenshot {}: {e}\n", shot.file),
+            };
+            eprint!("{note}");
+            took += &note;
         }
+        self.took += &took;
+    }
+
+    /// The screendumps a run wrote, then the ones it never reached: what
+    /// a hook asked for is named by nothing else, the request having
+    /// been the guest's and not the command's.
+    fn notes(&self) -> String {
+        self.took.clone() + &self.missed()
     }
 
     /// The ones the run never reached, for the serial log: a line that
@@ -24692,6 +24858,18 @@ impl Shot {
             When::Line(_) => f64::INFINITY,
         }
     }
+}
+
+/// `<secs> <name>: ...` of a `hook: shot` request, as its delay and the
+/// name its file carries. The name is slugged again here: it was written
+/// by a guest, and a file the host writes is never named by text the
+/// host has not itself reduced to letters, digits and dashes.
+fn hook_request(rest: &str) -> Option<(f64, String)> {
+    let (secs, rest) = rest.split_once(' ')?;
+    let (name, _) = rest.split_once(':')?;
+    let after = secs.parse::<f64>().ok().filter(|s| (0.0..=60.0).contains(s))?;
+    let name = slug(name);
+    (!name.is_empty()).then_some((after, name))
 }
 
 /// A file name out of a line's text: its letters and digits, and a `-`
@@ -24753,6 +24931,24 @@ mod shots {
         }] if t == 2.0));
         // An empty list is no shots, not an error.
         assert!(Shots::parse("", "hello").expect("empty").shots.is_empty());
+    }
+
+    #[test]
+    fn a_hook_request_is_a_delay_and_a_name() {
+        let r = hook_request("1.000 winword-exe-w3: window 'Doc1' shown by WINWORD.EXE (pid 12)");
+        assert_eq!(r, Some((1.0, "winword-exe-w3".to_string())));
+        let r = hook_request("0.000 window-w1: window '' shown by  (pid 4)");
+        assert_eq!(r, Some((0.0, "window-w1".to_string())));
+        // The name is a guest's text: whatever it holds, the file is
+        // named by letters, digits and dashes.
+        let r = hook_request("0.000 ../../etc/passwd: window 'x' shown by y (pid 4)");
+        assert_eq!(r, Some((0.0, "etc-passwd".to_string())));
+        // Not a request at all: no name, no delay, or a delay longer
+        // than a hook may ask for.
+        assert!(hook_request("1.0 a-name-without-a-colon").is_none());
+        assert!(hook_request("soon a-name: x").is_none());
+        assert!(hook_request("600.0 a-name: x").is_none());
+        assert!(hook_request("0.000 ...: x").is_none());
     }
 
     #[test]

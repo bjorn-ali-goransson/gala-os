@@ -26,6 +26,21 @@ impl<'a> Cmdline<'a> {
             .find(|&(k, _)| k == key)
             .map(|(_, v)| v)
     }
+
+    /// Every `key=value` word with this key, in the order they are
+    /// written. [`value`] answers with the last one, which is what a
+    /// setting wants (a later word corrects an earlier one); a facility
+    /// that takes more than one of something at once (`hook=`, which
+    /// arms up to four) wants them all.
+    ///
+    /// [`value`]: Cmdline::value
+    pub fn values(&self, key: &'a str) -> impl Iterator<Item = &'a str> + use<'a> {
+        self.0
+            .split_ascii_whitespace()
+            .filter_map(|w| w.split_once('='))
+            .filter(move |&(k, _)| k == key)
+            .map(|(_, v)| v)
+    }
 }
 
 /// Decodes `%XX` escapes (so values can carry spaces and quotes: `%20`,
@@ -166,6 +181,19 @@ mod tests {
         assert_eq!(c.value("x"), Some(""));
         assert_eq!(c.value(""), Some("y"));
         assert_eq!(c.value("missing"), None);
+    }
+
+    #[test]
+    fn a_key_written_more_than_once() {
+        let c = Cmdline::new("hook=window=shot fault=ud hook=window/three:1=shot+1");
+        // The last one is the value; all of them are the values, in the
+        // order the command line writes them.
+        assert_eq!(c.value("hook"), Some("window/three:1=shot+1"));
+        let all: alloc::vec::Vec<_> = c.values("hook").collect();
+        assert_eq!(all, ["window=shot", "window/three:1=shot+1"]);
+        let one: alloc::vec::Vec<_> = c.values("fault").collect();
+        assert_eq!(one, ["ud"]);
+        assert_eq!(c.values("missing").count(), 0);
     }
 
     #[test]
