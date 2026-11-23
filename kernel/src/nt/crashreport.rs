@@ -6,8 +6,15 @@
 //! every value that points into an image named by module. Before, only "exited with status 0xc0000005" was left (the JVM
 //! had to write its own hs_err file to say more).
 //!
-//! Every user exception keeps a note in its process (fixed size, no
-//! allocation); when the process ends with that exception's code as its
+//! Every user exception keeps a note in the thread that took it
+//! (`Notes`, made the first time a thread takes one: fixed size, one
+//! allocation per such thread, and most threads never take any). The
+//! notes of the thread whose exception ends the process move into the
+//! process itself when it is ended (`promote`), because the report is
+//! written once the last thread has exited and no thread is there to ask
+//! by then; the process's own slots are also where a note goes that no
+//! thread can keep -- the kernel's own context, or a thread with no room
+//! for its notes. When the process ends with that exception's code as its
 //! status (the unhandled exception ended it: from the kernel when there
 //! is no dispatcher, from ntdll's unhandled-exception path otherwise),
 //! `report` prints it as `crash report:` lines. ntdll also reports an
@@ -22,6 +29,21 @@ use core::fmt;
 use super::platform::UserRegs;
 use super::process::Process;
 use super::status::NtStatus;
+
+/// The exceptions one thread took, as the crash report of its process
+/// needs them: the kernel's own account of a fault it took, and the
+/// report ntdll made of an exception no handler took (which comes
+/// whatever status the process ends with). A thread keeps its own, so
+/// two threads' exceptions do not write over one another -- the report
+/// of a process that two threads both faulted in described whichever
+/// fault was reported last, which is not the one that ended it.
+#[derive(Default)]
+pub struct Notes {
+    /// The kernel's own account of the fault it saw.
+    pub fault: Option<Note>,
+    /// ntdll's report of an exception no handler took.
+    pub unhandled: Option<Note>,
+}
 
 /// Stack values kept and shown as they are.
 const STACK_WORDS: usize = 8;
@@ -638,9 +660,91 @@ pub fn unread(process: &Process, record: u64, context: u64, what: &str) {
     );
 }
 
-/// What a filter's withdrawal may do to the note its process keeps.
-/// There is one note in a process, so a withdrawal can meet a note that
-/// is not the withdrawing thread's: another thread's unhandled
+/// Keeps the kernel's own account of a fault in the thread that took it,
+/// where the crash report of the process is written from if that fault
+/// is what ends it (`promote`).
+pub fn keep_fault(process: &Process, note: Note) {
+    match super::thread::keep_fault(note) {
+        super::thread::Kept::Thread => {}
+        super::thread::Kept::NoThread => *process.last_exception.lock() = Some(note),
+        super::thread::Kept::NoRoom => {
+            *process.last_exception.lock() = Some(note);
+            no_room(process, &note);
+        }
+    }
+}
+
+/// Keeps ntdll's report of an exception no handler took, for the thread
+/// that took it.
+pub fn keep_unhandled(process: &Process, note: Note) {
+    match super::thread::keep_unhandled(note) {
+        super::thread::Kept::Thread => {}
+        super::thread::Kept::NoThread => *process.unhandled_exception.lock() = Some(note),
+        super::thread::Kept::NoRoom => {
+            *process.unhandled_exception.lock() = Some(note);
+            no_room(process, &note);
+        }
+    }
+}
+
+/// A thread that took an exception could not be given its notes, so the
+/// process's own slot holds this one -- one slot for every thread of the
+/// process, where the next exception writes over this one. Said out loud,
+/// because a crash report describing an exception that ended nothing
+/// would otherwise have nothing to explain it.
+fn no_room(process: &Process, note: &Note) {
+    warn!(
+        "exception note: {} (pid {}) thread {}: there was no room for the thread's notes, so its \
+         {:#010x} ({}) is kept in the process's one slot, where another thread's exception writes \
+         over it",
+        process.name,
+        process.id,
+        note.tid,
+        note.status.0,
+        exception_name(note.status)
+    );
+}
+
+/// Moves the notes of `deciding` -- the thread whose exception ends
+/// `process` with `status` -- into the process. This is the last moment
+/// they can be had from their thread: the report is written once the
+/// last thread has exited (`process::finish`), with no thread left to
+/// ask. Another thread's note stays with that thread and no report is
+/// written from it, so this says what those notes were, an exception
+/// that happened and is named nowhere in a run being the very gap these
+/// lines exist to close.
+pub fn promote(process: &Process, deciding: &super::object::ObjectRef, status: NtStatus) {
+    if let Some((fault, unhandled)) = super::thread::take_notes(deciding) {
+        if let Some(fault) = fault {
+            *process.last_exception.lock() = Some(fault);
+        }
+        if let Some(unhandled) = unhandled {
+            *process.unhandled_exception.lock() = Some(unhandled);
+        }
+    }
+    let whose = super::thread::id_of(deciding);
+    process.for_each_thread(|t| {
+        if let Some((tid, left)) = super::thread::unhandled_left(t) {
+            info!(
+                "exception note: {} (pid {}) thread {tid} took an unhandled {:#010x} ({}) too, and \
+                 the crash report is not written from it: the process ends with {:#010x} ({}), \
+                 which thread {whose} took",
+                process.name,
+                process.id,
+                left.0,
+                exception_name(left),
+                status.0,
+                exception_name(status)
+            );
+        }
+    });
+}
+
+/// What a filter's withdrawal may do to a note in the process's own
+/// slot. A thread withdraws its own note from its own notes; only a
+/// thread with no room for them reports into the process, where one
+/// slot serves every thread -- so a withdrawal there can meet a note
+/// that is not the withdrawing thread's: another thread's unhandled
 /// exception, on its way to ending the process. That one stays.
 #[derive(Debug, PartialEq, Eq)]
 enum Withdrawal {
@@ -672,21 +776,26 @@ fn withdrawal(kept: Option<u64>, tid: u64) -> Withdrawal {
 /// nothing behind at all, which is what Office's shared code does. This
 /// is the one moment it can be said out loud, so it is said here.
 ///
-/// The note is dropped only when it is the calling thread's. There is
-/// one slot in a process, so another thread's note in it is an
-/// unhandled exception still on its way to ending the process, and this
-/// thread's filter has no say over it: it stays, for the crash report.
+/// The note withdrawn is the calling thread's own, which is where a
+/// thread's report is kept. Only a thread with no room for its notes
+/// reports into the process's one slot, and a withdrawal there can meet
+/// a note that is another thread's -- an unhandled exception still on
+/// its way to ending the process, which this thread's filter has no say
+/// over: it stays, for the crash report.
 pub fn continued(process: &Process) {
     let tid = current_tid();
     // The slot is read and emptied under its lock, so that the decision
     // cannot straddle another thread's report; the lines are written
     // after it, holding nothing.
-    let (mine, other) = {
-        let mut slot = process.unhandled_exception.lock();
-        match withdrawal(slot.map(|note| note.tid), tid) {
-            Withdrawal::Takes => (slot.take(), None),
-            Withdrawal::Leaves(whose) => (None, Some(whose)),
-            Withdrawal::Nothing => (None, None),
+    let (mine, other) = match super::thread::take_unhandled() {
+        Some(note) => (Some(note), None),
+        None => {
+            let mut slot = process.unhandled_exception.lock();
+            match withdrawal(slot.map(|note| note.tid), tid) {
+                Withdrawal::Takes => (slot.take(), None),
+                Withdrawal::Leaves(whose) => (None, Some(whose)),
+                Withdrawal::Nothing => (None, None),
+            }
         }
     };
     if let Some(note) = mine {

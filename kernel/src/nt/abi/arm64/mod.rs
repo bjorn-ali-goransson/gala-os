@@ -225,7 +225,7 @@ pub fn keep_note(
     .then(|| (cr2.unwrap_or(u64::MAX), access_kind(frame)));
     let mut regs = frame.user_regs();
     regs.set_ip(ip);
-    *process.last_exception.lock() = Some(Note::new(process, status, access, regs, false));
+    crate::nt::crashreport::keep_fault(process, Note::new(process, status, access, regs, false));
 }
 
 /// The crash report's register lines (x0-x30, sp, pc, pstate) and the top
@@ -532,7 +532,7 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
         }
     }
     note.walk = crate::nt::abi::walk_of(call, walk);
-    *call.process.unhandled_exception.lock() = Some(note);
+    crate::nt::crashreport::keep_unhandled(&call.process, note);
     NtStatus::SUCCESS
 }
 

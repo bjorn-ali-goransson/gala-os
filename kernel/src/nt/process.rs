@@ -1505,18 +1505,31 @@ fn through_ntdll(
 /// Ends `process` with `status`: other threads are asked to terminate, and
 /// the calling thread exits too if it belongs to the process.
 pub fn terminate(process: &KArc<Process>, status: NtStatus, include_caller: bool) {
-    process.exit_status.lock().get_or_insert(status);
+    // Whether this is the status the process ends with: the first one
+    // set is, and the exception the crash report describes is that
+    // thread's (`crashreport::promote`).
+    let first = {
+        let mut exit = process.exit_status.lock();
+        let first = exit.is_none();
+        exit.get_or_insert(status);
+        first
+    };
     let me = thread::current();
+    let mine = me.as_ref().is_some_and(
+        |m| matches!(&m.body, ObjectBody::Thread(t) if KArc::ptr_eq(&t.process, process)),
+    );
+    // The notes of the thread whose exception ends the process move into
+    // the process now: by `finish` the threads have exited and none is
+    // left to take them from.
+    if let Some(me) = me.as_ref().filter(|_| first && mine) {
+        super::crashreport::promote(process, me, status);
+    }
     process.for_each_thread(|t| {
         if !me.as_ref().is_some_and(|m| KArc::ptr_eq(m, t)) {
             thread::request_termination(t, status);
         }
     });
-    if include_caller
-        && me.is_some_and(
-            |m| matches!(&m.body, ObjectBody::Thread(t) if KArc::ptr_eq(&t.process, process)),
-        )
-    {
+    if include_caller && mine {
         // Exits on the way back to user mode.
         thread::exit_current_on_return(status);
     }

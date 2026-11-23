@@ -34,17 +34,30 @@
 //! failing NtClose just before the queueing is what says whose they are.
 
 //! With the argument `continued_other` (and ntdll, scenario
-//! `crash_continued_other`) two threads make the withdrawal meet
-//! another thread's note. A process has one note, so the order is
-//! arranged to be the one that matters: the swallowing thread reports
-//! its exception, the dying thread reports its own (which takes the
-//! slot), and only then does the swallowing thread's filter withdraw.
-//! It must withdraw its own and nothing else, because what is left in
-//! the slot is the note the crash report is written from -- and the
-//! dying thread raised its exception in user mode, so the kernel never
-//! saw a fault and has nothing else to describe it with. The report
-//! naming 0xe0000044 and the thread that raised it is what says the
-//! withdrawal left it alone.
+//! `crash_continued_other`) two threads put another thread's unhandled
+//! exception under the withdrawal. The order is arranged to be the one
+//! that matters: the swallowing thread reports its exception, the dying
+//! thread reports its own, and only then does the swallowing thread's
+//! filter withdraw. It must withdraw its own and nothing else, because
+//! the dying thread's note is the one the crash report is written from
+//! -- and that thread raised its exception in user mode, so the kernel
+//! never saw a fault and has nothing else to describe it with. The
+//! swallower's line naming its own access violation, and the report
+//! naming 0xe0000044 and the thread that raised it, is what says each
+//! note is its own thread's.
+//!
+//! With the argument `unhandled_both` (and ntdll, scenario
+//! `crash_unhandled_both`) two threads each take an exception no handler
+//! takes, and the process ends with the first one's. The first thread
+//! raises 0xe0000044 and holds in its top-level filter until the second
+//! has raised 0xe0000045 and reported it, so that both exceptions are
+//! reported before either ends anything; then the first lets the
+//! process end, and it ends with 0xe0000044. The crash report must
+//! describe the exception the process died of -- the first thread's --
+//! and say that the second thread's note is not what it was written
+//! from. A note per process cannot do that: the second report writes
+//! over the first and the report describes an exception that ended
+//! nothing, with a code that is not the exit status.
 //!
 //! With the argument `continued` (and ntdll, scenario
 //! `crash_continued`) nothing dies: a top-level filter returns
@@ -99,10 +112,16 @@ const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 /// ends the process with it.
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 
-/// The code `continued_other`'s dying thread raises: as `RAISED`, a
+/// The code the thread that ends the process raises: `continued_other`'s
+/// dying thread, and `unhandled_both`'s first thread. As `RAISED`, a
 /// continuable customer code no runtime of its own raises, and distinct
 /// from it so a run says which mode raised.
 const RAISED_BY_OTHER: u32 = 0xe000_0044;
+
+/// The code `unhandled_both`'s second thread raises: the exception that
+/// ends nothing, so a run tells the note the report must be written from
+/// (0xe0000044) from the note it must not be.
+const RAISED_SECOND: u32 = 0xe000_0045;
 
 /// How long one thread of `continued_other` waits for the other before
 /// giving up and saying so: a wait that cannot end is a test that says
@@ -119,6 +138,14 @@ static REPORTED: AtomicU32 = AtomicU32::new(0);
 static WITHDRAWN: AtomicU32 = AtomicU32::new(0);
 /// 1 once the dying thread's filter has let the process end.
 static DEAD: AtomicU32 = AtomicU32::new(0);
+
+/// 1 once `unhandled_both`'s first thread is in its filter, its note
+/// reported: the second thread raises then.
+static FIRST_REPORTED: AtomicU32 = AtomicU32::new(0);
+/// 1 once `unhandled_both`'s second thread is in its filter, its note
+/// reported too: the first thread lets the process end then, so the
+/// report is written while both notes exist.
+static SECOND_REPORTED: AtomicU32 = AtomicU32::new(0);
 
 /// What `continued` writes to the page it faults on, and reads back
 /// afterwards: the retried store must have gone through.
@@ -179,15 +206,15 @@ fn continued() -> u32 {
     0
 }
 
-/// `continued_other`: two threads, so that a filter's withdrawal is
-/// made to meet another thread's note. There is one note in a process,
-/// and the order is arranged to be the one that matters: the swallower
-/// reports first, the dying thread reports second (taking the slot),
-/// and only then does the swallower's filter withdraw. What it
-/// withdraws must be its own and nothing else -- the note left in the
-/// slot is the one the crash report is about to be written from, and
-/// nothing else in the run would have it, because the dying thread
-/// raised its exception in user mode and the kernel never saw a fault.
+/// `continued_other`: two threads, so that a filter's withdrawal has
+/// another thread's unhandled exception under it. The order is arranged
+/// to be the one that matters: the swallower reports first, the dying
+/// thread reports second, and only then does the swallower's filter
+/// withdraw. What it withdraws must be its own and nothing else -- the
+/// dying thread's note is the one the crash report is about to be
+/// written from, and nothing else in the run would have it, because
+/// that thread raised its exception in user mode and the kernel never
+/// saw a fault.
 ///
 /// The swallower is the main thread (an access violation it continues
 /// past, as in `continued`); the dying thread raises `RAISED_BY_OTHER`,
@@ -268,8 +295,8 @@ extern "system" fn sharing(pointers: *mut u8) -> i32 {
     // record starts with its ExceptionCode.
     let code = unsafe { *(*(pointers as *const *const u32)) };
     if code == RAISED_BY_OTHER {
-        // The slot now holds this thread's note. The swallower may
-        // withdraw its own, and must leave this one alone.
+        // This thread's note is reported. The swallower may withdraw
+        // its own now, and must leave this one alone.
         ntrt::print("crash: the raiser's filter has reported its exception\r\n");
         REPORTED.store(1, Ordering::SeqCst);
         if !until(&WITHDRAWN, "the swallower to withdraw its note") {
@@ -286,14 +313,90 @@ extern "system" fn sharing(pointers: *mut u8) -> i32 {
         ntrt::exit(2)
     }
     SWALLOWING.store(1, Ordering::SeqCst);
-    // Not past the raiser's report: before it, the slot holds this
-    // thread's note and the withdrawal would be of its own, which is
-    // the easy case and not the one under test.
+    // Not past the raiser's report: before it, the only note reported
+    // is this thread's and the withdrawal has nothing else near it,
+    // which is the easy case and not the one under test.
     if !until(&REPORTED, "the raiser to report its exception") {
         ntrt::exit(3)
     }
     ntrt::print("crash: the swallower's filter continues execution\r\n");
     EXCEPTION_CONTINUE_EXECUTION
+}
+
+/// `unhandled_both`: two threads, each taking an exception no handler
+/// takes, with both reported before either ends anything. The first
+/// thread's is what ends the process, so the crash report must be
+/// written from the first thread's note -- and under a note per process
+/// it cannot be, because the second thread's report writes over it and
+/// the report then describes an exception that ended nothing, with a
+/// code that is not even the exit status.
+///
+/// One top-level filter serves both and tells them apart by the code.
+/// The first thread holds in it until the second has reported; the
+/// second holds in it until the process ends under it, so that the
+/// thread that ends the process is the first one and the order is not a
+/// race.
+fn unhandled_both() -> u32 {
+    let set = find_ntdll().and_then(|n| find_export(n, b"RtlSetUnhandledExceptionFilter"));
+    let Some(set) = set else {
+        ntrt::print("crash: no RtlSetUnhandledExceptionFilter\r\n");
+        return 2;
+    };
+    // SAFETY: the documented signature.
+    let set: extern "system" fn(usize) = unsafe { core::mem::transmute(set) };
+    set(both as *const () as usize);
+    let (status, _, _) = ntrt::create_thread(second, 0, false);
+    if status != 0 {
+        ntrt::print("crash: no second thread\r\n");
+        return 2;
+    }
+    ntrt::print("crash: the first thread raises 0xe0000044, which nothing handles\r\n");
+    raise_bare(RAISED_BY_OTHER);
+    ntrt::print("crash: the first thread's raise returned?!\r\n");
+    1
+}
+
+/// `unhandled_both`'s second thread: it raises once the first thread's
+/// note is reported, so that its own report is the later of the two.
+extern "C" fn second(_arg: usize) -> ! {
+    if !until(&FIRST_REPORTED, "the first thread to report its exception") {
+        ntrt::exit(3)
+    }
+    ntrt::print("crash: the second thread raises 0xe0000045, which nothing handles either\r\n");
+    raise_bare(RAISED_SECOND);
+    ntrt::print("crash: the second thread's raise returned?!\r\n");
+    ntrt::exit(1)
+}
+
+/// The one top-level filter of `unhandled_both`, which both threads
+/// reach. ntdll reports the exception before it calls this, so each
+/// thread's note exists by the time its filter runs.
+extern "system" fn both(pointers: *mut u8) -> i32 {
+    // SAFETY: EXCEPTION_POINTERS: the record's address first, and the
+    // record starts with its ExceptionCode.
+    let code = unsafe { *(*(pointers as *const *const u32)) };
+    if code == RAISED_SECOND {
+        // This thread must not be the one that ends the process: it
+        // holds here until the first thread's exception does. Bounded,
+        // because a wait that cannot end is a test that says nothing.
+        ntrt::print("crash: the second thread's filter has reported its exception\r\n");
+        SECOND_REPORTED.store(1, Ordering::SeqCst);
+        let deadline = ntrt::now_ms() + WAIT_MS;
+        while ntrt::now_ms() < deadline {
+            ntrt::delay(PAUSE);
+        }
+        ntrt::print("crash: the first thread did not end the process?!\r\n");
+        ntrt::exit(1)
+    }
+    ntrt::print("crash: the first thread's filter has reported its exception\r\n");
+    FIRST_REPORTED.store(1, Ordering::SeqCst);
+    if !until(&SECOND_REPORTED, "the second thread to report its exception") {
+        ntrt::exit(3)
+    }
+    // Both notes exist now, and this is the exception the process ends
+    // of: the report must be written from this thread's note.
+    ntrt::print("crash: the first thread's filter lets the process end\r\n");
+    EXCEPTION_CONTINUE_SEARCH
 }
 
 /// Waits for `flag`, for at most `WAIT_MS`: a wait that cannot end is a
@@ -445,6 +548,9 @@ fn apc() -> u32 {
 }
 
 fn main() -> u32 {
+    if arg_is(*b"unhandled_both") {
+        return unhandled_both();
+    }
     if arg_is(*b"continued_other") {
         return continued_other();
     }

@@ -8462,6 +8462,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("crash_continued", "ntdll.dll", "Windows/System32"),
     ("crash_continued_other", "ntdll.dll", "Windows/System32"),
+    ("crash_unhandled_both", "ntdll.dll", "Windows/System32"),
     ("crash_raise", "ntdll.dll", "Windows/System32"),
     ("crash_apc", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -14164,6 +14165,7 @@ const ARM64_TWINS: &[&str] = &[
     "crash_filtered",
     "crash_continued",
     "crash_continued_other",
+    "crash_unhandled_both",
     "crash_raise",
     "crash_apc",
     "seh_test",
@@ -20770,17 +20772,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // The same withdrawal, made to meet another thread's note. A
-        // process has one note; the swallowing thread reports its
-        // exception, the dying thread reports its own (which takes the
-        // slot), and only then does the swallower's filter withdraw. It
-        // must withdraw its own and nothing else: what is left is the
-        // note the crash report is written from, and the dying thread
-        // raised its exception in user mode, so the kernel saw no fault
-        // and has nothing else to describe it with. The report naming
-        // 0xe0000044 is what says the note was left alone; the line
-        // about a note that is another thread's is what says the
-        // withdrawal knew.
+        // The same withdrawal, with another thread's unhandled exception
+        // pending under it: the swallowing thread reports its exception,
+        // the dying thread reports its own, and only then does the
+        // swallower's filter withdraw. It must withdraw its own and
+        // nothing else -- the dying thread's note is what the crash
+        // report is written from, and that thread raised its exception
+        // in user mode, so the kernel saw no fault and has nothing else
+        // to describe it with. The swallower's line naming its own
+        // access violation, and the report naming 0xe0000044, is what
+        // says each thread's note is its own.
         name: "crash_continued_other",
         cmdline: "qemu_exit run=crash.exe args=continued_other",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -20788,11 +20789,38 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash: the swallower writes to a read-only page",
             "crash: the raiser's filter has reported its exception",
             "crash: the swallower's filter continues execution",
-            "its top-level filter continued past an unhandled exception, whose code is not known \
-             here: the note kept is thread ",
-            "left for the crash report",
+            "its top-level filter continued past an unhandled 0xc0000005 (access violation) at ",
+            ", writing address 0x",
             "crash: the swallower carried on; the raiser may die now",
             "crash: the raiser's filter lets the process end",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
+             (exception) in thread",
+            "process crash.exe (pid 4) exited with status 0xe0000044",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // Two threads, each with an exception no handler takes, both
+        // reported before either ends anything: the first thread's is
+        // what ends the process. The report must be written from that
+        // one -- a note per process cannot, the second report writing
+        // over the first -- and must say that the second thread's note
+        // is not what it was written from, because a note left behind
+        // with nothing said of it is an exception that happened and is
+        // nowhere in the run.
+        name: "crash_unhandled_both",
+        cmdline: "qemu_exit run=crash.exe args=unhandled_both",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the first thread raises 0xe0000044, which nothing handles",
+            "crash: the first thread's filter has reported its exception",
+            "crash: the second thread raises 0xe0000045, which nothing handles either",
+            "crash: the second thread's filter has reported its exception",
+            "crash: the first thread's filter lets the process end",
+            // The note the report is not written from, said out loud.
+            "exception note: crash.exe (pid 4) thread",
+            "took an unhandled 0xe0000045 (exception) too",
+            // And the report, from the note of the exception that ended it.
             "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
              (exception) in thread",
             "process crash.exe (pid 4) exited with status 0xe0000044",
