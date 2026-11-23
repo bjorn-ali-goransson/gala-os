@@ -58,6 +58,16 @@ jobs:
           test -f web/dist/.nojekyll
       - name: The page is real markup, not an empty shell
         run: grep -q "ABI boundary" web/dist/index.html
+      # The Arabic page is a second prerender into dist/ar/; a build that
+      # lost it would publish only English while the language switch,
+      # hreflang and sitemap still pointed at /ar/.
+      - name: The Arabic page is real markup, right to left
+        run: |
+          set -euo pipefail
+          grep -q '<html lang="ar" dir="rtl">' web/dist/ar/index.html
+          grep -q 'id="usb"' web/dist/ar/index.html
+          grep -q 'hreflang="ar" href="https://gala-os.com/ar/"' web/dist/index.html
+          grep -q "<loc>https://gala-os.com/ar/</loc>" web/dist/sitemap.xml
       # Losing the counter would show up only as traffic quietly going to
       # zero, weeks later. The site id is checked as well as the script:
       # a build that kept the tag but dropped the attribute would load

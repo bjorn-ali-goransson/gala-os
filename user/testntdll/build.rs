@@ -22,6 +22,7 @@ fn main() {
             "RtlUnwindEx",
             "RtlUnwind",
             "KiUserExceptionDispatcher",
+            "KiUserApcDispatcher",
         ],
         Ok("aarch64") => &[
             "RtlCaptureContext",
@@ -29,6 +30,7 @@ fn main() {
             "RtlUnwindEx",
             "RtlUnwind",
             "KiUserExceptionDispatcher",
+            "KiUserApcDispatcher",
         ],
         _ => &[],
     };

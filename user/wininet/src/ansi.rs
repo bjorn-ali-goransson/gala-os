@@ -1,7 +1,8 @@
-//! The ANSI functions ODT's setup.exe imports beside the W ones:
-//! InternetConnectA, HttpOpenRequestA and HttpAddRequestHeadersA take
-//! their strings through the ANSI code page (MultiByteToWideChar, CP_ACP)
-//! into the W functions; InternetCrackUrlA cracks the caller's bytes
+//! The ANSI functions ODT's setup.exe imports beside the W ones, and the
+//! session opener Office's shared runtime looks up before the W one:
+//! InternetOpenA, InternetConnectA, HttpOpenRequestA and
+//! HttpAddRequestHeadersA take their strings through the ANSI code page
+//! (MultiByteToWideChar, CP_ACP) into the W functions; InternetCrackUrlA cracks the caller's bytes
 //! (pointers into its URL, or copies); HttpQueryInfoA answers text as the
 //! header's bytes (the length without the NUL, or
 //! ERROR_INSUFFICIENT_BUFFER with the bytes needed with it).
@@ -14,7 +15,7 @@ use http_client::url::UrlComponentsA;
 
 use crate::{
     DLL, ERROR_INVALID_PARAMETER, HttpAddRequestHeadersW, HttpOpenRequestW, InternetConnectW,
-    SCHEMES, done, missing, request_of,
+    InternetOpenW, SCHEMES, done, missing, request_of,
 };
 
 #[cfg_attr(
@@ -78,6 +79,26 @@ fn ptr(s: &Option<Vec<u16>>) -> *const u16 {
 fn failed(e: u32) -> usize {
     crate::set_error(e);
     0
+}
+
+/// InternetOpenA: the agent and both proxy strings through the ANSI code
+/// page. Office's shared runtime looks this one up before the W
+/// function, so the session it opens serves requests like any other.
+#[unsafe(no_mangle)]
+pub extern "system" fn InternetOpenA(
+    agent: *const u8,
+    access: u32,
+    proxy: *const u8,
+    bypass: *const u8,
+    flags: u32,
+) -> usize {
+    let r = (|| Ok((widen(agent, None)?, widen(proxy, None)?, widen(bypass, None)?)))();
+    match r {
+        Ok((agent, proxy, bypass)) => {
+            InternetOpenW(ptr(&agent), access, ptr(&proxy), ptr(&bypass), flags)
+        }
+        Err(e) => failed(e),
+    }
 }
 
 #[unsafe(no_mangle)]

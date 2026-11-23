@@ -1834,7 +1834,7 @@ pub fn hex32(value: u32) -> [u8; 8] {
 }
 
 /// Defines the entry point (`mainCRTStartup`) and a panic handler that
-/// exits with 0xC0000409.
+/// prints where and why (`report_panic`) and exits with 0xC0000409.
 #[macro_export]
 macro_rules! entry {
     ($main:path) => {
@@ -1844,7 +1844,8 @@ macro_rules! entry {
         }
 
         #[panic_handler]
-        fn panic(_: &core::panic::PanicInfo) -> ! {
+        fn panic(info: &core::panic::PanicInfo) -> ! {
+            $crate::report_panic(info);
             $crate::exit(0xc000_0409)
         }
     };

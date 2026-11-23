@@ -1114,7 +1114,7 @@ pub fn dump() {
             runtime::ticks(),
             c.client.output().len()
         );
-        crate::info!("statedump:   socket: {}", crate::unix::Described(&c.sock));
+        crate::info!("statedump:   socket: {}", crate::unix::described(&c.sock));
         c.client.describe(&mut |line| crate::info!("statedump:   {line}"));
     }
     s.x_dump();

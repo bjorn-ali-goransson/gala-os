@@ -225,7 +225,7 @@ pub fn keep_note(
     .then(|| (cr2.unwrap_or(u64::MAX), access_kind(frame)));
     let mut regs = frame.user_regs();
     regs.set_ip(ip);
-    *process.last_exception.lock() = Some(Note::new(process, status, access, regs, false));
+    crate::nt::crashreport::keep_fault(process, Note::new(process, status, access, regs, false));
 }
 
 /// The crash report's register lines (x0-x30, sp, pc, pstate) and the top
@@ -468,8 +468,9 @@ pub(in crate::nt) fn nt_continue(call: &mut Call<'_>) -> NtStatus {
 /// exception no handler took before the top-level filter runs (which may
 /// end the process with a status of its own), so the crash report still
 /// describes it; a null record withdraws it (the filter continued
-/// execution). As x64's, from ARM64's CONTEXT; a C++ throw's and a
-/// delay load's details are x64's only yet.
+/// execution). As x64's, from ARM64's CONTEXT, and what the parameters
+/// describe is decoded in the one place both ABIs use
+/// (crashreport::decode_params).
 pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     let record = match call.arg(0) {
         Ok(v) => v,
@@ -484,35 +485,60 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
         Err(status) => return status,
     };
     if record == 0 {
-        *call.process.unhandled_exception.lock() = None;
+        // The top-level filter continued execution, so the process
+        // carries on: the note goes, and the exception it swallowed is
+        // recorded now or never (nt::crashreport::continued).
+        crate::nt::crashreport::continued(&call.process);
         return NtStatus::SUCCESS;
     }
-    // EXCEPTION_RECORD: code +0, flags +4, address +0x10, parameter count
-    // +0x18, parameters +0x20.
-    let mut rec = [0u8; RECORD_SIZE as usize];
+    // The CONTEXT is a structure of ntdll's own, of one size and whole
+    // wherever it put it.
     let mut ctx = [0u8; context::SIZE];
-    if call.process.read(record, &mut rec).is_err() || call.process.read(context, &mut ctx).is_err()
-    {
+    if call.process.read(context, &mut ctx).is_err() {
+        crate::nt::crashreport::unread(&call.process, record, context, "the context");
         return NtStatus::ACCESS_VIOLATION;
     }
-    let word = |at: usize| u64::from_le_bytes(rec[at..at + 8].try_into().unwrap_or([0; 8]));
-    let code = word(0) as u32;
-    let count = word(0x18) as u32;
-    let access =
-        (code == NtStatus::ACCESS_VIOLATION.0 && count >= 2).then(|| (word(0x28), word(0x20)));
+    // EXCEPTION_RECORD: code +0, flags +4, address +0x10, parameter count
+    // +0x18, parameters +0x20. A word at a time, because a record is
+    // only as long as the parameters it carries: a raise from a thread
+    // whose record lands at the top of its stack has fewer bytes above it
+    // than RECORD_SIZE, and reading the whole fixed size there failed and
+    // lost the note, so an exception that ended the process was described
+    // by nothing at all (scenario `arm_crash_continued_other`).
+    let word = |at: u64| call.process.read_u64(record + at).ok();
+    let Some(first) = word(0) else {
+        crate::nt::crashreport::unread(&call.process, record, context, "the record");
+        return NtStatus::ACCESS_VIOLATION;
+    };
+    let code = first as u32;
+    let count = word(0x18).unwrap_or(0) as u32;
+    let access = (code == NtStatus::ACCESS_VIOLATION.0 && count >= 2)
+        .then(|| (word(0x28).unwrap_or(0), word(0x20).unwrap_or(0)));
     let mut regs = user_regs(&context::from_bytes(&ctx));
-    regs.set_ip(word(0x10));
+    regs.set_ip(word(0x10).unwrap_or(0));
     let mut note = Note::new(&call.process, NtStatus(code), access, regs, false);
-    note.flags = (word(0) >> 32) as u32;
-    note.walk = crate::nt::abi::walk_of(call, walk);
-    // The parameters: RECORD_SIZE has room for all 15 of them.
+    note.flags = (first >> 32) as u32;
+    // As many parameters as the record says, as are there and as the
+    // note holds: the count is the record's own word and may outrun both.
     note.params_count = count as usize;
-    note.params_len = note.params_count.min(crate::nt::crashreport::PARAMS);
-    let kept = note.params_len;
-    for (i, p) in note.params.iter_mut().take(kept).enumerate() {
-        *p = word(0x20 + 8 * i);
+    note.params_len = 0;
+    let kept = note.params_count.min(crate::nt::crashreport::PARAMS);
+    for (i, p) in note.params.iter_mut().enumerate().take(kept) {
+        match word(0x20 + 8 * i as u64) {
+            Some(v) => {
+                *p = v;
+                note.params_len = i + 1;
+            }
+            None => break,
+        }
     }
-    *call.process.unhandled_exception.lock() = Some(note);
+    // What the parameters describe, for the codes a report knows (a C++
+    // throw's thrown type, a delay load's DLL and function), read while
+    // the process still runs, as x64 does: the one decoder serves both.
+    let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
+    crate::nt::crashreport::decode_params(&mut note, &read);
+    note.walk = crate::nt::abi::walk_of(call, walk);
+    crate::nt::crashreport::keep_unhandled(&call.process, note);
     NtStatus::SUCCESS
 }
 

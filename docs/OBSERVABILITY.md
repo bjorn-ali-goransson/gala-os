@@ -38,6 +38,7 @@ rather than free text.
 | Hang watchdog | `kernel/src/flight.rs` | `watchdog:` lines |
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
+| Suspensions (who stopped a thread) | `kernel/src/nt/thread.rs` | `suspend:` lines; `thread:   suspended by ...` and `parked at rip ...` in every thread dump; `thread suspend`, `thread resume` and `thread suspend refused` events (`events=thread`) |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/trace_common.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
 | Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_bytes=<n>` for the bytes at the places that read as none, `imports_except=<text>[,<text>...]` for the imports to leave unarmed, `imports_in=<image>` for the one image whose slots are armed) with `events=call`; `import` and `ret` events, each with `from`, the image whose import slot the call went through; `imports:` lines |
@@ -125,7 +126,10 @@ port. Lines that tools and agents rely on:
   and a C runtime call with an invalid argument in a program without an
   invalid-parameter handler ends the process with 0xc0000409 after
   `ucrtbase: invalid parameter passed to a C runtime function, ending the
-  process (0xc0000409)` on its stderr;
+  process (0xc0000409)` on its stderr; a Rust panic in a test program
+  built on ntrt prints `<program>: panic at <file>:<line>:<col>:
+  <message>` before the process ends with 0xc0000409 (gala and real
+  Windows alike);
   `wow64: ... cannot free an exited
   thread's 64-bit stack|TEB32` if a WOW64 thread's exit leaks them; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
@@ -258,12 +262,13 @@ there.
 #### What the stream costs
 
 Its bytes, and nothing else: about 12 us for each one that leaves the
-guest. `user/import_cost_test` makes 20 000 calls through one traced
-import, and four runs of it differ only in what is written, so the
-difference between their in-kernel seconds is the stream itself
-(scenarios `import_cost_test`, the program with nothing armed, and
-`import_cost`, the calls recorded and their arguments quoted; the two
-in between are the same program with `XTASK_CMDLINE=`):
+guest. `user/import_cost_test` makes calls through one traced import
+(5 000; the table was measured with 20 000 on a laptop under KVM),
+and four runs of it differ only in what is written, so the difference
+between their in-kernel seconds is the stream itself (scenarios
+`import_cost_test`, the program with nothing armed, and `import_cost`,
+the calls recorded and their arguments quoted; the two in between are
+the same program with `XTASK_CMDLINE=`):
 
 | what the run writes | in the kernel | an event |
 |---|---|---|
@@ -272,7 +277,12 @@ in between are the same program with `XTASK_CMDLINE=`):
 | and `events=call`, 162 bytes an event | 41.6 s | 2.1 ms |
 | and `imports_strings=` too, 214 bytes an event | 59.9 s | 3.0 ms |
 
-So the trap machinery is free and the bytes are everything. It is the
+What an event costs is the host's figure, not gala's: a CI runner's KVM
+pays about twice the laptop's (the 20 000 calls took 96-121 s there,
+against `import_cost`'s 120 s limit, which is why the program now makes
+a quarter of them), and under TCG, where a port write is no exit at
+all, the same 5 000 calls cost 3.4 s. So the trap machinery is free and
+the bytes are everything. It is the
 crossing itself and not the device, QEMU's work or the formatting: the
 same stream written to port 0x80, which has no device behind it at all,
 costs 37.4 s of the 41.6; and holding each line and handing it to the
@@ -525,7 +535,14 @@ that row is in the dump only when the filter freed the slot it took.
   `reached` (not a gap at all: the first call that reached a method gala
   answers, so that a program stopping in the middle of a path leaves the
   path it took; it is told from a call answered S_OK, which `other`
-  records with the HRESULT as its detail) and `other`. Both
+  records with the HRESULT as its detail), `waited` (not a gap either:
+  a lock inside one of gala's own DLLs that a thread has been waiting
+  a second for, named `<dll>!<what the lock protects>` with a suffix
+  saying whether the thread waited for it, found another thread
+  holding it, or re-entered it -- `user/gala_lock`, what a DLL writes
+  down instead of spinning silently, and the row that would have
+  named the holder of the trace lock Word's main thread hung in) and
+  `other`. Both
   `stub` and `not implemented` are also logged as they happen, because a
   run cut short by a snapshot never dumps the ledger; only `stub`'s line
   says the process ended. The Windows Runtime's:
@@ -550,6 +567,22 @@ that row is in the dump only when the filter freed the slot it took.
   ("The stack at a system call": `stack_at=NtWriteFile stack_from=user32
   stack_words=400` names the caller and passes over every other write
   the program makes). Scenario `win32_misc_test`.
+  Window classes (user32): a registration with no room left is
+  `user32.dll!RegisterClassExW(<class>)`, "unsupported", with the slots
+  the table held as the detail -- 16384 means the atom space is spent,
+  fewer means the heap refused to grow the table. A class refused is
+  every window of that class the program will not make, and nothing
+  else in a run records it. Each doubling of the table records
+  `user32.dll!RegisterClassExW(the class table grew to <n>)`,
+  "reached", with the size in the name so a run keeps one row per size:
+  that is the only measure of how many classes a program needed, and
+  a program that never outgrew the first 32 slots leaves none. Word's
+  startup grows the table to 64, and while it was a fixed 32 that
+  refusal was silent and cost Word its startup -- `BootRun
+  {"SH_ErrorId": 13, "BootTask": "IfrRegisterWndClasses"}` and a box
+  with a number in it (ROADMAP OF). A name already registered is not
+  this row: that is ERROR_CLASS_ALREADY_EXISTS and the program's own
+  business. Scenario `wndclass_test`.
   Direct2D (d2d1): `d2d1.dll!<interface>::<method>`, "not
   implemented", for each method not built (CreateLayer,
   CreateCompatibleRenderTarget, ...); "unsupported" with the case in the
@@ -825,7 +858,11 @@ keep one each: `target/failed/<name>.r<i>.log`), which ends with:
   CPUs, heap (peak) and frames (fewest free), warning/error counts and
   the first error, panic/exception/watchdog/leak/out-of-memory/
   missing-function lines, programs begun and not ended, processes that
-  failed, the gaps hit last and the ledger's top five, the state
+  failed, the gaps hit last, the ledger's top five and every missing
+  export or import it holds (a function gala lacks is never the
+  program's own doing and one hit is enough to end a program -- Word
+  died on a delay load with a single hit -- so those are named in full,
+  up to thirty of them), the state
   dump's CPUs, locks and threads, each thread's last system calls (event stream, else flight
   recorder), user faults, a TSC under 500 MHz as a suspicious clock,
   `triage: clock WRONG`, the last lines. `cargo xtask triage <log>
@@ -983,7 +1020,9 @@ a new line, since QEMU's end can cut the guest's last one off):
    SRW locks, condition variables and WaitOnAddress sleep on, the key, the
    value there and who is queued for it: `key 0x... (value there 0x...);
    queued for it: (waiters, releasers, all entries) Some((1, 0, 1))`, so a
-   release waiting with no waiter, or a waiter whose value changed, shows),
+   release waiting with no waiter, or a waiter whose value changed, shows;
+   for a thread that is suspended or parked, who stopped it and the rip it
+   is parked at, "Suspensions" above),
    every
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB, R reservations, G regions; paged U/L (peak P) nonpaged
@@ -1075,8 +1114,82 @@ top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
 "ended with status S after an unhandled exception C"; a filter that
-continues execution withdraws it. Scenarios `crash`, `crash_dispatched`
-and `crash_filtered`. An exception in 32-bit code (a WOW64 process, CS
+continues execution withdraws it, and the withdrawal is said out loud as
+it happens:
+
+```
+exception continued: crash.exe (pid 4) thread 8: its top-level filter continued past an unhandled 0xc0000005 (access violation: writing address 0x20000) at 0x140001c5c (crash.exe+0x1c5c)
+```
+
+That line, and a ledger row beside it (`GalaUnhandledException`, "an
+exception the top-level filter continued past", so a long run's gaps
+carry it too), are the whole record of such an exception. Nothing else
+in the run would hold it: no crash report is ever written, and the
+ledger row ntdll writes is on its death path, so a program that carries
+on past an exception nobody handled used to leave nothing at all behind
+-- which is what Office's shared code does.
+
+A report the kernel could not read is said out loud as well, because
+ntdll's dispatcher does not look at the status it gets back and would
+carry on as if the note had been kept:
+
+```
+exception report unread: crash.exe (pid 4) thread 12: the record of ntdll's report (record 0x3ff98, context 0x3fbe0) could not be read, so no note is kept and no crash report will describe this exception
+```
+
+with a ledger row beside it. **An EXCEPTION_RECORD is only as long as the
+parameters it carries**, so it is read a word at a time and never as a
+block of its full size: a record that lands at the top of a thread's
+stack has fewer bytes above it than that, and ARM64 read the whole of it,
+failed and kept no note -- so an exception that went on to end the
+process was described by nothing at all. The CONTEXT beside it is one
+size and is read whole.
+
+**A thread keeps its own notes**, made the first time it takes an
+exception (a note is large and most threads never take one), so two
+threads' exceptions do not write over one another. The crash report is
+written from the notes of the thread whose exception ends the process --
+the thread that set its exit status -- which `process::terminate` moves
+into the process there and then (`nt::crashreport::promote`): the last
+moment a note can be had from its thread, because the report itself is
+written once the process's last thread has exited and no thread is left
+to ask. A withdrawal reaches only the withdrawing thread's own note.
+
+Another thread's unhandled exception, still on its way to ending the
+process, stays where it is and gets a line of its own, with what its
+parameters describe and where it happened:
+
+```
+exception note: crash.exe (pid 4) thread 12 took an unhandled 0xc06d007e (delay-loaded DLL not found: gala_missing.dll ordinal 4660) at 0x140001174 (crash.exe+0x1174) too, and the crash report is not written from it: the process ends with 0xc06d007f (delay-loaded function not found), which thread 8 took
+```
+
+so an exception that happened and ended nothing is still named
+somewhere, by the name it would carry in a crash report. The clause
+after the code is one piece of text (`About`) shared by the three lines
+that describe an exception outside a report -- this one, the withdrawal
+above and the warning that a thread had no room for notes of its own:
+the verb and address of an access violation, the type a C++ throw
+carried, the DLL and the function or ordinal a delay load wanted. What
+the parameters mean is decoded in one place for both ABIs
+(`nt::crashreport::decode_params`), so a note made on ARM64 says as
+much as one made on x64. A line that gives the code and its name and
+nothing else is not enough: two of Word's threads die of 0xc06d007f on
+the way to its window (ROADMAP OF) and one report is written, so the
+other thread's line would otherwise leave a reader looking for nothing
+in particular. The kernel's fault notes are not named that way: one is kept
+for every fault, including the faults a handler goes on to take, so a
+fault note left behind says nothing by itself.
+
+The process's own slots remain, for a note no thread can keep: the
+kernel's own context, and a thread whose notes could not be allocated --
+which says so (`there was no room for the thread's notes`), because one
+slot serves every thread of the process and the next exception there
+does write over this one. That is also the only case left where a
+withdrawal can meet a note which is not its own, and it leaves it, for
+the crash report. Scenarios `crash`, `crash_dispatched`,
+`crash_filtered`, `crash_continued`, `crash_continued_other`,
+`crash_unhandled_both` and `crash_delay` (two threads, a delay-loaded
+function and a delay-loaded DLL), each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
 eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`
@@ -1145,6 +1258,154 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 - A delay-load failure (0xc06d007e, 0xc06d007f: the delay-load
   helper's DLL or function not found): `delay load of DLL!function` (or
   `ordinal N`), from the DelayLoadInfo its first parameter points to.
+- The user APC the thread was last given, when it was given one: its
+  routine, who queued it, where from, and that thread's last calls as
+  well. An exception raised in an APC is the queueing thread's decision
+  and not the dying thread's, which the lines above cannot show ("Who
+  queued a user APC" below). Scenario `crash_apc`.
+
+### Suspensions (who stopped a thread)
+
+A suspended thread is in no wait, holds no handle and is queued for
+nothing: it simply does not run. Its suspend count was all a dump
+showed, and a count says nothing about the cause -- which is what Word's
+parked main thread showed for a whole 900 s run (ROADMAP OF). Every
+raise and every drop of the count now keeps a mark on the thread and
+logs a line (`kernel/src/nt/thread.rs`):
+
+```
+suspend: pid 4 tid 12 (suspend_test.exe) suspended by pid 4 tid 8, called from 0x1400010e1 (suspend_test.exe+0x10e1): count 1
+suspend: pid 4 tid 12 (suspend_test.exe) resumed by pid 4 tid 8, called from 0x140001281 (suspend_test.exe+0x1281): count 0
+suspend: no suspension on handle 0x14 for pid 4 tid 8: 0xc0000024
+```
+
+- Who asked is the calling thread, with the return address above its
+  system-call stub and the image that address is in -- the same address a
+  thread dump names a wait's caller by -- so the line names the DLL that
+  stopped the thread, not only the program. `the kernel` is gala's own
+  code (a service's first thread, a Linux fork's child).
+- `created suspended by` is CREATE_SUSPENDED, a thread that has never
+  run. `resumed while not suspended by` is a resume that found a count of
+  0 and changed nothing: a program that has lost count of its own
+  suspensions, or whose suspension gala refused.
+- **A thread's own creation is counted, not printed.** Every
+  CreateThread starts its thread suspended and resumes it once the
+  handle is the caller's, so that pair is all a log of suspensions would
+  hold: OfficeClickToRun spent the whole budget below on 25 threads of
+  its own before Word had started. The pair is still counted (the dump's
+  tally says how many) and still kept as the thread's mark, so a thread
+  created suspended and **never** resumed has its cause in every dump;
+  `thread create` is where a thread being made is said.
+- A refusal is recorded with the status the caller is answered with:
+  `suspend: pid P tid T (x.exe): no suspension for pid Q tid U:
+  0xc000004b`, or `suspend: no suspension on handle 0x1234 for pid Q tid
+  U: 0xc0000008` when the handle named no thread of this process.
+  kernel32's SuspendThread turns every failure into `(DWORD)-1` and a
+  program may take that as fatal with nothing of its own left behind, so
+  the record is the only place the reason is kept.
+- The first 64 lines of a boot are printed and the rest counted: a
+  debugger stepping or a profiler sampling suspends in a loop and must
+  not bury the log. The line that says the budget is spent is printed
+  once, and each thread's own mark is kept whatever the budget.
+
+Every thread dump -- the one-minute hang report, the state dump,
+`statedump: threads` -- counts the boot's suspensions, resumes and
+refusals, and prints that mark beside a thread that is suspended or
+parked, with the rip it is parked at:
+
+```
+thread: 12 suspensions, resumes and refusals so far, 4 of them a thread's own creation (not printed)
+thread: pid 4 tid 12 (sched Some(ThreadId(6))) start 0x1400015a0 suspend 1 exited false in a system call false session 1 personality nt (suspend_test.exe)
+thread:   suspended by pid 4 tid 8, called from 0x14000153c (suspend_test.exe+0x153c) at 2136 ms; count 1 (3 suspensions so far)
+thread:   parked at rip 0x1400015aa (suspend_test.exe+0x15aa) rsp 0x2ffd8
+```
+
+A thread parked with a suspend count of 0 is a resume that was lost. A
+thread suspended across a kernel handover carries its count but not its
+mark and says so (`stopped with no record of who asked`). Only the
+caller's own process can place the address a mark kept, so a suspension
+from another process shows the address alone.
+
+The events `thread suspend` and `thread resume` (`events=thread`) carry
+`pid`, `tid`, `by_pid`, `by_tid`, `from`, `count` and `why`; a refusal is
+`thread suspend refused` with `handle`, `what` and `status`.
+
+Scenario `suspend_test`.
+
+### Who queued a user APC (an exception another thread decided)
+
+An APC is how one thread makes another run code, so an exception raised
+in one is the queueing thread's decision and not the dying thread's:
+**Office's shared code ends a thread this way.** It suspends the victim
+from `Mso30win32client.dll+0x8e4a70`, queues a user APC whose routine is
+`Mso30win32client.dll+0x8e4ac0` and raises 0xe0000002 in the victim's
+context, and resumes it (ROADMAP OF). The routine's address comes from
+the record below and not from the unwind, which is the point: the
+unwind's frame above the raise is `+0x8e4aac`, *before* the routine's
+own entry, so the two are different functions and reading the routine
+off the stack would have named the wrong one. The victim's own stack and
+last calls describe the wait it was in instead, which is what 24 frames
+of Word's crash report were.
+
+So every queued APC carries who queued it, and the thread keeps the last
+one it was given after that APC has left the queue. A crash report is
+written when the process's **last** thread has exited, so no thread is
+there to ask by then: the exception's note takes that mark as the
+exception is recorded, while the thread is still the current one, and
+carries it to the report with everything else. The report names both
+(`kernel/src/nt/crashreport.rs`):
+
+```
+crash report:   it was last given a user APC: routine 0x140001000 (crash.exe+0x1000), queued by pid 4 tid 8, called from 0x140001424 (crash.exe+0x1424) at 1218 ms
+crash report:   thread 8's last calls, oldest first: ..., NtWriteFile=0x00000000, NtClose=0xc0000008, NtQueueApcThread=0x00000000, NtWaitForSingleObject=0xc000004b
+```
+
+- Who queued it is the thread that made the call, with the return
+  address above its system-call stub and the image that address is in --
+  the same address a suspension's mark names its caller by -- and the
+  uptime of the call.
+- The routine is to be read against the frames of the unwind above it:
+  when the exception was raised inside that APC, one of those frames is
+  the routine. A thread that ran an APC earlier and died of something
+  else has the line too, which is why it says `last given`.
+- `the kernel` is gala's own code: an I/O completion routine, a timer's
+  APC. `queued before a handover` is an APC carried across a kernel
+  upgrade, whose queuer is not carried.
+- An APC to a thread of another process is refused, so the queuer's
+  address is always placed by this process's own images.
+- The address is the one the system call returns to, so a program that
+  queues through a wrapper is named by the wrapper. Word's report reads
+  `called from 0x3ff7fff8b67b (kernel32.dll+0x4b67b)` -- gala's own
+  `QueueUserAPC` -- and the code that decided is a frame further up.
+  Where the wrapper is the answer the record gives, the whole stack of
+  that call is the next question, and `stack_at=NtQueueApcThreadEx2`
+  with `stack_from=` on the deciding module ("Stack captures" below) is
+  what asks it.
+- The queueing thread's last calls come from the flight recorder, by
+  tid, exactly as the dying thread's do; a thread whose calls have
+  fallen out of the ring has no line.
+- The dying thread's own last calls can say nothing at all: dispatching
+  the exception the APC raised looks up unwind data frame by frame, and
+  those calls crowd out everything the thread did before (`crash_apc`:
+  21 of them, and not the alertable wait left). The queueing thread's
+  ring holds no dispatch, so its calls are the ones that explain the
+  death.
+
+Scenario `crash_apc`: a worker waits alertably, the main thread closes a
+handle that is not one and queues an APC that raises a code nothing
+handles, and the report must name the main thread, where it queued from,
+and that failing close among its last calls.
+
+Word's own death reads (`office_word`, ROADMAP OF):
+
+```
+crash report:   it was last given a user APC: routine 0x3ff7f8734ac0 (Mso30win32client.dll+0x8e4ac0), queued by pid 12 tid 272, called from 0x3ff7fff8b67b (kernel32.dll+0x4b67b) at 40599 ms
+crash report:   thread 272's last calls, oldest first: NtProtectVirtualMemory=0x00000000, NtQueueApcThreadEx2=0x00000000, NtResumeThread=0x00000000, NtSetInformationThread=0xc0000022, NtWaitForSingleObject=0x00000000, NtQueryInformationProcess=0x00000000, NtDelayExecution=0x00000000
+```
+
+-- the queue and the resume of the fail-fast, in that order, and a
+refused `NtSetInformationThread` after them that nothing else in the run
+records.
 
 ### Stack captures (`stack_at=`, `stack_from=`, `stack_words=`)
 
@@ -1230,6 +1491,81 @@ stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
   are above what is scanned and are not placed by this yet; and the
   scan is bounded (512 words at the most, `stack_words=`) because it
   runs on a kernel stack, so an arbitrarily deep stack is not reached.
+
+### Hooks (`hook=`)
+
+`hook=<event>[/<text>][:<n>]=<action>[+<secs>]` says what the kernel does
+when something happens on the screen. There is one event, `window` (a
+top-level window became visible), and one action, `shot` (a screendump of
+the whole desktop), so the short form of it is `hook=window=shot`
+(`kernel/src/nt/hooks.rs`, scenarios `hook_test` and `hook_match_test`).
+
+It answers what a picture of a run leaves open: what the screen looked
+like when the program put its window up. The host can take a picture at a
+second of the run (`XTASK_SHOTS`, "Screen" and WORKFLOW "Screenshots"),
+but a second guessed from the outside is missed as often as it is caught,
+and it can wait for a line of the serial log -- which only works when the
+line is known in advance. The first window of a run is; the ones after it
+are not, and Word's splash goes up with an empty title. The kernel is the
+one that knows, so the kernel is the one that asks.
+
+The two halves meet through a line. The kernel writes the request as the
+window goes up:
+
+```
+hook: armed: window shown -> screendump, 4 shots, 0.000 s after each (hook=)
+hook: shot +0.000 hook-test-exe-w4: window 'hook_test three again' shown by hook_test.exe (pid 4)
+```
+
+and xtask, which polls the log every 50 ms for the screendumps it was
+asked for itself, reads the new lines, waits the `+<secs>` and takes the
+picture through the same monitor socket as screen checks, into
+`target/screenshots/<scenario>-hook-<name>.png` -- `<name>` being the
+program's name in lower case with every run of anything but a letter or a
+digit as one `-`, then `-w` and the window's id, so two windows of one
+program are two files and a window shown twice does not write over its
+own earlier picture (`-2`, `-3`). The file written is named in the run's
+own log (`xtask: wrote ...`), which is what a scenario's expectations are
+checked against. The kernel cannot encode a PNG and the host cannot know
+when to take one: this is the whole of why it is split.
+
+A delay is what the picture is usually worth taking after. `+0` is the
+instant the window became visible, which is before the program has
+painted it -- `hook_test`'s fourth window is white in its own picture and
+the three before it are not. `hook=window=shot+1` catches a window the
+program has drawn.
+
+Which windows, and how many:
+
+- **The match** (`hook=window/<text>=shot`) takes only the windows whose
+  program or title holds the text, either case. A desktop with a taskbar
+  and a start menu on it shows windows nobody asked about.
+- **The count** (`:<n>`, 4 by default, 64 at most) is how many pictures
+  the hook has to give. When it runs out with windows still matching, one
+  line says so and carries the number of windows the match passed over:
+
+```
+hook: window: no shots left of the 1 asked for (2 windows passed over by the match)
+```
+
+  which is what tells a count that was too small from a match that was
+  too narrow. (A scenario's expectation is a line that must appear, never
+  one that must not, so this count is also the only thing that can prove
+  the match excluded anything: `hook_match_test`.)
+
+- **Cost and bounds**: an unarmed hook is one relaxed atomic load on the
+  path of every window that goes up. Four hooks at most are armed in a
+  boot (`hook=` may be written more than once), each at most 64 pictures,
+  each picture about 3 MB of `target/screenshots`; the host takes 64 of
+  them in a run whatever the guest asks for. The kernel writes a request
+  and never a file, and the name in it is reduced to letters, digits and
+  dashes twice, once by the kernel and once by the host, because the text
+  came from a guest.
+- **Limits**: the event is a window becoming visible (`winstate::show`),
+  so a window that is moved, retitled or redrawn is not one, and neither
+  is a window shown again that was already shown. The action is a picture
+  of the whole screen, not of the window. gala-um has no screen to take a
+  picture of, so the scenarios are x86 UEFI boots.
 
 ### Call tracing (`trace_from=`)
 
@@ -1900,9 +2236,23 @@ etw: 1 event written to the session, from 1 provider (etw=)
 - An event with no TraceLogging metadata is a manifest provider's,
   whose field names live in a manifest outside the program and are in
   no part of the event. Its line is the provider's id, the level and
-  keyword, and the payload's size, with which of the two it was
+  keyword, the payload's size, which of the two it was
   (`no field metadata: a manifest provider's event`, or `its field
-  metadata does not read`) -- so a reader knows whether to look.
+  metadata does not read`) -- so a reader knows whether to look -- and
+  the text those bytes carried (`kernel/src/nt/etw/strings.rs`):
+  `strings: "a manifest event's message"`, six of them at most, each
+  160 characters at most with `...` inside its quotes where it was
+  longer, and `and N more` for the ones the line left out. A string is
+  a run of four or more printable characters with a letter or a digit
+  in it, UTF-16LE tried before 8-bit so that a program's message is
+  not read as its first letter; a quote or a backslash inside one is
+  escaped. `no string in its bytes` is a finding and not a failure to
+  read: the payload was numbers, so no message was in it. Where the
+  record was cut to fit, the line says `strings in the bytes that
+  fit`, because the rest of the event never arrived. This is the whole
+  reading of such an event -- which field a number belonged to is what
+  the manifest would be for, and nothing here guesses at it -- and it
+  is what every event a Word startup writes comes down to.
 - The closing line counts what the session got, and says so when the
   budget ended the session before the program ended: a run must not read
   as a program that stopped writing when it was the session that stopped
@@ -2113,7 +2463,8 @@ always on and cheap:
 The kernel's screen console mirrors the serial log on the framebuffer;
 `cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel
 cmdline...]` saves PNGs at chosen times in `target/screenshots/`
-(WORKFLOW "Screenshots").
+(WORKFLOW "Screenshots"). A picture of a moment nobody can name in
+advance is the kernel's to ask for instead ("Hooks").
 
 ### Benchmarks
 

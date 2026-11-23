@@ -3,7 +3,12 @@
 //! class: "Services" for session 0, "Console" for the one the console
 //! shows), the caller's session (its id, active, its user and machine);
 //! session notifications are accepted and never sent (gala's session
-//! never connects, disconnects or locks yet).
+//! never connects, disconnects or locks yet), in both forms: the
+//! WTSRegisterSessionNotification pair and the Ex pair that names a
+//! server, which is the one Word's WWLIB delay-loads (ROADMAP OF).
+//! Each registration leaves a ledger line of its own ("unsupported"),
+//! so a program waiting for a notification gala never sends is not
+//! waiting silently.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -73,17 +78,56 @@ fn fail(code: u32) -> i32 {
     0
 }
 
+/// Records a registration gala accepts and will never act on, with the
+/// caller's dwFlags as the detail: no WM_WTSSESSION_CHANGE is ever sent,
+/// so a program whose startup waits for one has this line and nothing
+/// else to say why (OBSERVABILITY "Missing-features ledger").
+fn never_sent(name: &[u8], flags: u32) {
+    // SAFETY: a valid buffer; 2 is GalaRecordMissing's "unsupported".
+    unsafe { GalaRecordMissing(name.as_ptr(), name.len(), 2, flags.into()) };
+}
+
 /// WTSRegisterSessionNotification(hWnd, dwFlags): accepted.
 #[unsafe(no_mangle)]
-pub extern "system" fn WTSRegisterSessionNotification(hwnd: usize, _flags: u32) -> i32 {
+pub extern "system" fn WTSRegisterSessionNotification(hwnd: usize, flags: u32) -> i32 {
+    if hwnd == 0 {
+        return fail(87);
+    }
+    never_sent(b"wtsapi32.dll!WTSRegisterSessionNotification", flags);
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WTSUnRegisterSessionNotification(hwnd: usize) -> i32 {
     if hwnd == 0 {
         return fail(87);
     }
     1
 }
 
+/// WTSRegisterSessionNotificationEx(hServer, hWnd, dwFlags): accepted,
+/// like the form above. Word's WWLIB delay-loads this one, and a delay
+/// load that cannot be resolved raises 0xc06d007f, which is what ended
+/// Word's startup before these two existed (ROADMAP OF).
+///
+/// `hServer` is ignored: WTS_CURRENT_SERVER_HANDLE (0) is the only
+/// handle a caller can hold here, since WTSOpenServer, which is what
+/// hands out any other, is not exported.
 #[unsafe(no_mangle)]
-pub extern "system" fn WTSUnRegisterSessionNotification(hwnd: usize) -> i32 {
+pub extern "system" fn WTSRegisterSessionNotificationEx(
+    _server: usize,
+    hwnd: usize,
+    flags: u32,
+) -> i32 {
+    if hwnd == 0 {
+        return fail(87);
+    }
+    never_sent(b"wtsapi32.dll!WTSRegisterSessionNotificationEx", flags);
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WTSUnRegisterSessionNotificationEx(_server: usize, hwnd: usize) -> i32 {
     if hwnd == 0 {
         return fail(87);
     }

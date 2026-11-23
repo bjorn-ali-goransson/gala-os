@@ -61,6 +61,11 @@ const CONTEXT_UNWOUND_TO_CALL: u32 = 0x2000_0000;
 /// RECORD's place in the kernel's dispatcher frame: right above the
 /// CONTEXT.
 const RECORD_OFFSET: usize = CONTEXT_SIZE;
+/// Where gala's ARM64 APC frame holds the APC's NormalRoutine,
+/// NormalContext, SystemArgument1 and SystemArgument2: above the CONTEXT
+/// at sp (the kernel's `APC_ARGS_OFFSET`), since ARM64's CONTEXT has no
+/// home area to hold them.
+const APC_ARGS_OFFSET: usize = CONTEXT_SIZE;
 
 // EXCEPTION_RECORD (the 64-bit layout).
 const ER_FLAGS: usize = 0x04;
@@ -1345,6 +1350,32 @@ global_asm!(
     "brk #0xf000",
     ".seh_endproc",
     "",
+    // KiUserApcDispatcher: the kernel resumes a thread here to run a user
+    // APC, with sp at the CONTEXT to return to and the APC's routine and
+    // arguments above it. `.seh_context` says a whole CONTEXT is at sp, so
+    // a walk out of this frame continues into the code the APC interrupted
+    // with its registers, and an exception an APC raises and has no handler
+    // for reaches the handlers below the wait that ran it (`apc_test`);
+    // with no unwind data the walk ends at this frame and no handler is
+    // asked at all. NtContinue with TestAlert then delivers the next APC
+    // or resumes the CONTEXT.
+    ".globl KiUserApcDispatcher",
+    ".p2align 2",
+    "KiUserApcDispatcher:",
+    ".seh_proc KiUserApcDispatcher",
+    ".seh_context",
+    ".seh_endprologue",
+    "add x17, sp, #{apc_args}",
+    "ldr x16, [x17]",
+    "ldp x0, x1, [x17, #8]",
+    "ldr x2, [x17, #24]",
+    "blr x16",
+    "mov x0, sp",
+    "mov w1, #1",
+    "bl {nt_continue}",
+    "brk #0xf000",
+    ".seh_endproc",
+    "",
     ".globl gala_consolidate",
     ".p2align 2",
     "gala_consolidate:",
@@ -1380,6 +1411,7 @@ global_asm!(
     unwind_to = sym unwind_to,
     nt_continue = sym crate::NtContinue,
     record = const RECORD_OFFSET,
+    apc_args = const APC_ARGS_OFFSET,
     size = const CONTEXT_SIZE,
     pc = const CTX_PC,
 );

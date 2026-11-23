@@ -1234,7 +1234,7 @@ fn pipe_request(
     let apc = if routine == 0 {
         None
     } else {
-        let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0], special: false };
+        let apc = thread::UserApc::new(routine, [call.arg(3)?, iosb, 0], false);
         thread::current().map(|t| (t, apc))
     };
     super::notify::Request {
@@ -3507,7 +3507,18 @@ pub(in crate::nt) fn caller_regs(call: &Call<'_>) -> UserRegs {
 
 /// NtSuspendThread(ThreadHandle, *PreviousSuspendCount)
 fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
-    let object = tri!(thread_object(call, arg!(call, 0), THREAD_SUSPEND_RESUME));
+    let h = arg!(call, 0);
+    // kernel32's SuspendThread answers (DWORD)-1 whatever the reason and
+    // a program may take that as fatal, leaving nothing of its own
+    // behind: the refusal is recorded here, the ones `thread::suspend`
+    // makes itself in there (nt/thread.rs).
+    let object = match thread_object(call, h, THREAD_SUSPEND_RESUME) {
+        Ok(object) => object,
+        Err(status) => {
+            thread::refused("suspension", None, h, status);
+            return status;
+        }
+    };
     let previous = tri!(thread::suspend(&object));
     let ptr = arg!(call, 1);
     if ptr != 0 {
@@ -3546,11 +3557,11 @@ fn nt_queue_apc_thread_ex2(call: &mut Call<'_>) -> NtStatus {
         // TODO: APCs to other processes.
         return NtStatus::ACCESS_DENIED;
     }
-    let apc = thread::UserApc {
-        routine: arg!(call, 3),
-        args: [arg!(call, 4), arg!(call, 5), arg!(call, 6)],
-        special: flags == 1,
-    };
+    let apc = thread::UserApc::new(
+        arg!(call, 3),
+        [arg!(call, 4), arg!(call, 5), arg!(call, 6)],
+        flags == 1,
+    );
     match thread::queue_user_apc(object, apc) {
         Ok(()) => NtStatus::SUCCESS,
         Err(e) => e,
@@ -3572,11 +3583,8 @@ fn nt_queue_apc_thread(call: &mut Call<'_>) -> NtStatus {
         // TODO: APCs to other processes.
         return NtStatus::ACCESS_DENIED;
     }
-    let apc = thread::UserApc {
-        routine: arg!(call, 1),
-        args: [arg!(call, 2), arg!(call, 3), arg!(call, 4)],
-        special: false,
-    };
+    let apc =
+        thread::UserApc::new(arg!(call, 1), [arg!(call, 2), arg!(call, 3), arg!(call, 4)], false);
     match thread::queue_user_apc(object, apc) {
         Ok(()) => NtStatus::SUCCESS,
         Err(e) => e,
@@ -3748,12 +3756,22 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
 
 /// NtResumeThread(ThreadHandle, *PreviousSuspendCount)
 fn nt_resume_thread(call: &mut Call<'_>) -> NtStatus {
-    let entry = tri!(call.handle(Handle(arg!(call, 0))));
-    let object = tri!(entry.require(THREAD_SUSPEND_RESUME));
-    if !matches!(object.body, ObjectBody::Thread(_)) {
-        return NtStatus::OBJECT_TYPE_MISMATCH;
-    }
-    let previous = thread::resume(object);
+    let h = arg!(call, 0);
+    // A resume that does not happen is how a thread stays suspended
+    // forever, so it is recorded as the suspension is (nt/thread.rs).
+    let object =
+        match call.handle(Handle(h)).and_then(|e| e.require(THREAD_SUSPEND_RESUME).cloned()) {
+            Ok(object) if matches!(object.body, ObjectBody::Thread(_)) => object,
+            Ok(_) => {
+                thread::refused("resume", None, h, NtStatus::OBJECT_TYPE_MISMATCH);
+                return NtStatus::OBJECT_TYPE_MISMATCH;
+            }
+            Err(status) => {
+                thread::refused("resume", None, h, status);
+                return status;
+            }
+        };
+    let previous = thread::resume(&object);
     let prev_ptr = arg!(call, 1);
     if prev_ptr != 0 {
         tri!(call.write_u32(prev_ptr, previous));
@@ -6420,7 +6438,7 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         None
     } else {
         let me = tri!(thread::current().ok_or(NtStatus::INVALID_HANDLE));
-        Some((me, thread::UserApc { routine: apc, args: [arg!(call, 3), iosb, 0], special: false }))
+        Some((me, thread::UserApc::new(apc, [arg!(call, 3), iosb, 0], false)))
     };
     let event = match event {
         0 => None,
@@ -7339,7 +7357,7 @@ fn io_apc(call: &Call<'_>, iosb: u64) -> Result<Option<thread::UserApc>, NtStatu
     // A synchronous handle takes one too: the I/O completes inline and
     // the routine still runs at the thread's next alertable wait (Windows
     // 11, ioapc_test).
-    Ok(Some(thread::UserApc { routine, args: [call.arg(3)?, iosb, 0], special: false }))
+    Ok(Some(thread::UserApc::new(routine, [call.arg(3)?, iosb, 0], false)))
 }
 
 /// The start of an I/O on `file`: the event (if any; it must be an event

@@ -13,7 +13,7 @@ Installers:
   - RelativeFilePath: pkdep-1.0.0\pkdep.exe
     PortableCommandAlias: pkdep
   InstallerUrl: https://packages.gala.invalid/pkdep-1.0.0.zip
-  InstallerSha256: 8E60F5A4D8035C43143AEFAC8117ECB34E7816DB2B9F1CE5A2261E938B2FF079
+  InstallerSha256: 55C4BB87BA84F3A58BB29C96267F7C3B4682051F621319ABA21C6263991A6054
   Dependencies:
     PackageDependencies:
     - PackageIdentifier: GalaTest.PkLib

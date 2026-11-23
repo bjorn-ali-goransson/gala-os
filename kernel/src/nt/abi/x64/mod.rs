@@ -349,9 +349,18 @@ pub(in crate::nt) fn deliver_special_apc(call: &Call<'_>, status: NtStatus) {
     deliver_apc(call, context, call.frame.sp(), &state, true);
 }
 
-/// Where an APC frame has its XSTATE area: after the CONTEXT and its
-/// CONTEXT_EX, 64-byte aligned (the frame is).
-const APC_XSTATE_AT: usize = 0x500;
+/// Where an APC frame has the machine frame (rip, cs, rflags, rsp and ss
+/// of the code the APC interrupted): after the CONTEXT and its CONTEXT_EX.
+/// gala's ntdll's KiUserApcDispatcher names this offset in its unwind data,
+/// so a walk out of an APC continues into the frames the APC interrupted
+/// instead of ending at the dispatcher, which is what lets a handler below
+/// an alertable wait take an exception an APC raised (`apc_test`). The
+/// CONTEXT alone cannot serve: the frame is aligned down, so the
+/// interrupted rsp is not a fixed distance from it.
+const APC_MACHINE_FRAME_AT: usize = 0x500;
+/// Where an APC frame has its XSTATE area: after the machine frame,
+/// 64-byte aligned (the frame is).
+const APC_XSTATE_AT: usize = 0x540;
 
 /// Runs the next user APC, if any, by resuming the thread in
 /// ntdll!KiUserApcDispatcher with `context` (the state to return to, with
@@ -360,9 +369,11 @@ const APC_XSTATE_AT: usize = 0x500;
 /// the CONTEXT, whose P1Home..P4Home hold NormalContext, SystemArgument1,
 /// SystemArgument2 and NormalRoutine; the dispatcher calls the routine and
 /// NtContinues the CONTEXT with TestAlert set, which delivers the next
-/// APC. With extended features the CONTEXT has CONTEXT_XSTATE, its
-/// CONTEXT_EX after it and the XSTATE area at APC_XSTATE_AT, so the
-/// routine's use of the YMM registers does not reach the resumed code.
+/// APC. A machine frame at APC_MACHINE_FRAME_AT says where the interrupted
+/// code was, which the dispatcher's unwind data reads. With extended
+/// features the CONTEXT has CONTEXT_XSTATE, its CONTEXT_EX after it and
+/// the XSTATE area at APC_XSTATE_AT, so the routine's use of the YMM
+/// registers does not reach the resumed code.
 // TODO: verify the frame against the pinned build's ntdll.
 pub(in crate::nt) fn deliver_apc(
     call: &Call<'_>,
@@ -381,13 +392,20 @@ pub(in crate::nt) fn deliver_apc(
         context[8 * i..8 * i + 8].copy_from_slice(&v.to_le_bytes());
     }
     let xlen = c::xstate_len();
-    let size = if xlen == 0 { c::SIZE } else { APC_XSTATE_AT + xlen };
+    let size =
+        if xlen == 0 { APC_MACHINE_FRAME_AT + c::MACHINE_FRAME_SIZE } else { APC_XSTATE_AT + xlen };
     let frame = (rsp.wrapping_sub(size as u64)) & !0x3f;
     if xlen != 0 {
         let flags = c::flags(&context) | c::CONTEXT_XSTATE;
         c::set_flags(&mut context, flags);
     }
-    if frame >= rsp || call.process.write(frame, &context).is_err() {
+    if frame >= rsp
+        || call.process.write(frame, &context).is_err()
+        || call
+            .process
+            .write(frame + APC_MACHINE_FRAME_AT as u64, &c::machine_frame(&context))
+            .is_err()
+    {
         return false;
     }
     if xlen != 0 {
@@ -478,9 +496,25 @@ pub(in crate::nt) fn create_wow64_thread(
 /// process's crash report, printed when it ends (nt::crashreport).
 pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     let (record, context) = (arg!(call, 0), arg!(call, 1));
+    let status = unhandled_note(call);
+    // ntdll's dispatcher does not look at the status, so a report the
+    // kernel could not read would leave no trace of itself.
+    if status != NtStatus::SUCCESS && record != 0 {
+        crate::nt::crashreport::unread(&call.process, record, context, "part");
+    }
+    status
+}
+
+/// The note itself (`gala_unhandled_exception`, which records what this
+/// refuses to read).
+fn unhandled_note(call: &mut Call<'_>) -> NtStatus {
+    let (record, context) = (arg!(call, 0), arg!(call, 1));
     let walk = arg!(call, 2);
     if record == 0 {
-        *call.process.unhandled_exception.lock() = None;
+        // The top-level filter continued execution, so the process
+        // carries on: the note goes, and the exception it swallowed is
+        // recorded now or never (nt::crashreport::continued).
+        crate::nt::crashreport::continued(&call.process);
         return NtStatus::SUCCESS;
     }
     // EXCEPTION_RECORD: code +0, address +0x10, parameter count +0x18,
@@ -513,20 +547,13 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     for (i, p) in note.params.iter_mut().take(kept).enumerate() {
         *p = tri!(call.read_u64(record + 0x20 + 8 * i as u64));
     }
-    // A C++ throw: what was thrown, read now (the object and the
-    // runtime's type data are gone once the process has ended).
-    if code == crate::nt::crashreport::CXX_EXCEPTION {
-        let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
-        let params = &note.params[..note.params_len.min(4)];
-        note.cxx = crate::nt::crashreport::CxxThrow::decode(params, x86, &read);
-    }
-    // A delay-load failure: the DLL and function it was looking for.
-    use crate::nt::crashreport::{DELAY_DLL, DELAY_PROC, DelayLoad};
-    if matches!(code, DELAY_DLL | DELAY_PROC) && note.params_len >= 1 {
-        let info = note.params[0];
-        let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
-        note.delay = DelayLoad::decode(info, x86, &read);
-    }
+    // What the parameters describe, for the codes a report knows (a C++
+    // throw's thrown type, a delay load's DLL and function), read now:
+    // the thrown object, the runtime's type data and the DelayLoadInfo
+    // are all gone once the process has ended. The one decoder serves
+    // both ABIs (crashreport::decode_params).
+    let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
+    crate::nt::crashreport::decode_params(&mut note, &read);
     note.flags = tri!(call.read_u64(record)).wrapping_shr(32) as u32;
     note.walk = crate::nt::abi::walk_of(call, walk);
     // 32-bit code: the SEH registrations the dispatcher walked (the list
@@ -553,7 +580,7 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
         }
         note.seh_end |= frame == u32::MAX;
     }
-    *call.process.unhandled_exception.lock() = Some(note);
+    crate::nt::crashreport::keep_unhandled(&call.process, note);
     NtStatus::SUCCESS
 }
 
@@ -574,7 +601,7 @@ pub(in crate::nt) fn keep_note(
     let mut regs = frame.user_regs();
     regs.set_ip(rip);
     let note = crate::nt::crashreport::Note::new(process, status, access, regs, is_compat(frame));
-    *process.last_exception.lock() = Some(note);
+    crate::nt::crashreport::keep_fault(process, note);
 }
 
 /// The dispatcher frame on the user stack: the CONTEXT at the new rsp,

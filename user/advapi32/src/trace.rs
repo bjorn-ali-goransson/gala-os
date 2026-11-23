@@ -35,8 +35,26 @@
 //! when several sessions ask for one, and how much room `ControlTraceW`
 //! wants in the block it writes the session's names back into (gala
 //! asks only that they fit; Windows wants more than that).
+//!
+//! Nothing a program's write path reaches takes a lock: not the walk
+//! that weighs an event against what the sessions ask, not the keeping
+//! of it, and not the system call that hands it to the kernel. The
+//! lists are only ever added to, a block is never freed, the fields a
+//! write reads are either written before the block is published or
+//! atomic, and a session's room is reserved with a compare-exchange.
+//! Office suspends its own threads to walk their stacks while the
+//! process traces, so a lock on this path is one a stopped thread can
+//! be holding, and every other writer would then spin for good -- which
+//! is where Word's main thread sat (`user/etwlock_test`, ROADMAP OF).
+//! What is left under a lock is the changing of the lists themselves,
+//! which no write waits for, and that lock reports what it waits for
+//! (`gala_lock`).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
+
+use gala_lock::Lock;
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_ACCESS_DENIED: u32 = 5;
@@ -161,41 +179,120 @@ impl Demands {
     }
 }
 
+/// An enable's `Demands` as a write may find them: `EnableTraceEx2`
+/// rewrites them under the list lock while a write is weighing an event
+/// against them, and a write takes no lock. The three parts are loaded
+/// one at a time, so a write that lands exactly on a change can weigh
+/// its event against a level from one side of it and keywords from the
+/// other. That is the same answer Windows gives such a write: the
+/// change reaches a provider through its callback, and an event already
+/// on its way is weighed against whichever side of it the thread saw.
+struct AtomicDemands {
+    level: AtomicU8,
+    any: AtomicU64,
+    all: AtomicU64,
+}
+
+impl AtomicDemands {
+    fn load(&self) -> Demands {
+        Demands {
+            level: self.level.load(Ordering::Relaxed),
+            any: self.any.load(Ordering::Relaxed),
+            all: self.all.load(Ordering::Relaxed),
+        }
+    }
+
+    fn store(&self, demands: Demands) {
+        self.level.store(demands.level, Ordering::Relaxed);
+        self.any.store(demands.any, Ordering::Relaxed);
+        self.all.store(demands.all, Ordering::Relaxed);
+    }
+}
+
 /// How much of a session's name is kept. Windows' limit is 1024
 /// characters; a longer name keeps its first `NAME_MAX`, which is what
 /// the session is then known by.
 const NAME_MAX: usize = 128;
 
+/// A session's events: how much room they have, where the next one
+/// goes, and how many did not fit. One of these per `StartTraceW`,
+/// allocated with `capacity` bytes after it, and never freed -- a write
+/// that holds no lock may be copying into it at the moment the session
+/// is stopped, and nothing short of waiting for that write says
+/// otherwise, which is the wait this whole path exists to remove. A
+/// stopped session's room therefore stays the process's, which is what
+/// `BUFFERS_MAX` bounds.
+#[repr(C)]
+struct Buf {
+    /// How many bytes of events fit: the buffer count times the buffer
+    /// size the session asked for.
+    capacity: usize,
+    /// Where the next event goes. A write reserves its room here with a
+    /// compare-exchange and then copies into what it reserved, so two
+    /// threads writing at once get two ranges and neither waits for the
+    /// other -- nor for one that is suspended.
+    at: AtomicUsize,
+    /// Events that did not fit, which is what EventsLost counts.
+    lost: AtomicU32,
+}
+
+impl Buf {
+    /// The events themselves, which the allocation holds after the
+    /// header: `capacity` bytes of them.
+    fn bytes(&self) -> *mut u8 {
+        // SAFETY: this block was allocated with `capacity` bytes after
+        // the header, and `size_of::<Buf>()` is where they start.
+        unsafe { (self as *const Buf as *mut u8).add(size_of::<Buf>()) }
+    }
+}
+
+/// How much of a process's memory may be in trace buffers over its
+/// whole run. A buffer is never freed (`Buf`), so this is what keeps a
+/// program that starts and stops sessions in a loop from spending the
+/// process on them; one maximal session is 64 MiB of it. A start past
+/// it is told so and answered ERROR_NOT_ENOUGH_MEMORY, as a start whose
+/// allocation failed is.
+const BUFFERS_MAX: usize = 256 * 1024 * 1024;
+
+/// How much of `BUFFERS_MAX` is spent.
+static BUFFERS_SPENT: AtomicUsize = AtomicUsize::new(0);
+
 /// One `StartTraceW`. A block is never freed: a stopped session's
 /// handle stays known, because Windows takes `EnableTraceEx2` on it
 /// without complaint (and enables nothing), and the next session takes
 /// a block whose own is over.
+///
+/// A write reads `live`, `handle`, `to_kernel` and `buf` and no more,
+/// all atomic and all published by the store of `live` that ends a
+/// start. Everything else is read and written only with `LOCK` held,
+/// which is why those fields are reached through a raw pointer rather
+/// than a reference: a write holds a `&Session` to the same block at
+/// the same time, and a `&mut` beside it would be a lie.
 struct Session {
-    /// The next block, running or not: the list is only ever added to.
+    /// The next block, running or not: the list is only ever added to,
+    /// and a block is published after this is written.
     next: *mut Session,
-    /// Whether the session is running.
-    live: bool,
+    /// Whether the session is running. Stored last and with Release by
+    /// a start, loaded first and with Acquire by a write.
+    live: AtomicBool,
     /// Whether this block has ever been a session: a fresh one has no
     /// handle yet, and no handle of 0 is ever looked for.
-    used: bool,
-    handle: u64,
+    used: AtomicBool,
+    handle: AtomicU64,
     name: [u16; NAME_MAX],
     name_len: usize,
     mode: u32,
-    /// The events the session is keeping, and where the next one goes.
-    buffer: *mut u8,
-    capacity: usize,
-    at: usize,
+    /// The events the session is keeping: null for a session that is
+    /// over, and for the one gala started, which keeps none.
+    buf: AtomicPtr<Buf>,
     /// How many buffers the capacity is, as a query reports them.
     buffers: u32,
-    /// Events that did not fit, which is what EventsLost counts.
-    lost: u32,
     /// The session gala started for this program (`etw=`, nt::etw): it
     /// has no buffers, and every event in its reach goes to the kernel
     /// as it is written. The program neither started it nor has its
     /// handle, so it cannot query or stop it; it is a session here so
     /// that a provider learns of it exactly as of any other.
-    to_kernel: bool,
+    to_kernel: AtomicBool,
     /// On that session: every provider the program registers, whatever
     /// its id (`etw=*`).
     every_provider: bool,
@@ -207,21 +304,35 @@ struct Session {
 }
 
 /// One provider one session asked for.
+///
+/// Every field a write reads is atomic but `guid`, which is written
+/// before the block is published and never again: a dead block is taken
+/// only by an enable of the same provider (`set_enable`). That is what
+/// lets a write key on it without a lock -- the sixteen bytes are this
+/// block's for good, so there is no half-written id to read. The memory
+/// is therefore the most sessions that ever enabled one provider at
+/// once, per provider, rather than the number of enables a process made.
 struct Enable {
     next: *mut Enable,
-    live: bool,
-    session: u64,
+    live: AtomicBool,
+    session: AtomicU64,
     guid: [u8; 16],
-    demands: Demands,
+    demands: AtomicDemands,
 }
 
 /// The newest session block, and the newest enable (0: none yet).
+/// Stored with Release once a fresh block's own fields are written, and
+/// loaded with Acquire by every walk, so a walk that holds no lock sees
+/// a finished block or no block at all.
 static SESSIONS: AtomicUsize = AtomicUsize::new(0);
 static ENABLES: AtomicUsize = AtomicUsize::new(0);
-/// Held across a walk of either list and a block's own fields. Never
-/// held while a provider's callback runs: the callback is the program's
-/// own code, and it may register a provider of its own.
-static LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Held while either list is changed and while a block's lock-guarded
+/// fields are read or written. Nothing a write reaches takes it, no
+/// system call is made beneath it, and no call into a provider's
+/// callback runs beneath it -- the callback is the program's own code,
+/// and it may register a provider of its own.
+static LOCK: Lock = Lock::new(b"advapi32.dll!the trace lists");
 /// The next TRACEHANDLE. Never 0: 0 is what a failed start leaves, and
 /// what `EnableTraceEx2` answers ERROR_INVALID_PARAMETER for.
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(0x0100_0001);
@@ -236,34 +347,31 @@ static ASKED: AtomicBool = AtomicBool::new(false);
 /// the lists' lock, so that the common case costs one load.
 static KERNEL: AtomicU64 = AtomicU64::new(0);
 
-/// `f` with both lists held.
-fn with_list<R>(f: impl FnOnce() -> R) -> R {
-    while LOCK.swap(true, Ordering::Acquire) {
-        core::hint::spin_loop();
-    }
-    let r = f();
-    LOCK.store(false, Ordering::Release);
-    r
-}
-
 /// The demands on `guid`: the union of every running session's, or
 /// `None` when no session asks for it. This is the question a provider
 /// answers `EventEnabled` from.
+///
+/// No lock: this is the first thing every `EventWrite` asks, and a
+/// writer must not wait for a thread that may be suspended.
 pub(crate) fn demands(guid: &[u8; 16]) -> Option<Demands> {
-    with_list(|| union_of(guid))
+    union_of(guid)
 }
 
-/// The union of the live enables for `guid`. The lists are held.
+/// The union of the live enables for `guid`. No lock: a block is never
+/// freed, its `guid` never changes, and the rest of what is read is
+/// atomic.
 fn union_of(guid: &[u8; 16]) -> Option<Demands> {
     let mut union: Option<Demands> = None;
-    let mut at = ENABLES.load(Ordering::Relaxed);
+    let mut at = ENABLES.load(Ordering::Acquire);
     while at != 0 {
-        // SAFETY: a block this DLL allocated and never frees.
-        let e = unsafe { &mut *(at as *mut Enable) };
-        if e.live && e.guid == *guid {
+        // SAFETY: a block this DLL allocated and never frees, published
+        // only once its own fields were written.
+        let e = unsafe { &*(at as *const Enable) };
+        if e.live.load(Ordering::Acquire) && e.guid == *guid {
+            let demands = e.demands.load();
             union = Some(match union {
-                Some(sofar) => sofar.with(e.demands),
-                None => e.demands,
+                Some(sofar) => sofar.with(demands),
+                None => demands,
             });
         }
         at = e.next as usize;
@@ -271,15 +379,19 @@ fn union_of(guid: &[u8; 16]) -> Option<Demands> {
     union
 }
 
-/// What one session asks of `guid`, if it asks at all. The lists are
-/// held.
+/// What one session asks of `guid`, if it asks at all. No lock, for the
+/// same reasons as `union_of`: every write asks it of every running
+/// session.
 fn asked_by(session: u64, guid: &[u8; 16]) -> Option<Demands> {
-    let mut at = ENABLES.load(Ordering::Relaxed);
+    let mut at = ENABLES.load(Ordering::Acquire);
     while at != 0 {
-        // SAFETY: ours, never freed.
-        let e = unsafe { &mut *(at as *mut Enable) };
-        if e.live && e.session == session && e.guid == *guid {
-            return Some(e.demands);
+        // SAFETY: ours, never freed, published whole.
+        let e = unsafe { &*(at as *const Enable) };
+        if e.live.load(Ordering::Acquire)
+            && e.guid == *guid
+            && e.session.load(Ordering::Relaxed) == session
+        {
+            return Some(e.demands.load());
         }
         at = e.next as usize;
     }
@@ -291,15 +403,19 @@ fn asked_by(session: u64, guid: &[u8; 16]) -> Option<Demands> {
 /// lists are held.
 fn set_enable(session: u64, guid: &[u8; 16], demands: Demands) -> Option<Demands> {
     let mut free = 0usize;
-    let mut at = ENABLES.load(Ordering::Relaxed);
+    let mut at = ENABLES.load(Ordering::Acquire);
     while at != 0 {
         // SAFETY: ours, never freed.
-        let e = unsafe { &mut *(at as *mut Enable) };
-        if e.live && e.session == session && e.guid == *guid {
-            e.demands = demands;
+        let e = unsafe { &*(at as *const Enable) };
+        let live = e.live.load(Ordering::Relaxed);
+        if live && e.guid == *guid && e.session.load(Ordering::Relaxed) == session {
+            e.demands.store(demands);
             return union_of(guid);
         }
-        if !e.live {
+        // Only a block this same provider's enables have had: a block's
+        // guid never changes, which is what lets a write key on it with
+        // no lock.
+        if !live && e.guid == *guid {
             free = at;
         }
         at = e.next as usize;
@@ -313,29 +429,42 @@ fn set_enable(session: u64, guid: &[u8; 16], demands: Demands) -> Option<Demands
             return None;
         }
         let fresh = fresh.cast::<Enable>();
-        // SAFETY: a zeroed block of exactly this size.
-        unsafe { (*fresh).next = ENABLES.load(Ordering::Relaxed) as *mut Enable };
-        ENABLES.store(fresh as usize, Ordering::Relaxed);
+        // SAFETY: a zeroed block of exactly this size, which no other
+        // thread can reach until it is published below. `guid` is
+        // written here and never again.
+        unsafe {
+            (*fresh).next = ENABLES.load(Ordering::Relaxed) as *mut Enable;
+            (*fresh).guid = *guid;
+        }
+        // Release: a walk that loads ENABLES with Acquire reads a block
+        // whose guid is written.
+        ENABLES.store(fresh as usize, Ordering::Release);
         fresh as usize
     };
-    // SAFETY: ours.
-    let e = unsafe { &mut *(block as *mut Enable) };
-    e.live = true;
-    e.session = session;
-    e.guid = *guid;
-    e.demands = demands;
+    // SAFETY: ours, never freed.
+    let e = unsafe { &*(block as *const Enable) };
+    e.session.store(session, Ordering::Relaxed);
+    e.demands.store(demands);
+    // Last, and with Release: a walk that reads `live` with Acquire
+    // sees the session and demands this enable was made with.
+    e.live.store(true, Ordering::Release);
     union_of(guid)
 }
 
 /// `session` stops asking for `guid`; what the sessions that are left
 /// still ask for, if any. The lists are held.
 fn drop_enable(session: u64, guid: &[u8; 16]) -> Option<Demands> {
-    let mut at = ENABLES.load(Ordering::Relaxed);
+    let mut at = ENABLES.load(Ordering::Acquire);
     while at != 0 {
         // SAFETY: ours, never freed.
-        let e = unsafe { &mut *(at as *mut Enable) };
-        if e.live && e.session == session && e.guid == *guid {
-            e.live = false;
+        let e = unsafe { &*(at as *const Enable) };
+        if e.live.load(Ordering::Relaxed)
+            && e.guid == *guid
+            && e.session.load(Ordering::Relaxed) == session
+        {
+            // Release: what this enable held is in view of whichever
+            // enable takes the block next.
+            e.live.store(false, Ordering::Release);
         }
         at = e.next as usize;
     }
@@ -348,28 +477,55 @@ fn drop_enable(session: u64, guid: &[u8; 16]) -> Option<Demands> {
 /// of: `EnableTraceEx2` takes a stopped session's handle and enables
 /// nothing, while `ControlTraceW` answers it the same as a handle no
 /// session ever had.
+///
+/// `LOCK` is held throughout, which is what lets `f` read and write the
+/// block's lock-guarded fields; it gets a raw pointer rather than a
+/// reference because a write holds a `&Session` to the same block at
+/// the same time. This is the query and stop path, which no write
+/// waits for.
+/// The name a session block holds, as a slice of the block itself.
+///
+/// # Safety
+///
+/// `s` is a block on the session list and `LOCK` is held: the name and
+/// its length are the lock's to read.
+unsafe fn name_of(s: *mut Session) -> &'static [u16] {
+    // SAFETY: the caller holds the lock, and `name_len` is never past
+    // `NAME_MAX`, which is the array's length.
+    unsafe { core::slice::from_raw_parts((&raw const (*s).name).cast::<u16>(), (*s).name_len) }
+}
+
 fn with_session<R>(
     handle: u64,
     name: &[u16],
-    f: impl FnOnce(&mut Session) -> R,
+    f: impl FnOnce(*mut Session) -> R,
 ) -> (Option<R>, bool) {
-    with_list(|| {
+    LOCK.with(|| {
         let mut stopped = false;
-        let mut at = SESSIONS.load(Ordering::Relaxed);
+        let mut at = SESSIONS.load(Ordering::Acquire);
         while at != 0 {
-            // SAFETY: ours, never freed.
-            let s = unsafe { &mut *(at as *mut Session) };
-            let named = handle == 0
-                && !name.is_empty()
-                && s.name_len == name.len()
-                && s.name[..s.name_len] == *name;
-            if s.used && ((handle != 0 && s.handle == handle) || named) {
-                if s.live {
+            // SAFETY: ours, never freed; the lock-guarded fields are
+            // read with the lock held.
+            let s = at as *mut Session;
+            let (used, live, its_handle, named) = unsafe {
+                (
+                    (*s).used.load(Ordering::Relaxed),
+                    (*s).live.load(Ordering::Relaxed),
+                    (*s).handle.load(Ordering::Relaxed),
+                    handle == 0
+                        && !name.is_empty()
+                        && (*s).name_len == name.len()
+                        && name_of(s) == name,
+                )
+            };
+            if used && ((handle != 0 && its_handle == handle) || named) {
+                if live {
                     return (Some(f(s)), false);
                 }
                 stopped = true;
             }
-            at = s.next as usize;
+            // SAFETY: as above.
+            at = unsafe { (*s).next as usize };
         }
         (None, stopped)
     })
@@ -379,11 +535,11 @@ fn with_session<R>(
 /// one on the list. 0 when there is no memory for it. The lists are
 /// held.
 fn take_block() -> usize {
-    let mut at = SESSIONS.load(Ordering::Relaxed);
+    let mut at = SESSIONS.load(Ordering::Acquire);
     while at != 0 {
         // SAFETY: ours, never freed.
-        let s = unsafe { &mut *(at as *mut Session) };
-        if !s.live {
+        let s = unsafe { &*(at as *const Session) };
+        if !s.live.load(Ordering::Relaxed) {
             return at;
         }
         at = s.next as usize;
@@ -394,10 +550,63 @@ fn take_block() -> usize {
         return 0;
     }
     let fresh = fresh.cast::<Session>();
-    // SAFETY: a zeroed block of exactly this size.
+    // SAFETY: a zeroed block of exactly this size, which no other
+    // thread can reach until it is published below.
     unsafe { (*fresh).next = SESSIONS.load(Ordering::Relaxed) as *mut Session };
-    SESSIONS.store(fresh as usize, Ordering::Relaxed);
+    // Release: a walk that loads SESSIONS with Acquire reads a block
+    // whose `next` is written. Its own fields come into view with the
+    // store of `live` that ends the start, and until then a walk sees
+    // a block that is not running and skips it.
+    SESSIONS.store(fresh as usize, Ordering::Release);
     fresh as usize
+}
+
+/// Room for a session's events: the process's budget taken and the
+/// block allocated, or null when either is spent. `budget` says which,
+/// because the two are different things to a reader -- a program past
+/// `BUFFERS_MAX` has started and stopped more sessions than a process
+/// may, where a failed allocation is the heap being out.
+///
+/// Called before `LOCK` is taken: it allocates, and the lock must not
+/// be held across anything that can take a lock of its own.
+fn reserve_buffers(capacity: usize, budget: &mut bool) -> *mut Buf {
+    let mut spent = BUFFERS_SPENT.load(Ordering::Relaxed);
+    loop {
+        let want = spent.saturating_add(capacity);
+        if want > BUFFERS_MAX {
+            *budget = true;
+            return core::ptr::null_mut();
+        }
+        match BUFFERS_SPENT.compare_exchange_weak(spent, want, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => break,
+            Err(now) => spent = now,
+        }
+    }
+    // SAFETY: plain allocation, zeroed (HEAP_ZERO_MEMORY), of the
+    // header and the bytes that follow it.
+    let block = unsafe { HeapAlloc(GetProcessHeap(), 8, size_of::<Buf>() + capacity) };
+    if block.is_null() {
+        BUFFERS_SPENT.fetch_sub(capacity, Ordering::Relaxed);
+        return core::ptr::null_mut();
+    }
+    let buf = block.cast::<Buf>();
+    // SAFETY: a zeroed block of at least this size, which no other
+    // thread can reach until the session is published.
+    unsafe { (*buf).capacity = capacity };
+    buf
+}
+
+/// Buffers a start allocated and then did not publish. No thread but
+/// this one has ever had them, which is the one case in which a
+/// session's buffers can go back at all.
+fn give_back(buf: *mut Buf, capacity: usize) {
+    if buf.is_null() {
+        return;
+    }
+    // SAFETY: this thread's own allocation, reached by nothing else.
+    unsafe { HeapFree(GetProcessHeap(), 0, buf.cast::<u8>()) };
+    BUFFERS_SPENT.fetch_sub(capacity, Ordering::Relaxed);
 }
 
 /// The UTF-16 string at `at` in the caller's block, bounded by
@@ -503,48 +712,71 @@ pub extern "system" fn StartTraceW(
     let buffers = asked_buffers.clamp(BUFFER_MIN, BUFFER_MAX);
     let bytes = asked_bytes.saturating_mul(1024).clamp(BYTES_MIN, BYTES_MAX);
     let capacity = buffers as usize * bytes as usize;
-    let started = with_list(|| {
+    // The buffers before the lists: allocating takes the heap's own
+    // lock, and this one is not held across another.
+    let mut budget = false;
+    let buf = reserve_buffers(capacity, &mut budget);
+    if buf.is_null() {
+        if budget {
+            crate::missing_detail(
+                b"advapi32.dll!StartTraceW(the process has spent its trace buffers)",
+                capacity as u64,
+            );
+        } else {
+            crate::missing(b"advapi32.dll!StartTraceW(no memory)");
+        }
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    let started = LOCK.with(|| {
         // A name a running session already has.
-        let mut at = SESSIONS.load(Ordering::Relaxed);
+        let mut at = SESSIONS.load(Ordering::Acquire);
         while at != 0 {
-            // SAFETY: ours, never freed.
-            let s = unsafe { &mut *(at as *mut Session) };
-            if s.live && s.name_len == name_len && s.name[..name_len] == session_name[..name_len] {
+            // SAFETY: ours, never freed; the lock is held.
+            let s = at as *mut Session;
+            let taken = unsafe {
+                (*s).live.load(Ordering::Relaxed)
+                    && (*s).name_len == name_len
+                    && name_of(s) == &session_name[..name_len]
+            };
+            if taken {
                 return Err(ERROR_ALREADY_EXISTS);
             }
-            at = s.next as usize;
+            // SAFETY: as above.
+            at = unsafe { (*s).next as usize };
         }
         let block = take_block();
         if block == 0 {
             return Err(ERROR_NOT_ENOUGH_MEMORY);
         }
-        // SAFETY: plain allocation; the session's own buffers.
-        let buffer = unsafe { HeapAlloc(GetProcessHeap(), 8, capacity) };
-        if buffer.is_null() {
-            return Err(ERROR_NOT_ENOUGH_MEMORY);
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: ours, never freed; the lock-guarded fields are
+        // written with the lock held, and the atomic ones before the
+        // store of `live` that publishes all of them.
+        unsafe {
+            let s = block as *mut Session;
+            (*s).name = session_name;
+            (*s).name_len = name_len;
+            (*s).mode = mode;
+            (*s).buffers = buffers;
+            (*s).handle.store(handle, Ordering::Relaxed);
+            (*s).to_kernel.store(false, Ordering::Relaxed);
+            (*s).buf.store(buf, Ordering::Relaxed);
+            (*s).used.store(true, Ordering::Relaxed);
+            (*s).live.store(true, Ordering::Release);
         }
-        // SAFETY: ours.
-        let s = unsafe { &mut *(block as *mut Session) };
-        s.live = true;
-        s.used = true;
-        s.handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        s.name = session_name;
-        s.name_len = name_len;
-        s.mode = mode;
-        s.buffer = buffer;
-        s.capacity = capacity;
-        s.at = 0;
-        s.buffers = buffers;
-        s.lost = 0;
-        Ok(s.handle)
+        Ok(handle)
     });
     let started_handle = match started {
         Ok(handle) => handle,
-        Err(ERROR_NOT_ENOUGH_MEMORY) => {
-            crate::missing(b"advapi32.dll!StartTraceW(no memory)");
-            return ERROR_NOT_ENOUGH_MEMORY;
+        Err(error) => {
+            // Nothing was published, so the buffers are this thread's
+            // alone: they go back, budget and all.
+            give_back(buf, capacity);
+            if error == ERROR_NOT_ENOUGH_MEMORY {
+                crate::missing(b"advapi32.dll!StartTraceW(no memory)");
+            }
+            return error;
         }
-        Err(error) => return error,
     };
     // What a started session leaves in the block. Windows writes
     // neither name back here -- a query is what answers those -- but it
@@ -611,7 +843,9 @@ pub extern "system" fn EnableTraceEx2(
         // events still reach the session, unfiltered.
         crate::missing(b"advapi32.dll!EnableTraceEx2(filter)");
     }
-    let (found, stopped) = with_session(session, &[], |s| s.handle);
+    // SAFETY: the block the lock found, with the lock held.
+    let (found, stopped) =
+        with_session(session, &[], |s| unsafe { (*s).handle.load(Ordering::Relaxed) });
     if found.is_none() {
         // A stopped session's handle is taken and enables nothing;
         // anything else is a handle no session has.
@@ -624,7 +858,7 @@ pub extern "system" fn EnableTraceEx2(
             0
         }
         DISABLE => {
-            match with_list(|| drop_enable(session, &guid)) {
+            match LOCK.with(|| drop_enable(session, &guid)) {
                 // What the sessions that are left still ask for.
                 Some(left) => crate::etw::tell(&guid, ENABLE, left),
                 None => crate::etw::tell(&guid, DISABLE, Demands::NONE),
@@ -635,7 +869,7 @@ pub extern "system" fn EnableTraceEx2(
         // that is what the provider is told (measured).
         _ => {
             let asked = Demands { level, any: if any == 0 { u64::MAX } else { any }, all };
-            match with_list(|| set_enable(session, &guid, asked)) {
+            match LOCK.with(|| set_enable(session, &guid, asked)) {
                 Some(union) => {
                     crate::etw::tell(&guid, ENABLE, union);
                     0
@@ -686,38 +920,51 @@ pub extern "system" fn ControlTraceW(
         if code == FLUSH {
             return Err(ERROR_FILE_NOT_FOUND);
         }
+        // SAFETY: the block the lock found, with the lock held.
+        let (name_len, mode, buffers, buf) =
+            unsafe { ((*s).name_len, (*s).mode, (*s).buffers, (*s).buf.load(Ordering::Relaxed)) };
         // The name the session is known by goes back into the block,
         // which has to have room for it where it said.
-        if at + (s.name_len + 1) * 2 > size {
+        if at + (name_len + 1) * 2 > size {
             return Err(ERROR_MORE_DATA);
         }
+        let lost = if buf.is_null() {
+            0
+        } else {
+            // SAFETY: this session's buffers, never freed.
+            unsafe { (*buf).lost.load(Ordering::Relaxed) }
+        };
         // SAFETY: the caller's block, inside the size it gave, past the
-        // structure's own fields.
+        // structure's own fields; and the session's name, with the lock
+        // held.
         unsafe {
-            for i in 0..s.name_len {
-                (block.add(at) as *mut u16).add(i).write_unaligned(s.name[i]);
+            for (i, &c) in name_of(s).iter().enumerate() {
+                (block.add(at) as *mut u16).add(i).write_unaligned(c);
             }
-            (block.add(at) as *mut u16).add(s.name_len).write_unaligned(0);
+            (block.add(at) as *mut u16).add(name_len).write_unaligned(0);
             // Where the name went, which is how a caller that gave no
             // offset finds it (measured).
             (*properties).logger_name_offset = at as u32;
-            (*properties).log_file_mode = s.mode;
-            (*properties).number_of_buffers = s.buffers;
-            (*properties).free_buffers = s.buffers;
-            (*properties).events_lost = s.lost;
+            (*properties).log_file_mode = mode;
+            (*properties).number_of_buffers = buffers;
+            (*properties).free_buffers = buffers;
+            (*properties).events_lost = lost;
             // Nothing is ever written out: a buffering session's events
             // are its buffers.
             (*properties).buffers_written = 0;
         }
         if code == STOP {
-            s.live = false;
-            let buffer = core::mem::replace(&mut s.buffer, core::ptr::null_mut());
-            s.capacity = 0;
-            s.at = 0;
-            // SAFETY: this session's own buffers, which nothing reaches
-            // once it is not live.
-            unsafe { HeapFree(GetProcessHeap(), 0, buffer) };
-            return Ok(Some(s.handle));
+            // SAFETY: as above.
+            unsafe {
+                // The buffers are let go of but not freed: a write that
+                // holds no lock may be copying into them right now, and
+                // nothing short of waiting for it says otherwise --
+                // which is the wait this path exists not to have. They
+                // stay the process's, counted against BUFFERS_MAX.
+                (*s).buf.store(core::ptr::null_mut(), Ordering::Release);
+                (*s).live.store(false, Ordering::Release);
+                return Ok(Some((*s).handle.load(Ordering::Relaxed)));
+            }
         }
         Ok(None)
     });
@@ -741,14 +988,15 @@ pub extern "system" fn ControlTraceW(
 /// Every provider a stopped session asked for, told it is gone -- or
 /// told what the sessions that are left still ask for.
 fn stop_telling(handle: u64) {
-    let mut at = ENABLES.load(Ordering::Relaxed);
+    let mut at = ENABLES.load(Ordering::Acquire);
     while at != 0 {
-        let (next, gone) = with_list(|| {
+        let (next, gone) = LOCK.with(|| {
             // SAFETY: ours, never freed.
-            let e = unsafe { &mut *(at as *mut Enable) };
-            let mine = e.live && e.session == handle;
+            let e = unsafe { &*(at as *const Enable) };
+            let mine =
+                e.live.load(Ordering::Relaxed) && e.session.load(Ordering::Relaxed) == handle;
             if mine {
-                e.live = false;
+                e.live.store(false, Ordering::Release);
             }
             (e.next as usize, if mine { Some((e.guid, union_of(&e.guid))) } else { None })
         });
@@ -815,10 +1063,14 @@ const RECORD_HEADER: usize = 4 + 16 + 16 + 4;
 /// (ROADMAP OT4 step 2 has the decoder, which is what the pieces are
 /// kept whole for); what they give now is the count a query reports,
 /// and a session that holds a program's own account of its work.
-/// Asks the kernel what `etw=` wants of this program and makes the
-/// session it asks for. True if there was no memory for it. The lists
-/// are held.
-fn ask_kernel() -> bool {
+/// What `etw=` wants of this program, asked of the kernel, or `None`
+/// when nothing did (or the kernel did not answer).
+///
+/// No lock is held: this is a system call, and a thread stopped inside
+/// one must not be holding what another thread waits for. Asking twice
+/// costs a second call and nothing else -- the answer is the same, and
+/// the second one is dropped under the lock in `arm`.
+fn ask_kernel() -> Option<[u8; ASK_LEN]> {
     let mut ask = [0u8; ASK_LEN];
     let mut written = 0u64;
     // SAFETY: a buffer and a word this frame owns, of the length given;
@@ -833,35 +1085,45 @@ fn ask_kernel() -> bool {
         )
     };
     if status != 0 || written as usize != ASK_LEN {
-        return false;
+        return None;
     }
+    Some(ask)
+}
+
+/// The session `etw=` asks for, made from the kernel's answer. True if
+/// there was no memory for it. The lists are held.
+fn make_session(ask: &[u8; ASK_LEN]) -> bool {
     let block = take_block();
     if block == 0 {
         return true;
     }
-    // SAFETY: ours.
-    let s = unsafe { &mut *(block as *mut Session) };
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-    s.live = true;
-    s.used = true;
-    s.handle = handle;
-    // No name, which is what keeps the program from finding it: a
-    // lookup by name never matches an empty one, and the handle is
-    // never given out.
-    s.name_len = 0;
-    s.mode = PRIVATE | IN_PROC | BUFFERING;
-    s.buffer = core::ptr::null_mut();
-    s.capacity = 0;
-    s.at = 0;
-    s.buffers = 0;
-    s.lost = 0;
-    s.to_kernel = true;
-    s.every_provider = ask[16] & ASK_EVERY != 0;
-    s.ask_guid.copy_from_slice(&ask[..16]);
     let keyword = u64::from_le_bytes(ask[24..32].try_into().unwrap_or_default());
-    // A session that asks for keyword 0 asks for every keyword, as
-    // `EnableTraceEx2` has it (the contract, measured).
-    s.ask = Demands { level: ask[17], any: if keyword == 0 { u64::MAX } else { keyword }, all: 0 };
+    // SAFETY: ours, never freed; the lock-guarded fields are written
+    // with the lock held, and the atomic ones before the store of
+    // `live` that publishes all of them.
+    unsafe {
+        let s = block as *mut Session;
+        // No name, which is what keeps the program from finding it: a
+        // lookup by name never matches an empty one, and the handle is
+        // never given out.
+        (*s).name_len = 0;
+        (*s).mode = PRIVATE | IN_PROC | BUFFERING;
+        (*s).buffers = 0;
+        (*s).every_provider = ask[16] & ASK_EVERY != 0;
+        (*s).ask_guid.copy_from_slice(&ask[..16]);
+        // A session that asks for keyword 0 asks for every keyword, as
+        // `EnableTraceEx2` has it (the contract, measured).
+        (*s).ask =
+            Demands { level: ask[17], any: if keyword == 0 { u64::MAX } else { keyword }, all: 0 };
+        (*s).handle.store(handle, Ordering::Relaxed);
+        // It keeps no events of its own: they go to the kernel as they
+        // are written.
+        (*s).buf.store(core::ptr::null_mut(), Ordering::Relaxed);
+        (*s).to_kernel.store(true, Ordering::Relaxed);
+        (*s).used.store(true, Ordering::Relaxed);
+        (*s).live.store(true, Ordering::Release);
+    }
     KERNEL.store(handle, Ordering::Relaxed);
     false
 }
@@ -877,10 +1139,18 @@ pub(crate) fn arm(guid: &[u8; 16]) {
     if ASKED.load(Ordering::Acquire) && KERNEL.load(Ordering::Relaxed) == 0 {
         return;
     }
-    let short = with_list(|| {
+    // The system call before the lock, never beneath it: a thread
+    // stopped in the middle of one must not be holding what another
+    // thread waits for. Two registrations racing here both ask, and the
+    // second answer is dropped under the lock below.
+    let answer = if ASKED.load(Ordering::Relaxed) { None } else { ask_kernel() };
+    let short = LOCK.with(|| {
         let mut short = false;
         if !ASKED.load(Ordering::Relaxed) {
-            short = ask_kernel();
+            short = match answer {
+                Some(ask) => make_session(&ask),
+                None => false,
+            };
             ASKED.store(true, Ordering::Release);
         }
         let handle = KERNEL.load(Ordering::Relaxed);
@@ -888,15 +1158,20 @@ pub(crate) fn arm(guid: &[u8; 16]) {
             return short;
         }
         let mut found = None;
-        let mut at = SESSIONS.load(Ordering::Relaxed);
+        let mut at = SESSIONS.load(Ordering::Acquire);
         while at != 0 {
-            // SAFETY: ours, never freed.
-            let s = unsafe { &mut *(at as *mut Session) };
-            if s.live && s.handle == handle {
-                found = Some((s.every_provider, s.ask_guid, s.ask));
+            // SAFETY: ours, never freed; the lock is held.
+            let s = at as *mut Session;
+            let mine = unsafe {
+                (*s).live.load(Ordering::Relaxed) && (*s).handle.load(Ordering::Relaxed) == handle
+            };
+            if mine {
+                // SAFETY: as above.
+                found = Some(unsafe { ((*s).every_provider, (*s).ask_guid, (*s).ask) });
                 break;
             }
-            at = s.next as usize;
+            // SAFETY: as above.
+            at = unsafe { (*s).next as usize };
         }
         let Some((every, wanted, ask)) = found else {
             return short;
@@ -1000,56 +1275,84 @@ pub(crate) fn keep(
     }
     let length = RECORD_HEADER + payload;
     let mut over = None;
-    with_list(|| {
-        let mut at = SESSIONS.load(Ordering::Relaxed);
-        while at != 0 {
-            // SAFETY: ours, never freed.
-            let s = unsafe { &mut *(at as *mut Session) };
-            at = s.next as usize;
-            if !s.live || asked_by(s.handle, guid).is_none() {
-                continue;
-            }
-            // The session gala started has no buffers: the event goes to
-            // the kernel as it is written, and its budget running out is
-            // what ends the session.
-            if s.to_kernel {
-                if !to_kernel(guid, descriptor, count, data, payload) {
-                    s.live = false;
-                    over = Some(s.handle);
-                }
-                continue;
-            }
-            if length > RECORD_MAX || s.at + length > s.capacity {
-                s.lost = s.lost.saturating_add(1);
-                continue;
-            }
-            // SAFETY: this session's buffer, with room for `length`
-            // bytes at `s.at` as checked just above, and the caller's
-            // descriptor and payload pieces.
-            unsafe {
-                let mut to = s.buffer.add(s.at);
-                to.cast::<u32>().write_unaligned(length as u32);
-                to = to.add(4);
-                to.cast::<[u8; 16]>().write_unaligned(*guid);
-                to = to.add(16);
-                let mut event = [0u8; 16];
-                if !descriptor.is_null() {
-                    core::ptr::copy_nonoverlapping(descriptor, event.as_mut_ptr(), 16);
-                }
-                to.cast::<[u8; 16]>().write_unaligned(event);
-                to = to.add(16);
-                to.cast::<u32>().write_unaligned(payload as u32);
-                to = to.add(4);
-                for i in 0..pieces {
-                    let d = &*(data as *const DataDescriptor).add(i);
-                    if d.data != 0 && d.size != 0 {
-                        core::ptr::copy_nonoverlapping(d.data as *const u8, to, d.size as usize);
-                        to = to.add(d.size as usize);
-                    }
-                }
-            }
-            s.at += length;
+    // No lock, and no system call beneath one: this is the write path,
+    // and a thread suspended anywhere in it stops nobody.
+    let mut at = SESSIONS.load(Ordering::Acquire);
+    while at != 0 {
+        // SAFETY: ours, never freed, published whole.
+        let s = unsafe { &*(at as *const Session) };
+        at = s.next as usize;
+        if !s.live.load(Ordering::Acquire) {
+            continue;
         }
-    });
+        let handle = s.handle.load(Ordering::Relaxed);
+        if asked_by(handle, guid).is_none() {
+            continue;
+        }
+        // The session gala started has no buffers: the event goes to
+        // the kernel as it is written, and its budget running out is
+        // what ends the session.
+        if s.to_kernel.load(Ordering::Relaxed) {
+            if !to_kernel(guid, descriptor, count, data, payload) {
+                s.live.store(false, Ordering::Release);
+                over = Some(handle);
+            }
+            continue;
+        }
+        let buf = s.buf.load(Ordering::Acquire);
+        if buf.is_null() {
+            continue;
+        }
+        // SAFETY: this session's buffers, never freed, with `capacity`
+        // bytes after the header.
+        let b = unsafe { &*buf };
+        if length > RECORD_MAX {
+            b.lost.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        // The room is reserved with a compare-exchange rather than
+        // under a lock: two threads writing at once get two ranges and
+        // neither waits for the other, nor for one that is suspended.
+        let mut from = b.at.load(Ordering::Relaxed);
+        let reserved = loop {
+            let want = from + length;
+            if want > b.capacity {
+                b.lost.fetch_add(1, Ordering::Relaxed);
+                break None;
+            }
+            match b.at.compare_exchange_weak(from, want, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => break Some(from),
+                Err(now) => from = now,
+            }
+        };
+        let Some(from) = reserved else {
+            continue;
+        };
+        // SAFETY: `length` bytes of this session's buffers, reserved by
+        // the exchange above and so written by no other thread, and the
+        // caller's descriptor and payload pieces.
+        unsafe {
+            let mut to = b.bytes().add(from);
+            to.cast::<u32>().write_unaligned(length as u32);
+            to = to.add(4);
+            to.cast::<[u8; 16]>().write_unaligned(*guid);
+            to = to.add(16);
+            let mut event = [0u8; 16];
+            if !descriptor.is_null() {
+                core::ptr::copy_nonoverlapping(descriptor, event.as_mut_ptr(), 16);
+            }
+            to.cast::<[u8; 16]>().write_unaligned(event);
+            to = to.add(16);
+            to.cast::<u32>().write_unaligned(payload as u32);
+            to = to.add(4);
+            for i in 0..pieces {
+                let d = &*(data as *const DataDescriptor).add(i);
+                if d.data != 0 && d.size != 0 {
+                    core::ptr::copy_nonoverlapping(d.data as *const u8, to, d.size as usize);
+                    to = to.add(d.size as usize);
+                }
+            }
+        }
+    }
     over
 }

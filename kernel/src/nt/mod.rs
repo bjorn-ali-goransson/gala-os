@@ -13,6 +13,7 @@ pub mod disk;
 pub mod etw;
 pub mod file;
 pub mod gpt;
+pub mod hooks;
 pub mod hotswap_probe;
 pub mod job;
 pub mod keyed_event;

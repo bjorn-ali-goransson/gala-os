@@ -114,29 +114,10 @@ pub extern "system" fn NtTerminateProcess(_process: isize, _status: u32) -> i32 
     core::arch::naked_asm!("svc #{n}", "ret", n = const NT_TERMINATE_PROCESS)
 }
 
-/// Where the kernel resumes a thread to run a user APC, with sp at the
-/// CONTEXT to return to and NormalRoutine, NormalContext,
-/// SystemArgument1 and SystemArgument2 right above it (the kernel's
-/// `nt::abi::arm64` APC frame): calls the routine with the three
-/// arguments, then NtContinues the CONTEXT with TestAlert set (the next
-/// APC, if any, runs the same way).
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn KiUserApcDispatcher() -> ! {
-    core::arch::naked_asm!(
-        "add x17, sp, #{args}",
-        "ldr x16, [x17]",
-        "ldp x0, x1, [x17, #8]",
-        "ldr x2, [x17, #24]",
-        "blr x16",
-        "mov x0, sp",
-        "mov w1, #1",
-        "bl {continue}",
-        "brk #0xf000",
-        args = const 0x390,
-        continue = sym NtContinue,
-    )
-}
+// KiUserApcDispatcher is in `seh_arm64`, with the other entry points the
+// kernel resumes a thread at: it needs unwind data, which a naked function
+// does not get (it has no prologue for the compiler to describe), and a
+// walk that cannot pass it ends there.
 
 // Memory routines (ntdll exports them; the compiler also calls them).
 // Byte loops in assembly, so they cannot compile back into calls.

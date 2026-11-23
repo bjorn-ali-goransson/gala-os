@@ -210,6 +210,22 @@
  *   the owner's shown popups, TRUE shows them again.
  * - msctf.dll (loaded as Delphi's VCL loads it): SetInputScope and
  *   SetInputScopes on a window return S_OK.
+ * - Window stations and desktops: GetProcessWindowStation (the same
+ *   handle each time) and GetThreadDesktop; GetUserObjectInformationW's
+ *   UOI_NAME ("WinSta0", "Default"), UOI_TYPE ("WindowStation",
+ *   "Desktop"), UOI_FLAGS (the station visible, the handle not
+ *   inherited) and UOI_IO (a desktop's: the window station fails it
+ *   with ERROR_INVALID_FUNCTION), a short buffer giving
+ *   ERROR_INSUFFICIENT_BUFFER with the size needed.
+ * - SetUserObjectInformationW's two routes, told apart by the handle: a
+ *   window station or desktop handle takes UOI_FLAGS only (at least a
+ *   USEROBJECTFLAGS, a shorter buffer ERROR_INVALID_DATA, any other
+ *   index ERROR_INVALID_PARAMETER), while GetCurrentProcess()'s pseudo
+ *   handle takes UOI_TIMERPROC_EXCEPTION_SUPPRESSION only (a BOOL of
+ *   exactly four bytes; UOI_FLAGS on it ERROR_INVALID_FUNCTION, and a
+ *   real process handle of the same process ERROR_INVALID_PARAMETER).
+ *   The suppression cannot be read back. Office's shared runtime
+ *   delay-loads this one, so an absent export ends the process.
  *
  * Prints "user32_test: ok" or exits with the number of the failing
  * check. */
@@ -1657,6 +1673,108 @@ static void tiny_windows(void) {
 }
 
 
+/* Window stations and desktops, and the two routes through
+ * SetUserObjectInformationW. */
+static void winsta(void) {
+    HWINSTA sta = GetProcessWindowStation();
+    HDESK desk = GetThreadDesktop(GetCurrentThreadId());
+    CHECK(sta != NULL && desk != NULL && sta == GetProcessWindowStation());
+    WCHAR name[128];
+    DWORD need = 0;
+    CHECK(GetUserObjectInformationW(sta, UOI_NAME, name, sizeof name, &need));
+    CHECK(wcscmp(name, L"WinSta0") == 0 && need == 16);
+    CHECK(GetUserObjectInformationW(sta, UOI_TYPE, name, sizeof name, &need));
+    CHECK(wcscmp(name, L"WindowStation") == 0 && need == 28);
+    CHECK(GetUserObjectInformationW(desk, UOI_NAME, name, sizeof name, &need));
+    CHECK(wcscmp(name, L"Default") == 0 && need == 16);
+    CHECK(GetUserObjectInformationW(desk, UOI_TYPE, name, sizeof name, &need));
+    CHECK(wcscmp(name, L"Desktop") == 0 && need == 16);
+    /* A short buffer: ERROR_INSUFFICIENT_BUFFER, *lpnLengthNeeded the
+     * size the name wants (with its NUL). */
+    need = 0;
+    CHECK(!GetUserObjectInformationW(sta, UOI_NAME, name, 4, &need));
+    CHECK(GetLastError() == ERROR_INSUFFICIENT_BUFFER && need == 16);
+    /* UOI_IO is a desktop's; the window station refuses it. */
+    BOOL io = FALSE;
+    CHECK(GetUserObjectInformationW(desk, UOI_IO, &io, sizeof io, &need) && io && need == 4);
+    CHECK(!GetUserObjectInformationW(sta, UOI_IO, &io, sizeof io, &need));
+    CHECK(GetLastError() == ERROR_INVALID_FUNCTION);
+    USEROBJECTFLAGS flags;
+    CHECK(GetUserObjectInformationW(sta, UOI_FLAGS, &flags, sizeof flags, &need));
+    CHECK(need == sizeof flags && !flags.fInherit && (flags.dwFlags & WSF_VISIBLE));
+    need = 0;
+    CHECK(!GetUserObjectInformationW(sta, UOI_FLAGS, &flags, 4, &need));
+    CHECK(GetLastError() == ERROR_INSUFFICIENT_BUFFER && need == sizeof flags);
+    CHECK(!GetUserObjectInformationW(sta, 99, name, sizeof name, &need));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(!GetUserObjectInformationW((HANDLE)(UINT_PTR)0x1234, UOI_TYPE, name, sizeof name, &need));
+
+    /* A window station or desktop handle takes UOI_FLAGS and nothing
+     * else; the buffer must hold a whole USEROBJECTFLAGS, and a larger
+     * one is taken as well. */
+    CHECK(SetUserObjectInformationW(sta, UOI_FLAGS, &flags, sizeof flags));
+    CHECK(SetUserObjectInformationW(sta, UOI_FLAGS, &flags, sizeof flags + 1));
+    CHECK(SetUserObjectInformationW(desk, UOI_FLAGS, &flags, sizeof flags));
+    CHECK(!SetUserObjectInformationW(sta, UOI_FLAGS, &flags, sizeof flags - 1));
+    CHECK(GetLastError() == ERROR_INVALID_DATA);
+    CHECK(!SetUserObjectInformationW(sta, UOI_FLAGS, &flags, 0));
+    CHECK(GetLastError() == ERROR_INVALID_DATA);
+    CHECK(!SetUserObjectInformationW(sta, UOI_NAME, name, sizeof name));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(!SetUserObjectInformationW(sta, UOI_IO, &io, sizeof io));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(!SetUserObjectInformationW(sta, UOI_TIMERPROC_EXCEPTION_SUPPRESSION, &io, sizeof io));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(!SetUserObjectInformationW(sta, 99, name, sizeof name));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    /* A handle that is no user object fails (the error it leaves is not
+     * documented, and Windows leaves the last one standing). */
+    CHECK(!SetUserObjectInformationW(NULL, UOI_FLAGS, &flags, sizeof flags));
+    CHECK(!SetUserObjectInformationW((HANDLE)(UINT_PTR)0x1234, UOI_FLAGS, &flags, sizeof flags));
+
+    /* The current process's pseudo handle is the other route: it takes
+     * UOI_TIMERPROC_EXCEPTION_SUPPRESSION only, a BOOL of exactly four
+     * bytes. A real handle to the same process is not that route, and
+     * the setting cannot be read back. */
+    BOOL suppress = FALSE;
+    CHECK(SetUserObjectInformationW(GetCurrentProcess(), UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+                                    &suppress, sizeof suppress));
+    CHECK(!SetUserObjectInformationW(GetCurrentProcess(), UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+                                     &suppress, 1));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(!SetUserObjectInformationW(GetCurrentProcess(), UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+                                     &suppress, sizeof suppress + 4));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(!SetUserObjectInformationW(GetCurrentProcess(), UOI_FLAGS, &flags, sizeof flags));
+    CHECK(GetLastError() == ERROR_INVALID_FUNCTION);
+    CHECK(!GetUserObjectInformationW(GetCurrentProcess(), UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+                                     &suppress, sizeof suppress, &need));
+    CHECK(GetLastError() == ERROR_INVALID_FUNCTION);
+    HANDLE self = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE,
+                              GetCurrentProcessId());
+    CHECK(self != NULL);
+    CHECK(!SetUserObjectInformationW(self, UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+                                     &suppress, sizeof suppress));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(CloseHandle(self));
+    /* TRUE is the default since Windows 2000: the process is left as it
+     * was found. */
+    suppress = TRUE;
+    CHECK(SetUserObjectInformationW(GetCurrentProcess(), UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+                                    &suppress, sizeof suppress));
+    /* SetUserObjectInformationA is the same call: no index it takes
+     * holds text. */
+    CHECK(SetUserObjectInformationA(sta, UOI_FLAGS, &flags, sizeof flags));
+    CHECK(!SetUserObjectInformationA(sta, UOI_FLAGS, &flags, sizeof flags - 1));
+    CHECK(GetLastError() == ERROR_INVALID_DATA);
+    CHECK(SetUserObjectInformationA(GetCurrentProcess(), UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+                                    &suppress, sizeof suppress));
+    CHECK(!SetUserObjectInformationA(GetCurrentProcess(), UOI_FLAGS, &flags, sizeof flags));
+    CHECK(GetLastError() == ERROR_INVALID_FUNCTION);
+    CHECK(!SetUserObjectInformationA(sta, UOI_NAME, name, sizeof name));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+}
+
 int main(void) {
     bitmaps();
     wnet();
@@ -1792,6 +1910,7 @@ int main(void) {
     PSID group = NULL;
     BOOL group_defaulted = FALSE;
     CHECK(GetSecurityDescriptorGroup(&sd, &group, &group_defaulted) && group == world && group_defaulted);
+    winsta();
     printf("user32_test: ok\n");
     return 0;
 }

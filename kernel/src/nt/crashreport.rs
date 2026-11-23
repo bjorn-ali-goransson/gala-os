@@ -6,8 +6,15 @@
 //! every value that points into an image named by module. Before, only "exited with status 0xc0000005" was left (the JVM
 //! had to write its own hs_err file to say more).
 //!
-//! Every user exception keeps a note in its process (fixed size, no
-//! allocation); when the process ends with that exception's code as its
+//! Every user exception keeps a note in the thread that took it
+//! (`Notes`, made the first time a thread takes one: fixed size, one
+//! allocation per such thread, and most threads never take any). The
+//! notes of the thread whose exception ends the process move into the
+//! process itself when it is ended (`promote`), because the report is
+//! written once the last thread has exited and no thread is there to ask
+//! by then; the process's own slots are also where a note goes that no
+//! thread can keep -- the kernel's own context, or a thread with no room
+//! for its notes. When the process ends with that exception's code as its
 //! status (the unhandled exception ended it: from the kernel when there
 //! is no dispatcher, from ntdll's unhandled-exception path otherwise),
 //! `report` prints it as `crash report:` lines. ntdll also reports an
@@ -22,6 +29,21 @@ use core::fmt;
 use super::platform::UserRegs;
 use super::process::Process;
 use super::status::NtStatus;
+
+/// The exceptions one thread took, as the crash report of its process
+/// needs them: the kernel's own account of a fault it took, and the
+/// report ntdll made of an exception no handler took (which comes
+/// whatever status the process ends with). A thread keeps its own, so
+/// two threads' exceptions do not write over one another -- the report
+/// of a process that two threads both faulted in described whichever
+/// fault was reported last, which is not the one that ended it.
+#[derive(Default)]
+pub struct Notes {
+    /// The kernel's own account of the fault it saw.
+    pub fault: Option<Note>,
+    /// ntdll's report of an exception no handler took.
+    pub unhandled: Option<Note>,
+}
 
 /// Stack values kept and shown as they are.
 const STACK_WORDS: usize = 8;
@@ -124,6 +146,12 @@ pub struct Note {
     pub params: [u64; PARAMS],
     pub params_len: usize,
     pub params_count: usize,
+    /// The last user APC this thread was given, with who queued it
+    /// (`thread::delivered_apc`), taken while the thread is still the
+    /// current one: an exception raised in an APC is the queueing
+    /// thread's decision, and by the time the report is written the
+    /// thread is gone.
+    pub apc: Option<super::thread::UserApc>,
 }
 
 /// Exception parameters a report keeps (EXCEPTION_MAXIMUM_PARAMETERS,
@@ -147,12 +175,7 @@ impl Note {
         regs: UserRegs,
         wow64: bool,
     ) -> Note {
-        let tid = super::thread::current()
-            .and_then(|t| match &t.body {
-                super::object::ObjectBody::Thread(t) => Some(t.id),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let tid = current_tid();
         // A word at `base` + `i` words (4 bytes each for 32-bit code).
         let word = |base: u64, i: usize| {
             if wow64 {
@@ -235,6 +258,7 @@ impl Note {
             params: [0; PARAMS],
             params_len: 0,
             params_count: 0,
+            apc: super::thread::delivered_apc(),
         }
     }
 }
@@ -430,6 +454,25 @@ impl DelayLoad {
     }
 }
 
+/// What an exception's parameters describe, for the codes a report
+/// knows: an MSVC C++ throw's thrown type, and a delay load's DLL and
+/// function. Read while the process still runs -- the thrown object, the
+/// runtime's type data and the DelayLoadInfo are all gone once it has
+/// ended -- and taken from the note, which holds the parameters and
+/// whether they are a 32-bit process's. Neither decoding depends on the
+/// architecture, so both ABIs do it here and neither can be the one that
+/// knows less.
+pub fn decode_params(note: &mut Note, read: &dyn Fn(u64, &mut [u8]) -> bool) {
+    let (code, ptr32) = (note.status.0, note.wow64);
+    let (params, len) = (note.params, note.params_len);
+    if code == CXX_EXCEPTION {
+        note.cxx = CxxThrow::decode(&params[..len.min(4)], ptr32, read);
+    }
+    if matches!(code, DELAY_DLL | DELAY_PROC) && len > 0 {
+        note.delay = DelayLoad::decode(params[0], ptr32, read);
+    }
+}
+
 /// Reads the NUL-terminated string at `addr` into `out` (as much as
 /// fits, read in pieces that stay within a page); its length.
 fn read_c_string(addr: u64, out: &mut [u8], read: &dyn Fn(u64, &mut [u8]) -> bool) -> usize {
@@ -603,6 +646,265 @@ impl fmt::Display for At {
     }
 }
 
+/// What a note's exception was about, in the one clause a line with
+/// room for no more can carry: a delay load's DLL and function (or DLL
+/// and ordinal), a C++ throw's thrown type, or the address an access
+/// violation touched, each worded as the crash report's own lines word
+/// it. Nothing at all for a code nothing here decodes, whose parameters
+/// only the report has the room to show. One place says it, so the lines
+/// that have room for a clause cannot drift from the report that has
+/// room for all of it.
+struct About<'a>(&'a Note);
+
+impl fmt::Display for About<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let note = self.0;
+        if let Some(d) = &note.delay {
+            let dll = Lossy(&d.dll[..d.dll_len]);
+            return match &d.name {
+                Some((name, len)) => write!(f, ": {dll}!{}", Lossy(&name[..*len])),
+                None => write!(f, ": {dll} ordinal {}", d.ordinal),
+            };
+        }
+        if let Some(t) = &note.cxx
+            && let Some(thrown) = t.names().next()
+        {
+            return write!(f, ": {}", Undecorated(thrown));
+        }
+        if let Some((addr, kind)) = note.access {
+            let verb = match kind {
+                1 => "writing",
+                8 => "executing",
+                _ => "reading",
+            };
+            return write!(f, ": {verb} address {addr:#x}");
+        }
+        Ok(())
+    }
+}
+
+/// The thread a note is taken on, or 0 when there is none (the
+/// kernel's own context): what says whose exception a note describes,
+/// and so whose filter may withdraw it.
+fn current_tid() -> u64 {
+    super::thread::current()
+        .and_then(|t| match &t.body {
+            super::object::ObjectBody::Thread(t) => Some(t.id),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// ntdll reported an exception no handler took and the kernel could not
+/// read what it reported, so no note is kept and the crash report will
+/// say nothing about it. ntdll goes on either way (its dispatcher does
+/// not look at the status), so without this the exception is lost in the
+/// one place that would have described it: a process that dies of it
+/// then looks like one that died of nothing.
+pub fn unread(process: &Process, record: u64, context: u64, what: &str) {
+    let tid = current_tid();
+    info!(
+        "exception report unread: {} (pid {}) thread {tid}: {what} of ntdll's report (record \
+         {record:#x}, context {context:#x}) could not be read, so no note is kept and no crash \
+         report will describe this exception",
+        process.name, process.id
+    );
+    super::ledger::record(
+        "GalaUnhandledException",
+        "a report whose record or context could not be read",
+        record,
+    );
+}
+
+/// Keeps the kernel's own account of a fault in the thread that took it,
+/// where the crash report of the process is written from if that fault
+/// is what ends it (`promote`).
+pub fn keep_fault(process: &Process, note: Note) {
+    match super::thread::keep_fault(note) {
+        super::thread::Kept::Thread => {}
+        super::thread::Kept::NoThread => *process.last_exception.lock() = Some(note),
+        super::thread::Kept::NoRoom => {
+            *process.last_exception.lock() = Some(note);
+            no_room(process, &note);
+        }
+    }
+}
+
+/// Keeps ntdll's report of an exception no handler took, for the thread
+/// that took it.
+pub fn keep_unhandled(process: &Process, note: Note) {
+    match super::thread::keep_unhandled(note) {
+        super::thread::Kept::Thread => {}
+        super::thread::Kept::NoThread => *process.unhandled_exception.lock() = Some(note),
+        super::thread::Kept::NoRoom => {
+            *process.unhandled_exception.lock() = Some(note);
+            no_room(process, &note);
+        }
+    }
+}
+
+/// A thread that took an exception could not be given its notes, so the
+/// process's own slot holds this one -- one slot for every thread of the
+/// process, where the next exception writes over this one. Said out loud,
+/// because a crash report describing an exception that ended nothing
+/// would otherwise have nothing to explain it.
+fn no_room(process: &Process, note: &Note) {
+    warn!(
+        "exception note: {} (pid {}) thread {}: there was no room for the thread's notes, so its \
+         {:#010x} ({}{}) is kept in the process's one slot, where another thread's exception \
+         writes over it",
+        process.name,
+        process.id,
+        note.tid,
+        note.status.0,
+        exception_name(note.status),
+        About(note)
+    );
+}
+
+/// Moves the notes of `deciding` -- the thread whose exception ends
+/// `process` with `status` -- into the process. This is the last moment
+/// they can be had from their thread: the report is written once the
+/// last thread has exited (`process::finish`), with no thread left to
+/// ask. Another thread's note stays with that thread and no report is
+/// written from it, so this says what those notes were, an exception
+/// that happened and is named nowhere in a run being the very gap these
+/// lines exist to close.
+pub fn promote(process: &Process, deciding: &super::object::ObjectRef, status: NtStatus) {
+    if let Some((fault, unhandled)) = super::thread::take_notes(deciding) {
+        if let Some(fault) = fault {
+            *process.last_exception.lock() = Some(fault);
+        }
+        if let Some(unhandled) = unhandled {
+            *process.unhandled_exception.lock() = Some(unhandled);
+        }
+    }
+    let whose = super::thread::id_of(deciding);
+    process.for_each_thread(|t| {
+        if let Some(left) = super::thread::unhandled_left(t) {
+            // What it was about and where it happened, as the report
+            // would have said them: a note no report is written from is
+            // the whole of what a run keeps of that exception. `At::of`
+            // reads the process's views under the thread list held here,
+            // an order nothing takes the other way round.
+            let (tid, code) = (left.tid, left.status);
+            info!(
+                "exception note: {} (pid {}) thread {tid} took an unhandled {:#010x} ({}{}) at {} \
+                 too, and the crash report is not written from it: the process ends with \
+                 {:#010x} ({}), which thread {whose} took",
+                process.name,
+                process.id,
+                code.0,
+                exception_name(code),
+                About(&left),
+                At::of(process, left.regs.ip()),
+                status.0,
+                exception_name(status)
+            );
+        }
+    });
+}
+
+/// What a filter's withdrawal may do to a note in the process's own
+/// slot. A thread withdraws its own note from its own notes; only a
+/// thread with no room for them reports into the process, where one
+/// slot serves every thread -- so a withdrawal there can meet a note
+/// that is not the withdrawing thread's: another thread's unhandled
+/// exception, on its way to ending the process. That one stays.
+#[derive(Debug, PartialEq, Eq)]
+enum Withdrawal {
+    /// The note is the withdrawing thread's: it goes, and the exception
+    /// it describes is what the line is written from.
+    Takes,
+    /// The note is another thread's (which thread), and is left for the
+    /// crash report.
+    Leaves(u64),
+    /// No note was kept at all.
+    Nothing,
+}
+
+/// Whether a withdrawal by thread `tid` takes the note the process
+/// keeps, `kept` being the thread that note describes.
+fn withdrawal(kept: Option<u64>, tid: u64) -> Withdrawal {
+    match kept {
+        Some(whose) if whose == tid => Withdrawal::Takes,
+        Some(whose) => Withdrawal::Leaves(whose),
+        None => Withdrawal::Nothing,
+    }
+}
+
+/// ntdll withdraws the note it reported: the top-level filter returned
+/// EXCEPTION_CONTINUE_EXECUTION, so the process carries on and no crash
+/// report will ever name this exception. Nothing else in the run would
+/// either -- the ledger row ntdll writes is on its death path -- so a
+/// program that carries on past an exception nobody handled leaves
+/// nothing behind at all, which is what Office's shared code does. This
+/// is the one moment it can be said out loud, so it is said here.
+///
+/// The note withdrawn is the calling thread's own, which is where a
+/// thread's report is kept. Only a thread with no room for its notes
+/// reports into the process's one slot, and a withdrawal there can meet
+/// a note that is another thread's -- an unhandled exception still on
+/// its way to ending the process, which this thread's filter has no say
+/// over: it stays, for the crash report.
+pub fn continued(process: &Process) {
+    let tid = current_tid();
+    // The slot is read and emptied under its lock, so that the decision
+    // cannot straddle another thread's report; the lines are written
+    // after it, holding nothing.
+    let (mine, other) = match super::thread::take_unhandled() {
+        Some(note) => (Some(note), None),
+        None => {
+            let mut slot = process.unhandled_exception.lock();
+            match withdrawal(slot.map(|note| note.tid), tid) {
+                Withdrawal::Takes => (slot.take(), None),
+                Withdrawal::Leaves(whose) => (None, Some(whose)),
+                Withdrawal::Nothing => (None, None),
+            }
+        }
+    };
+    if let Some(note) = mine {
+        let (code, name) = (note.status.0, exception_name(note.status));
+        let at = At(note.regs.ip(), module_at(process, note.regs.ip()));
+        info!(
+            "exception continued: {} (pid {}) thread {tid}: its top-level filter continued past \
+             an unhandled {code:#010x} ({name}{}) at {at}",
+            process.name,
+            process.id,
+            About(&note)
+        );
+        // The ledger's own row, so a long run's gaps carry it too: a
+        // program swallowing exceptions is a gap whatever it then does.
+        super::ledger::record(
+            "GalaUnhandledException",
+            "an exception the top-level filter continued past",
+            u64::from(code) << 32 | (note.regs.ip() & 0xffff_ffff),
+        );
+    } else {
+        // Two ways to have no note of one's own: another thread's is in
+        // the slot (the process is ending of that one, and it stays), or
+        // the report never reached the kernel.
+        match other {
+            Some(whose) => info!(
+                "exception continued: {} (pid {}) thread {tid}: its top-level filter continued \
+                 past an unhandled exception, whose code is not known here: the note kept is \
+                 thread {whose}'s, left for the crash report",
+                process.name, process.id
+            ),
+            None => info!(
+                "exception continued: {} (pid {}) thread {tid}: its top-level filter continued \
+                 past an unhandled exception, of which no note was kept",
+                process.name, process.id
+            ),
+        }
+        super::ledger::record(
+            "GalaUnhandledException",
+            "an exception the top-level filter continued past, with no note of it kept",
+            0,
+        );
+    }
+}
+
 /// Prints the crash report of `process`, which ended with `status` by
 /// `note`'s exception (or after it, when a top-level filter ended it with
 /// another status).
@@ -695,7 +997,10 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
     if note.params_len > 0 && note.access.is_none() && note.delay.is_none() && note.cxx.is_none() {
         let shown = Params(process, &note.params[..note.params_len]);
         if note.params_count > note.params_len {
-            info!("crash report:   {} parameters, the first {PARAMS}: {shown}", note.params_count);
+            info!(
+                "crash report:   {} parameters, the first {}: {shown}",
+                note.params_count, note.params_len
+            );
         } else {
             info!(
                 "crash report:   {} parameter{}: {shown}",
@@ -779,8 +1084,66 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             Calls(&calls[..kept])
         );
     }
+    // An APC is how one thread makes another run code, so an exception
+    // raised inside one is the queueing thread's decision, and that
+    // thread's calls are what explain it: Office's shared code ends a
+    // thread this way, and the victim's own stack and last calls then
+    // describe its wait (ROADMAP OF). The routine says which APC it was,
+    // to be read against the frames above.
+    if let Some(apc) = note.apc {
+        // Resolved before the lines: `module_at` takes the views' lock
+        // and the lines the console's (the order at the top of `report`).
+        // An APC to another process is refused, so the queuer's address
+        // is placed by this process's images.
+        let routine = At::of(process, apc.routine);
+        let from = match apc.by {
+            super::thread::ApcBy::Thread { from, .. } if from != 0 => Some(At::of(process, from)),
+            _ => None,
+        };
+        info!(
+            "crash report:   it was last given a user APC: routine {routine}{}",
+            Queuer(apc.by, from)
+        );
+        if let super::thread::ApcBy::Thread { by: (_, tid), .. } = apc.by
+            && tid != 0
+            && tid != note.tid
+        {
+            let kept = crate::flight::thread_calls(tid, &mut calls);
+            if kept > 0 {
+                info!(
+                    "crash report:   thread {tid}'s last calls, oldest first: {}",
+                    Calls(&calls[..kept])
+                );
+            }
+        }
+    }
     super::abi::report_registers(note, &stack);
     report_memory(process, note);
+}
+
+/// Who queued a user APC, as the report says it: the thread and where it
+/// called from (with the image it is in, resolved before the line), the
+/// kernel's own code, or that the record does not say.
+struct Queuer(super::thread::ApcBy, Option<At>);
+
+impl fmt::Display for Queuer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use super::thread::ApcBy;
+        match self.0 {
+            ApcBy::Unset => write!(f, ", with no record of who queued it"),
+            ApcBy::Carried => write!(f, ", queued before a handover (the queuer is not carried)"),
+            ApcBy::Thread { by: (0, 0), at, .. } => write!(f, ", queued by the kernel at {at} ms"),
+            ApcBy::Thread { by, from, at } => {
+                write!(f, ", queued by pid {} tid {}", by.0, by.1)?;
+                match (&self.1, from) {
+                    (Some(place), _) => write!(f, ", called from {place}")?,
+                    (None, 0) => (),
+                    (None, from) => write!(f, ", called from {from:#x}")?,
+                }
+                write!(f, " at {at} ms")
+            }
+        }
+    }
 }
 
 /// A thread's last system calls, oldest first: each by name with the
@@ -905,6 +1268,24 @@ impl fmt::Display for Lossy<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A filter that continues execution withdraws the note of its own
+    /// exception and of no other thread's: what is left in the one slot
+    /// a process has is an exception still on its way to ending it, and
+    /// for a raise in user mode nothing else in the kernel describes it,
+    /// so a withdrawal that took it would lose the whole crash report
+    /// (scenario `crash_continued_other`).
+    #[test]
+    fn a_withdrawal_takes_only_its_own_threads_note() {
+        assert_eq!(withdrawal(Some(8), 8), Withdrawal::Takes);
+        assert_eq!(withdrawal(Some(12), 8), Withdrawal::Leaves(12));
+        assert_eq!(withdrawal(None, 8), Withdrawal::Nothing);
+        // 0 is "no thread of this process": the kernel's own context,
+        // which owns its note as a thread owns its own and no more.
+        assert_eq!(withdrawal(Some(0), 0), Withdrawal::Takes);
+        assert_eq!(withdrawal(Some(8), 0), Withdrawal::Leaves(8));
+        assert_eq!(withdrawal(Some(0), 8), Withdrawal::Leaves(0));
+    }
 
     #[test]
     fn exception_codes_have_names() {

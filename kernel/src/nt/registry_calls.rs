@@ -975,10 +975,9 @@ fn notify_change(
     let me = thread::current();
     let apc = match (a.apc, &me) {
         (0, _) | (_, None) => None,
-        (routine, Some(t)) => Some((
-            t.clone(),
-            thread::UserApc { routine, args: [a.apc_context, a.iosb, 0], special: false },
-        )),
+        (routine, Some(t)) => {
+            Some((t.clone(), thread::UserApc::new(routine, [a.apc_context, a.iosb, 0], false)))
+        }
     };
     let done = if a.asynchronous {
         None

@@ -654,10 +654,24 @@ impl<X: Default> State<X> {
             #[cfg(not(test))]
             {
                 let (text, n) = ascii_title(&win.title);
+                let (prog, pn) = ascii_title(&win.program);
+                // The program and the place as well as the title: a
+                // screendump of this moment is read against them, and
+                // a splash screen has no title to be read against.
                 crate::info!(
-                    "desktop: shown window '{}'",
-                    core::str::from_utf8(&text[..n]).unwrap_or("?")
+                    "desktop: shown window '{}' by {} (pid {}) at {},{} {}x{}",
+                    core::str::from_utf8(&text[..n]).unwrap_or("?"),
+                    core::str::from_utf8(&prog[..pn]).unwrap_or("?"),
+                    win.owner,
+                    win.x,
+                    win.y,
+                    win.w,
+                    win.h
                 );
+                // What a hook armed for this event asks for, which for
+                // `shot` is a screendump of the desktop as it is now
+                // (nt::hooks). Nothing happens when none is armed.
+                crate::nt::hooks::window_shown(id, win.owner, &win.program, &win.title);
             }
             let popup = self.window(id).is_some_and(|w| w.popup);
             self.raise(id);

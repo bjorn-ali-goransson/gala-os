@@ -322,6 +322,12 @@ its debugger, because Windows Error Reporting's event 1000 is never
 written for these -- the runner sets `SEM_NOGPFAULTERRORBOX`, and a
 process with that error mode does not report its fault to WER at all.
 Map the offset to a function with the build's PDB of that module. A
+test program's exit 0xc0000409 with no `fault` is usually a Rust panic
+in the program itself (an index out of range, an `unwrap` on `None`):
+ntrt's handler prints `<program>: panic at <file>:<line>:<col>:
+<message>` just before, so the line is in that program's output
+(windows-output.txt in CI's windows-report artifact; scenario
+`crash_panic` keeps it). A
 program whose non-zero exit is the result rather than a failure (`crash`,
 `go_exit`, `busybox`, and gala's own `cmd`, `conhost`, `gala` and `wsl`, which
 real Windows cannot load) carries an `expected` field beside `exit`. `cargo xtask
@@ -534,7 +540,12 @@ xtask that change how a scenario boots:
   the kernel, pagefile_fail 298 s, pagefile_test 282 s. Raising
   `XTASK_TIMEOUT` is how to tell a slow scenario from a stuck one
   before believing either -- a timeout alone does not say which, and a
-  scenario that is only slow says nothing about the code.
+  scenario that is only slow says nothing about the code. A scenario
+  whose length is a count times what the host charges for each unit
+  (`import_cost`: its events times what a KVM exit costs) is sized for
+  the slowest host that runs it, CI's runners, not the laptop it was
+  measured on: a passing run's `in kernel` seconds in CI's log within
+  a factor of two of the limit is a timeout waiting to happen.
 - **A scenario that runs many processes** (a database, a runtime) can
   pass alone and time out under the full suite (2-3x slower); its client
   then reports a dropped connection, not a timeout. Look for "timed out
@@ -590,6 +601,12 @@ passed over -- 0 and the rest means the module was not on any of those
 stacks, so try the next one. Reach for this before
 adding records by hand to a DLL -- it costs a run, needs nothing of the
 program, and works for Microsoft's DLLs too.
+
+A thread that is *stopped* rather than waiting needs no run of its own:
+it has no wait, no handle and no queue, and a suspension is the only way
+it got there, so the dump's own lines name who suspended it and where
+that thread called from (OBSERVABILITY "Suspensions"). Read those first
+and arm a capture only for the frames above the caller.
 
 ### When the call that matters is a repeat
 
@@ -1280,7 +1297,7 @@ it with `qemu-system-aarch64 -machine virt` (`qemu_aarch64`): the pinned
 QEMU's own `edk2-aarch64-code.fd` (or Ubuntu's AAVMF, `qemu-efi-aarch64`,
 or `AAVMF_CODE`/`AAVMF_VARS`), the image on a virtio-scsi CD, semihosting
 on for the kernel's exit. Software emulation only (KVM would need an
-ARM64 host); about 8 s to the kernel, most of it the firmware.
+ARM64 host); about 4 s to the kernel, most of it the firmware.
 
 - The serial log and verdicts are as x86-64's. There is no event stream
   and no firmware or phase log (no ISA debug consoles on `virt`).
@@ -1292,6 +1309,18 @@ ARM64 host); about 8 s to the kernel, most of it the firmware.
   PATH. Binutils' x86-64 build cannot read an aarch64 ELF.
 - While a phase is unported, its scenario ends the boot just before it
   (`stop_after=<phase>`); porting the next phase moves that on.
+- The firmware connects only the CD: the `scsi-cd` device carries
+  `bootindex=0` (`add_aarch64_cd`), and with a boot order in fw_cfg
+  ArmVirtQemu's boot manager connects just the devices it names. Without
+  one it connects every device, and its own network stack drives a
+  scenario's virtio-net card before the kernel (DHCP, IPv6 duplicate
+  address checks, router solicitations), where a send once crashed the
+  firmware's VirtioNetDxe (data abort at address 8, the serial log ends
+  in its `Synchronous Exception` dump, no boot phases). To see what the
+  firmware sends on the card, boot the firmware alone with
+  `-netdev user,id=n0 -device virtio-net-pci,netdev=n0 -object
+  filter-dump,id=f0,netdev=n0,file=fw.pcap`: with the boot order the
+  capture holds no packet (24 bytes, the header).
 
 ### QEMU
 
@@ -1397,7 +1426,12 @@ Run a program directly:
   host has), whose timeout(1) kills the program at the deadline instead
   of sending the chosen signal first and waiting, which left every hung
   run without the dump it is read from. A host tool's flavour must not
-  decide whether a hang explains itself.
+  decide whether a hang explains itself -- nor how the gate was
+  launched: a shell that starts a job in the background ignores SIGQUIT
+  (`grep SigIgn /proc/self/status` says so), a program cannot trap a
+  signal that was ignored when it started, and so every run under
+  `cargo xtask test &` inherited an unanswerable dump request until
+  `plain_dump_signal` gave each run the plain disposition.
 - A failure that reproduces in gala-um is in the NT layer or the
   user-mode DLLs; one that does not points at the kernel's machine code
   (paging, switches, interrupts) or at the emulator.
@@ -1674,8 +1708,8 @@ where the site learns it.
 
 - `cd web && npm install` once, then `npm run dev` for the dev server,
   `npm run build` to build (client bundle, server bundle, then
-  `prerender.mjs` renders the page into `dist/index.html` and deletes the
-  server bundle), `npm run preview` to serve `dist/`, `npm run typecheck`
+  `prerender.mjs` renders the page into `dist/index.html` and
+  `dist/ar/index.html` and deletes the server bundle), `npm run preview` to serve `dist/`, `npm run typecheck`
   for `tsc --noEmit`.
 - `web/public/` is copied verbatim into `dist/`. Two files there matter to
   Pages: `CNAME` (the custom domain; without it Pages serves the site at
@@ -1683,11 +1717,26 @@ where the site learns it.
   otherwise runs the output through Jekyll, which drops files beginning
   with an underscore). The Website workflow asserts both survive a build.
 - Screenshots live in `web/public/shots/` and are listed in `content.ts` (`shots`).
-- `prerender.mjs` writes three files, not one: `index.html` (the markup),
-  `sitemap.xml` (one URL, `lastmod` taken from the build date rather than
+- **Two languages.** The page is English at `/` and Arabic at `/ar/`
+  (`dir="rtl"`), each linking to the other and carrying `hreflang`
+  alternates. English is the source: every text is written in English in
+  `content.ts`, `App.tsx`, `Diagrams.tsx` and `head.ts`, and the Arabic
+  page looks each one up in `web/src/ar.ts`, a dictionary keyed by the
+  English text (`src/i18n.tsx`: `t()` for a text, `localize()` for the
+  prose fields of `content.ts`, `<Both en ar>` for rich JSX). **Changing
+  an English text fails the build** until `ar.ts` has the new text:
+  `prerender.mjs` lists every English text the Arabic page looked up and
+  did not find. Names of programs, APIs and code stay in Latin script
+  inside the Arabic. Layout is right to left through logical CSS
+  properties (`margin-inline`, `inset-inline-start`); a new rule that
+  uses `left`/`right` breaks the Arabic page, and code (`pre`, `code`)
+  stays left to right in both.
+- `prerender.mjs` writes four files, not one: `index.html` and
+  `ar/index.html` (the markup), `sitemap.xml` (one URL per language, each
+  naming the other, `lastmod` taken from the build date rather than
   written by hand, where it would be wrong the moment the page changed)
   and `llms.txt` (a plain-text brief of the whole site, generated from
-  `content.ts` by `src/llms.ts`). None of the three is a second copy of
+  `content.ts` by `src/llms.ts`, in English). None of them is a second copy of
   the facts: all come from `content.ts`.
 - Page counts come from Ali Web Services: a `defer` script in
   `web/index.html` carrying the site's public id (THIRD_PARTY "The
@@ -1701,7 +1750,7 @@ where the site learns it.
   publishes it to GitHub Pages (`actions/deploy-pages`; the repository's
   Pages source is "GitHub Actions"). The build asserts what a silent
   regression would cost: the domain files, real markup rather than an
-  empty shell, the crawler files agreeing with each other, and the
+  empty shell, the Arabic page present and right to left, the crawler files agreeing with each other, and the
   analytics script still carrying its site id.
 
 ### Being found
@@ -2018,7 +2067,19 @@ kernel32 through `raw-dylib`), run under gala and under Windows
    scenarios need not list it. `exports.txt` is regenerated with
    `python3 -I tools/kernelbase_exports.py <dir of Wine's .spec files>
    <commit>` (record the commit in THIRD_PARTY.md).
-7. kernel32's Unicode normalization tables (FoldStringW) are generated,
+7. A function written in assembly (`global_asm!`, not a `#[no_mangle]`
+   Rust item) is exported only by being listed in
+   `user/testntdll/build.rs` -- one `/EXPORT:<name>` per architecture.
+   Moving an existing function into assembly and forgetting the list
+   leaves it in the DLL with no export: the kernel resolves these by
+   name, finds nothing and stops using it with no error anywhere
+   (KiUserApcDispatcher: APC delivery would have stopped altogether).
+   Check with `llvm-readobj --coff-exports target/.../testntdll.dll`.
+   The same goes the other way: a function the kernel resumes a thread
+   at needs unwind data, which a `naked` Rust function never gets, so it
+   belongs in assembly in `seh.rs` / `seh_arm64.rs` with its directives
+   (`llvm-readobj --unwind` shows whether it has a `.pdata` entry).
+8. kernel32's Unicode normalization tables (FoldStringW) are generated,
    not edited: `python3 -I tools/nls_tables.py >
    user/kernel32/src/nls/tables.rs`. The Unicode version is that of the
    host's Python (written into the file's header); a new one goes into
@@ -2244,8 +2305,12 @@ numbers, 0x7f.., fail there).
   `-D__USE_MINGW_ANSI_STDIO=0` for msvcrt's stdio); its scenario ships
   `x86/msvcrt.dll` to SysWOW64 too. mingw's i686 headers define
   `_USE_32BIT_TIME_T` (time_t is 32 bits and `time()` imports msvcrt's
-  `time`), make `setjmp` `_setjmp3(buf, NULL)`, reach stdin/stdout
-  through the `_iob` data import, and link mingw's own `_fpreset`
+  `time`), make `setjmp` `_setjmp3(buf, NULL)`, reach stdin/stdout,
+  MB_CUR_MAX and the environment through msvcrt's accessor functions
+  (`__p__iob`, `__p___mb_cur_max`, `__p___initenv`, beside `__p__fmode`
+  and `__p__commode`) where its x64 headers take the data exports
+  (`_iob` is still exported for a program built against an older
+  runtime), and link mingw's own `_fpreset`
   (fninit: the x87 at 64-bit precision, `_controlfp(0, 0)` 0x8001f, not
   msvcrt's 0x9001f): a test of msvcrt's `_fpreset` calls it through
   GetProcAddress.
@@ -2464,6 +2529,16 @@ for the framebuffer.
   an app's run cannot spoil an install that takes an hour; without that
   image the run says so and stops. `XTASK_REUSE_DISK=1` boots the copy
   the last run kept instead of making another (what to iterate with).
+- **Word's own crash state outlives a run** (`XTASK_REUSE_DISK=1`).
+  Word records that it did not finish, so the run after one that
+  crashed is not the run before it: Word opens with "Word couldn't
+  start last time ... Do you want to start in safe mode?" (the ledger
+  names the box, `user32.dll!MessageBoxW(Word couldn't start last
+  time...)`, detail 36 = MB_YESNO | MB_ICONQUESTION), and gala gives
+  it no answer. A reused disk is for iterating; a measurement to
+  compare with an earlier one is taken on a fresh copy (no
+  `XTASK_REUSE_DISK`), or its safe-mode box is read as the previous
+  run's leftover and not as the change under test.
 - The copy is about 8 GB on the host, on top of the install's own. With
   the install's image in `/dev/shm` ("Office's fast path"), link the
   copy there too.
@@ -4076,6 +4151,17 @@ named after the line (`office_word-desktop-shown-window-1s.png`):
 
     XTASK_SHOTS='desktop: shown window+1' cargo xtask boot-test office_word
 
+The moments nobody can name in advance are the kernel's to ask for:
+`hook=window=shot` on the kernel command line takes a screendump as each
+top-level window becomes visible, `+<secs>` after it if asked, and
+`hook=window/<text>:<n>=shot` only of the windows whose program or title
+holds the text, `n` at most. The files are named after the program and
+the window (`hook_test-hook-hook-test-exe-w4.png`), so a run with no idea
+when its windows go up still comes back with a picture of each
+(OBSERVABILITY "Hooks"; scenarios `hook_test`, `hook_match_test`):
+
+    cargo xtask boot-test office_word   # with hook=window=shot+1 in its cmdline
+
 A second guessed from the outside is missed as often as it is caught --
 Word's splash lives about 2 s of a 90 s run, and the run is as fast as
 the host is free that minute -- while the log knows when the window is
@@ -5175,6 +5261,12 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   minutes, 92% of samples there); one frame goes through `allocate`'s
   word search from a hint. Profile (`XTASK_EVENTS=sample`, `cargo xtask
   profile`) before guessing at a slow file workload.
+- **xtask feeding a child through pipes writes from a thread**: a tool
+  that answers as it reads (`llvm-symbolizer` in `cargo xtask profile`)
+  fills its stdout pipe while xtask is still writing its stdin, and both
+  block for good if xtask writes everything before it reads (a long
+  run's kernel addresses did). Write stdin on a thread of its own and
+  read the output meanwhile (`wait_with_output`).
 - **The seams**: core code (`net/`, and anything a second personality
   shares) reaches threads, waits and time through `crate::runtime`, not
   `crate::nt::platform` (the NT layer's seam) and not
@@ -5209,6 +5301,10 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   makes lockdep panic (debug kernels). The console's lock must stay the
   last one taken: take what the line needs first (`quota::peaks()`),
   and do not log while holding a lock that a line's formatting takes.
+  A description that needs locks is rendered into a buffer first and
+  the buffer is logged (`unix::described`, used by the state dump:
+  a `Display` that read a socket's state under the port made the
+  dump of a Wayland client's connection panic).
 - **Host unit tests have no console**: code that logs (`info!`, `warn!`)
   writes to the serial port and crashes a host test (SIGSEGV); keep the
   logging out of the tested path or under `cfg!(not(test))`.

@@ -255,7 +255,7 @@ has a section under "Open items".
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on a solid-colour brush over that target, every call of the path S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); the display is answered as far as Word and DXVK ask for it (EnumDisplayDevicesW's monitor level, a Plug and Play device tree setupapi reads out of the registry, and the panel's EDID the kernel writes into the monitor's device key at boot, which is what DXVK's `getMonitorEdid` wanted: `display_test`); the system metrics a program lays its windows out from are measured on Windows and answered, 73 indices having answered a silent 0 before, sixteen of them among the 34 Word reads (SM_MOUSEPRESENT, both scroll bars, all four frames, the double-click slop, the menu buttons and the window edge), and every index a program asks for leaving a reached row now (`metrics_test`); the device caps a program lays text out from are measured on Windows and answered, sixteen indices having answered a silent 0 before (TEXTCAPS, the curve, line and polygon caps and the pixel's aspect among them), one of them among the ten Word reads (RASTERCAPS, 10889 where Windows answers 32409), and every index a program asks for leaving a reached row now (`caps_test`); the settings a program asks the desktop for are measured on Windows and answered, nine of the answers having been values no Windows gives (every animation and fade off, UI effects off and client-area animation off, where a Windows desktop answers TRUE for all nine), two of them the first two settings Word reads, the non-client metrics now read from the system metrics so two copies of a desktop's sizes cannot drift (a caption button was 32 wide against the metric's 46), and every action a program is answered leaving a reached row now (`spi_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 32.3 s and no document drawn, the decision its own, in wwlib, by a stack capture over MessageBoxW (`office_word`); the hardware graphics path is ruled out from Office's own side, with `DisableHardwareAcceleration` seeded Word raising the same box with the same (13), and the silent seconds before it are Word walking its own address space and not a wait; the multisample answer Word reads 197 ms before the box is measured against Windows and is wrong without being the cause -- gala's renderer offers no quality level for 2 samples on B8G8R8A8_UNORM where Windows offers one, which the ledger records now, and answering it as offered leaves the box unchanged (`d3d10_1_test`); every file Word opens is read and none it needs is missing (`events=file`: 482 opens, 225 refusals Windows refuses too, the eight before the box the message box's own side-by-side probe), and so is Word's own 401-byte exit record (`events_data=512`), which is a session record with no reason in it, filed under GracefulExit rather than CrashPersistence; gdi32 answers the two adapter calls DXVK and the Vulkan loader ask for as a machine with no adapter does, measured on Windows with a GPU and without (`D3DKMTEnumAdapters2` succeeds and writes none, `D3DKMTQueryAdapterInfo` refuses every handle offered it: `d3dkmt_test`), DXVK associating the monitor with the adapter by its own fallback either way; cfgmgr32 answers the configuration manager's device lists out of the registry's device tree instead of claiming there is none -- the class, enumerator and service filters, the devnodes their ids name, their properties and the errors for each edge, all measured on Windows (`cfgmgr32_test`) -- and every list a program asks for leaves a row naming the class it wanted with the number of devices it was given, which on its first run found a divergence and a stack capture then named its owner: the display class is asked for sixteen times and each answer is followed by CM_Get_Child on the adapter's devnode, sixteen refusals, and with `stack_at=NtOpenKey stack_from=cfgmgr32` every capture is DXVK's `dxgi.dll` (gala's own dxgi never calls cfgmgr32), so those refusals are what DXVK's three "monitors not associated with any adapter, using fallback" warnings are -- it wants the monitor as the adapter's child, the one thing `Enum` cannot hold (Windows keeps it in its PnP manager, not the registry), which makes a kernel-kept device tree an item-USB-step-5 piece and not a cause of the box, DXVK coping by its fallback; Word's own telemetry is measured rather than hoped for: a startup registers 20 ETW providers and writes not one event, because TraceLogging builds no payload for a provider no session enabled, so the registrations and the name each provider's traits give it are what the ledger carries now and reading the events themselves needs gala to be the session, and the provider side they go through answers as Windows does, measured function by function including the orders it validates in and the traits a provider may set once (`advapi32_test`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on a solid-colour brush over that target, every call of the path S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); the display is answered as far as Word and DXVK ask for it (EnumDisplayDevicesW's monitor level, a Plug and Play device tree setupapi reads out of the registry, and the panel's EDID the kernel writes into the monitor's device key at boot, which is what DXVK's `getMonitorEdid` wanted: `display_test`); the system metrics a program lays its windows out from are measured on Windows and answered, 73 indices having answered a silent 0 before, sixteen of them among the 34 Word reads (SM_MOUSEPRESENT, both scroll bars, all four frames, the double-click slop, the menu buttons and the window edge), and every index a program asks for leaving a reached row now (`metrics_test`); the device caps a program lays text out from are measured on Windows and answered, sixteen indices having answered a silent 0 before (TEXTCAPS, the curve, line and polygon caps and the pixel's aspect among them), one of them among the ten Word reads (RASTERCAPS, 10889 where Windows answers 32409), and every index a program asks for leaving a reached row now (`caps_test`); the settings a program asks the desktop for are measured on Windows and answered, nine of the answers having been values no Windows gives (every animation and fade off, UI effects off and client-area animation off, where a Windows desktop answers TRUE for all nine), two of them the first two settings Word reads, the non-client metrics now read from the system metrics so two copies of a desktop's sizes cannot drift (a caption button was 32 wide against the metric's 46), and every action a program is answered leaving a reached row now (`spi_test`); Word's window classes are answered: its startup registers more than the 32 a fixed table held, which is measured now because each doubling leaves a row (the table grows to 64), and with a table that grows to the atom space instead `IfrRegisterWndClasses` is passed -- no `ErrorEid`, no `SHIP ASSERT`, no `BootRun {"SH_ErrorId": 13, "BootTask": "IfrRegisterWndClasses"}` and no "Word was unable to start. (13)" box, where that startup ran 36.6 s against 32.3 s before and wrote 393 events from 10 providers against 353 from 8, measured on a fresh disk (`wndclass_test`, `office_word`); the exception that ended Word next is taken by Office's own handler now: `Mso30win32client.dll` raised 0xe0000002 through kernel32's RaiseException **inside a user APC**, and gala's dispatch asked 0 handlers because the walk stopped at gala's own `KiUserApcDispatcher` -- a `naked` Rust function, which has no prologue for the compiler to describe and so no `.pdata` entry, the only entry point of ntdll's that lacked one -- so an exception Office raises for a handler below the alertable wait ended the process instead; the dispatcher is assembly with its unwind directives by hand now (x64 `.seh_pushframe` over a machine frame the kernel writes into the APC frame at 0x500, ARM64 `.seh_context`), the frame a walk out of an APC continues through (`apc_test`, `arm_apc_test`, which reproduce Word's crash shape -- 3 frames, the third with no unwind data, 0 handlers asked -- in 280 ms without it); Word runs past it and puts **its own splash window on the screen**, the Office splash with "Word" and "Starting...", Word's icon in the taskbar (`target/screenshots/office_word-desktop-shown-window-1s.png`), 7 windows of its own with `MsoSplash` among them, no exception anywhere in the run; what it does not do is finish: the run ends at about 31 s in Office's own cross-thread fail-fast (below), with no window titled `Document1 - Word`; one refusal behind that fail-fast is still open -- Word asks for the WinRT identity factory `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator` and RoGetActivationFactory refuses it with REGDB_E_CLASSNOTREG, the loader then looking for `windows.security.authentication*.dll`, which are not there, and a build whose threads stayed on the splash to the 900 s limit recorded nothing else after 41 s; nothing mysterious stops Word's main thread either: every raise and drop of a suspend count keeps a mark naming who asked, and tid 16's only suspension is the pair every CreateThread makes -- created suspended by consolerun's CreateProcess, resumed at once (`suspend_test`); a reused disk also makes Word ask "start in safe mode?" after a run that crashed, which the ledger records and Word is given no answer to (WORKFLOW "Word's own crash state"); the hardware graphics path is ruled out from Office's own side, with `DisableHardwareAcceleration` seeded Word raising the same box with the same (13), and the silent seconds before it are Word walking its own address space and not a wait; the multisample answer Word reads 197 ms before the box is measured against Windows and is wrong without being the cause -- gala's renderer offers no quality level for 2 samples on B8G8R8A8_UNORM where Windows offers one, which the ledger records now, and answering it as offered leaves the box unchanged (`d3d10_1_test`); every file Word opens is read and none it needs is missing (`events=file`: 482 opens, 225 refusals Windows refuses too, the eight before the box the message box's own side-by-side probe), and so is Word's own 401-byte exit record (`events_data=512`), which is a session record with no reason in it, filed under GracefulExit rather than CrashPersistence; gdi32 answers the two adapter calls DXVK and the Vulkan loader ask for as a machine with no adapter does, measured on Windows with a GPU and without (`D3DKMTEnumAdapters2` succeeds and writes none, `D3DKMTQueryAdapterInfo` refuses every handle offered it: `d3dkmt_test`), DXVK associating the monitor with the adapter by its own fallback either way; cfgmgr32 answers the configuration manager's device lists out of the registry's device tree instead of claiming there is none -- the class, enumerator and service filters, the devnodes their ids name, their properties and the errors for each edge, all measured on Windows (`cfgmgr32_test`) -- and every list a program asks for leaves a row naming the class it wanted with the number of devices it was given, which on its first run found a divergence and a stack capture then named its owner: the display class is asked for sixteen times and each answer is followed by CM_Get_Child on the adapter's devnode, sixteen refusals, and with `stack_at=NtOpenKey stack_from=cfgmgr32` every capture is DXVK's `dxgi.dll` (gala's own dxgi never calls cfgmgr32), so those refusals are what DXVK's three "monitors not associated with any adapter, using fallback" warnings are -- it wants the monitor as the adapter's child, the one thing `Enum` cannot hold (Windows keeps it in its PnP manager, not the registry), which makes a kernel-kept device tree an item-USB-step-5 piece and not a cause of the box, DXVK coping by its fallback; Word's own telemetry names the failure in Word's own words: with gala as the session (`etw=*:255:0:4096 etw_from=WINWORD`, OT4) the startup writes 353 events from 8 providers, every one of them a manifest provider's, whose field names are in no part of the event -- so each line carries the text its bytes held (`kernel/src/nt/etw/strings.rs`), and that text is `ErrorEid {"SH_ErrorId": 66, "SH_ErrorCode": 13}`, then `SHIP ASSERT FAILED! {"wzTag": "qsqk"}`, then the box, then `BootRun {"SH_ErrorId": 13, "BootTask": "IfrRegisterWndClasses"}`: the (13) is Word's own SH_ErrorId and the boot task it died in is Word registering its window classes, which is answered now (above) and was no part of the graphics path the measurements above ruled out one at a time, and the provider side the events go through answers as Windows does, measured function by function including the orders it validates in and the traits a provider may set once (`advapi32_test`); the 0xe0000002 that ends the run is Office's own cross-thread fail-fast -- a worker thread suspends the victim from `Mso30win32client.dll+0x8e4a70` and queues a user APC whose routine, `Mso30win32client.dll+0x8e4ac0`, raises it in the victim's context -- which a crash report of the victim alone cannot explain, so every report now names the user APC a thread was last given, who queued it and that thread's last calls (`crash_apc`), the thread that decides is Office's own code in `Mso30win32client`, one function at `+0x8e4a70` doing the suspend, the queue and the resume, while the victim sits in gala's `advapi32!EventRegister` in this run and in a C++ wait in an earlier one, so the place is incidental while the point in Word's own startup repeats to within two seconds across three builds (31-32.5 s, 33.0 s, 33.7 s), while the three gaps before the fail-fast -- WaitForInputIdle, InternetOpenA, CredEnumerateW -- are not all probes with a fallback: two of them are **delay loads**, and a refused delay load has none, which the exception notes name as the end of the run -- thread 272 takes an unhandled 0xc06d007f for `ADVAPI32.dll!CredEnumerateW` and thread 276 one for `USER32.dll!WaitForInputIdle`, and whichever thread reaches its import first is what fires the fail-fast (the APC is queued by tid 276 in one run and by tid 272 in another); `WaitForInputIdle` is one of gala's `.gstub` exports, which a static or delay-load import binds to but GetProcAddress refuses -- right for a probe, fatal for a delay load, so the fix is to implement them and not to let a delay load take a stub, which would hand Office a process-ending stub instead -- and `CredEnumerateW` is absent outright; the run before it reached 2 s further and died instead on the delay load of USER32!SetUserObjectInformationW, which has no fallback, and both that export and the `wininet.dll!InternetOpenA` probe beside it are answered now, each measured on Windows before gala saw it: the window-station information setter with the two disjoint routes its handle tells apart (a station or desktop handle takes UOI_FLAGS alone, `GetCurrentProcess()`'s pseudo handle the TIMERPROC exception suppression alone) and WinINet's ANSI session opener with its access type validated as Windows validates it, which found three divergences gala had and a fourth in msvcrt (`user32_test`, `wininet_test`, `wow64_wininet_test`), the suspensions those threads take also found the one defect of gala's own on that path: advapi32 took three spin locks per `EventWrite`, so a thread stopped inside one stopped every other writer for good, which is where Word's main thread sat, and `user/etwlock_test` holds that shape as a test now while both read paths are lock-free of it (OT4, ARCHITECTURE "ETW, what a write may not wait for"); with that lock gone the armed startup writes 436 events from 10 providers and not one `waited` row, against 393 from 10 before, and the wall is unchanged either way, which an A/B on the same disk settles -- `origin/main` without the lock commit dies at 30.7 s and the branch with it at 31.1 s, both with the splash up and both in the fail-fast -- so what stops Word is the two refused delay loads above and not a lock; `user32!WaitForInputIdle` and `advapi32!CredEnumerateW`, each measured on Windows first, are what comes next; Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -270,7 +270,7 @@ has a section under "Open items".
 | R7 | Live mocking: clock control, record/replay, device faults | in progress | clock control, record/replay of time and randomness, disk latency done |
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
-| OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree; next OT6's one query path for every session (`xtask observe`, `xtask query`) |
+| OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree; the kernel's own hooks take a screendump of each window as it goes up (`hook=window=shot`); next OT6's one query path for every session (`xtask observe`, `xtask query`) |
 | GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
@@ -525,7 +525,8 @@ time, instead of waiting for flaky scenarios to point at each one.
   itself: `sched::schedule` panics when the thread giving up its CPU
   still holds a lock.
 - Checked and found sound: the scheduler's `prepare_wait`/`wait`/`wake`
-  protocol (preemption between them included), `on_cpu`, KArc's counts,
+  protocol (preemption between them: it does not block the thread,
+  ARCHITECTURE "Threads and scheduling"), `on_cpu`, KArc's counts,
   the heap's and frame allocator's single locks, keyed events,
   semaphores (`update_signal`), APC queueing against the alertable
   flag, termination requests against `wake_if_terminating`,
@@ -1630,7 +1631,8 @@ samples).
    the profile's top items on a release kernel (`cargo xtask profile
    --release`: the kernel is 22% of samples, 124 s in the kernel
    against 215 s for the debug kernel the gate boots, whose lockdep
-   alone is 13% of kernel samples). Done: the run edits of
+   alone was 13% of kernel samples before it read only the locks
+   held). Done: the run edits of
    `Vad::commit`, one status read per serial FIFO, demand-paged image
    views (they were the longest interrupts-off stretches). What is left
    is about 1% of a run each: demand-zero faults zeroing frames
@@ -1940,21 +1942,359 @@ need gala's.
    `ForcedXDpi` and `ForcedYDpi` in `Word\Options\Debug` -- every one a
    drawing or typing knob a fresh profile lacks as well, with no log
    among them, and the run ends at the same message at the same second.
-   Nor does Word trace: its ETW providers are the account of its own
-   work it would write down, and a startup registers 20 of them and
-   writes not one event, which the ledger says now -- an
-   `advapi32.dll!EventRegister(<guid>)` row for each, the name each
-   provider's traits give it beside it, and no write row of any of the
-   four forms (OBSERVABILITY "Missing-features ledger", ARCHITECTURE
-   "advapi32"). That is not a gap: TraceLogging builds an event's
-   payload only once a session has enabled the provider, so Office's
-   instrumentation is silent here for want of a listener and not for
-   want of anything gala owes it. Reading it therefore means gala
-   being that session -- keeping each registration's enable callback,
-   calling it for the providers a boot option names, and decoding
-   TraceLogging's self-describing events into the log -- which is the
-   next step on this question and the one thing in the run that would
-   carry Word's own words about the exit.
+   Word does trace, and its own words about the exit are in what it
+   traces. A startup registers 20 ETW providers and writes nothing of
+   its own accord, because TraceLogging builds an event's payload only
+   once a session has enabled the provider -- so gala is the session
+   (`etw=`, OT4, OBSERVABILITY "A session gala starts"), and under
+   `etw=*:255:0:4096 etw_from=WINWORD` the startup writes **353 events
+   from 8 providers**, every one of them WINWORD.EXE's. Every event is
+   a manifest provider's, whose field names live in a resource outside
+   the program, so what a line reads of one is the text its bytes
+   carried (`kernel/src/nt/etw/strings.rs`) -- and that text is Word's
+   account of its own failure, in this order:
+   `ErrorEid {"SH_ErrorId": 66, "SH_ErrorCode": 13}`, then
+   `SHIP ASSERT FAILED! {"wzTag": "qsqk"}`, then the message box, then
+   `BootRun {"SH_ErrorId": 13, "BootTask": "IfrRegisterWndClasses"}`.
+   The `(13)` the box shows is Word's own SH_ErrorId, and the boot task
+   it died in is `IfrRegisterWndClasses`: **Word registering its window
+   classes**. That is why nothing in the Direct2D ladder above explains
+   the box -- the drawing path Word walked is answered to its last
+   call, and the step it stopped on is a window class rather than a
+   frame -- and it is why the graphics measurements ruled themselves
+   out one at a time. The rest of the 353 is Office narrating the same
+   stretch: the virtual registry naming WINWORD.EXE's own path,
+   `Office.Performance.Boot` and six further activities started and
+   detached, 7 `Failed to register WER metadata` errors, 27
+   `RegistryWrapper::ReadFromOrapi > Registry read failed` lines, a
+   `Use of CForegroundDispatcher outside of liblet initialization`, and
+   after the box `WordShutdown` and AirSpace's compositor finishing its
+   device. That boot task is answered. The table those
+   classes went in held a fixed 32 of them -- eight already spent on
+   the built-in control classes `controls.rs` registers, though those
+   are registered lazily and a program gets all 32 until it asks for
+   one -- and a full table answered 0 with ERROR_NOT_ENOUGH_MEMORY and
+   said nothing at all, which is why the ledger carried no row while
+   Word died of it. The table grows now: 32 slots on the process heap,
+   doubled as they fill, bounded by the application atom space
+   (16384) because every class has an atom, which is Windows' own
+   bound and not a number gala chose; a slot's index is its class's
+   atom, so register and unregister no longer leak atoms and no two
+   live classes can share one; a refusal records the class name with
+   the slots held, and each doubling records the size it reached
+   (ARCHITECTURE, OBSERVABILITY, `wndclass_test`: 200 classes, their
+   atoms distinct, the table growing 32-64-128-256). What Word needed
+   is measured by that row: **the table grows to 64**, so Word's
+   startup registers more than 32 classes and the 33rd was the one
+   refused. With it, `IfrRegisterWndClasses` is passed -- the
+   `ErrorEid`, the `SHIP ASSERT`, the `BootRun` and the (13) box are
+   all gone from the run, which lasts 36.6 s where it lasted 32.3 s and
+   writes 393 events from 10 providers where it wrote 353 from 8. That
+   is measured on a fresh disk, not a reused one: Word's own crash
+   state makes the run after a crashed one open with its safe-mode
+   question instead (WORKFLOW "Word's own crash state").
+   The exception that stopped Word next is answered: an exception
+   raised inside a user APC reaches the handler of the frame the APC
+   interrupted, as it does on Windows. `Mso30win32client.dll` raised
+   0xe0000002 through kernel32's RaiseException (record flags 0x80,
+   EXCEPTION_SOFTWARE_ORIGINATE) from an APC routine, and gala's
+   dispatch asked **0 handlers** before ending the process: the walk
+   stopped at `ntdll.dll+0xca85` with **no unwind data found**, inside
+   `KiUserApcDispatcher`, which was a `naked` Rust function. A naked
+   function has no prologue for the compiler to describe, so LLVM emits
+   no `.seh_proc` and no `.pdata` entry, and a walk that reaches such a
+   frame ends there -- it was the only entry point of ntdll's without
+   one, which is why an exception raised in ordinary code unwound and
+   one raised under an APC did not. The fix is in two halves, both
+   needed: the dispatcher is assembly in `testntdll/src/seh.rs` and
+   `seh_arm64.rs` beside KiUserExceptionDispatcher, with its unwind
+   directives by hand, and the kernel's x64 APC frame carries a machine
+   frame at `APC_MACHINE_FRAME_AT` (0x500) built from the CONTEXT it
+   resumes, which `.seh_pushframe` reads -- the CONTEXT alone cannot
+   serve, because the frame is aligned down and the interrupted rsp is
+   at no fixed distance from it. ARM64 needs no machine frame: one
+   unwind code, MSFT_OP_CONTEXT, says a whole CONTEXT is at sp.
+   `user/apc_test` raises an exception in an APC and catches it below
+   the alertable wait that ran it, checking that the handler is asked
+   once, with the APC's code, for apc_guard's establisher frame, and
+   that RtlUnwindEx resumes it: without the fix it dies in 280 ms with
+   Word's own crash shape (3 frames unwound, 1 with no unwind data, 0
+   handlers asked).
+
+   The delay load that ended Word next is answered: gala's wtsapi32
+   exports `WTSRegisterSessionNotificationEx` and
+   `WTSUnRegisterSessionNotificationEx` beside the pair without the
+   `Ex`, which is the one WWLIB delay-loads. `hServer` is ignored:
+   WTS_CURRENT_SERVER_HANDLE is the only handle a caller can hold while
+   WTSOpenServer, which is what hands out any other, is not exported.
+   Every registration leaves a ledger line of its own ("unsupported",
+   the caller's dwFlags as the detail), because gala sends no
+   WM_WTSSESSION_CHANGE -- its session never connects, disconnects or
+   locks -- so a program whose startup waits for one has that line and
+   nothing else to say why. `office_api_test` registers and unregisters
+   a window of its own in both forms, for NOTIFY_FOR_THIS_SESSION and
+   NOTIFY_FOR_ALL_SESSIONS; without the implementation the program does
+   not load at all (STATUS_ENTRYPOINT_NOT_FOUND in 66 ms, both missing
+   imports in the ledger). The run that follows holds no 0xc06d007f
+   anywhere: both forms are reached, at 37.0 s and 41.0 s, and recorded.
+
+   What ends Word now is 400 ms after that registration and is Word's
+   own report: `Mso30win32client.dll` raises 0xe0000002 through
+   kernel32's RaiseException from a user APC, 24 frames unwind and 9
+   handlers are asked -- four of them passing it on -- and none takes
+   it, so WINWORD ends 33.0 s into its own run with consolerun behind
+   it. One window of Word's own reaches the screen, unnamed; the run
+   ends before the splash. The unwind itself is sound this time: the
+   single frame with `no unwind data found` is `NtQuerySystemTime`'s
+   16-byte syscall stub, the rip the APC interrupted, a leaf that needs
+   no entry (ntdll's `.pdata` starts above its 209 stubs).
+
+   The nearest named gap, 127 ms before the raise, is **not** what
+   Office is reporting: `advapi32.dll!CredEnumerateW`, a missing export
+   at the end of a long identity stretch
+   (`Identity/ServiceAuthInfoCache`, `IdentityCRL`,
+   `CredStoreKeyToAuthScheme`, and `WebAuthenticationCoreManager`, which
+   RoGetActivationFactory refuses). A throwaway export that answers as
+   Windows answers a user with nothing stored -- FALSE with
+   ERROR_NOT_FOUND -- was measured against the whole run: the function
+   leaves the list of functions gala lacks, Office asks it and goes on,
+   and the same 0xe0000002 is raised 650 ms later than before (33.7 s
+   against 33.0 s into Word's own run). A gap next to a crash is a
+   suspect, not a cause, and a probe run costs less than a credential
+   store would have. What raises it is named now, and the decision was not the
+   dying thread's. kernel32's RaiseException is no system call, so
+   `stack_at=` cannot be armed on it -- but the suspension beside it
+   can: with `stack_at=NtSuspendThread:4 stack_words=400` the two worker
+   threads that suspend the dying thread both call from
+   `Mso30win32client.dll+0x8e4a70`, and the report's own APC record
+   names the routine that raises in its context,
+   `Mso30win32client.dll+0x8e4ac0` (the unwind's frame above the raise,
+   `+0x8e4aac`, is *below* that entry, so it is another function and
+   reading the routine off the stack would have named the wrong one). **This is Office's own cross-thread fail-fast**: a
+   worker suspends the victim, queues a user APC that raises 0xe0000002
+   there, and resumes it. The victim's stack and last calls then
+   describe the victim -- its main thread was in a C++ wait
+   (`msvcp140.dll+0x12adf` under `Mso20win32client`, `MSO.DLL` and
+   `Mso40UIwin32client`), which is what 24 of those frames are -- so a
+   report that prints only the dying thread's calls cannot explain a
+   death another thread decided. Every report now names the user APC a
+   thread was last given, who queued it and where from, and prints
+   **that** thread's last calls as well (OBSERVABILITY "Who queued a
+   user APC", scenario `crash_apc`). Word's own report now reads
+   `routine 0x3ff7f8734ac0 (Mso30win32client.dll+0x8e4ac0), queued by
+   pid 12 tid 272, called from 0x3ff7fff8b67b (kernel32.dll+0x4b67b) at
+   40599 ms`, and tid 272's last calls are `NtProtectVirtualMemory`,
+   `NtQueueApcThreadEx2`, `NtResumeThread`, `NtSetInformationThread`
+   refused 0xc0000022, `NtWaitForSingleObject`,
+   `NtQueryInformationProcess`, `NtDelayExecution` -- the queue and the
+   resume of the fail-fast in order, from a thread that reaches it
+   through gala's own `QueueUserAPC`. Two things follow. The refused
+   `NtSetInformationThread` is a gap with no record of its own -- the
+   only 0xc0000022 that call can return is an access check on the thread
+   handle, and a refused check leaves nothing in the ledger, which is a
+   piece of work of its own. And the address the record can hold is the
+   wrapper's, so the whole stack of that one call is what names the code
+   that decided, which `stack_at=NtQueueApcThreadEx2:16
+   stack_from=mso30win32client stack_words=400` asks: the run's only
+   such call is Word's own (pid 12, tid 276), and the words nearest its
+   stack pointer are `kernel32.dll+0x4b67b`,
+   `Mso30win32client.dll+0xd9b398`, `+0x8e4a70` -- the address the
+   suspension's mark names as well -- `+0x8e4be5` and `+0x652686`.
+   **The thread that ends Word is Office's own code in
+   `Mso30win32client`**, reached from `+0x652686`, and the suspend, the
+   queue and the resume all leave from the one function at `+0x8e4a70`.
+   The capture is a scan and not an unwind (OBSERVABILITY "Scanned, not
+   unwound"), so a value further up is one this stack held at some point
+   rather than a live frame -- `advapi32.dll+0x1b86b` at `rsp+0x180`,
+   `WWLIB.DLL+0x1e6abb1` at `rsp+0x570` -- and plain data is named too
+   (`user32.dll+0x0` is that module's base).
+
+   Where the victim was *is* an unwind, and it is in gala's own code:
+   frames 4 and 5 of this run's report are `advapi32.dll+0x1cb05` and
+   `+0x1b952`, called from Office's `Mso40UIwin32client` under
+   `Mso50win32client`, `Mso98win32client` and `MSO.DLL`, and that
+   thread's last calls are registry ones (`NtOpenKey`,
+   `NtQueryValueKey` answering 0x80000005, `NtSetValueKey`, `NtClose`).
+   Read against the binary's own tables, `+0x1b952` is 0x112 into
+   advapi32's exported `EventRegister` (one function, 0x1b840..0x1baa3
+   in `.pdata`, no other export at that entry) and `+0x1cb05` is 0x245
+   into an unexported function just after `TraceEvent`: **Word's main
+   thread is registering an ETW provider when the fail-fast reaches
+   it.** That is where it was and not what it waited for: the
+   ledger dates that provider's registration to `first` 41292 and
+   `last` 41292, the millisecond of the kill, so the thread had just
+   stepped into it, and an earlier run was killed in a C++ wait
+   (`msvcp140.dll+0x12adf`) instead.
+
+   What repeats is the point of Word's own startup. The two clock lines
+   around consolerun's launch put Word's start between 8773 ms and
+   10161 ms of uptime, so this kill at 41292 ms is 31 to 32.5 s into
+   Word's run, beside the 33.0 s and 33.7 s of the two runs before it --
+   three builds apart, the same place in the sequence. And Word gets
+   further than any report of the crash suggests: it creates a D3D10
+   device, registers 64 window classes and reaches
+   `desktop: shown window ''` one line before the suspension, so the
+   window exists and has no title yet.
+
+   What the last second holds is one wall. Office asks for an identity:
+   `IdentityCRL` and six `ServiceAuthInfoCache` keys are absent,
+   WinRT's `Windows.ApplicationModel.Core.CoreApplication` and
+   `Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager`
+   have no DLL to come from, `SetWindowsHookExW(global)` is
+   unsupported, and then the last three gaps of the run arrive in
+   order: `user32.dll!WaitForInputIdle` at 40856 ms,
+   `wininet.dll!InternetOpenA` at 40986 ms and
+   `advapi32.dll!CredEnumerateW` at 41205 ms, each a missing export and
+   each its only hit. The fail-fast follows 87 ms after the last of
+   them.
+
+   Those three lines are probes and not calls. An export that exists
+   only as a poison stub lives in `.gstub`, which gala's ntdll keeps
+   out of GetProcAddress on purpose, so a program asking for an
+   optional function gets NULL and takes its fallback instead of dying
+   (`user/gala_stubs/src/lib.rs`). A `missing export` line is therefore
+   weaker evidence than it looks -- **except when the program binds it
+   by delay load**, where the same absent export ends the process with
+   0xc06d007f and the crash report names it.
+
+   Which is what the run before this one did. With the same scenario
+   and the fail-fast absent, Word ran 2 s further and died at 35479 ms
+   of its own run on `delay load of USER32.dll!SetUserObjectInformationW`,
+   having probed `wininet.dll!InternetOpenA` 236 ms earlier. So Word
+   has two walls at the same point of its startup, and which one it
+   reaches first varies between runs: Office's watchdog ends it from
+   another thread, or its main thread gets a little further and the
+   delay load ends it. The second is the one with a name, no fallback
+   and no store behind it, and both it and the probe beside it are
+   answered now, each measured on this machine's Windows before gala
+   saw it: `SetUserObjectInformationW` and `SetUserObjectInformationA`
+   (`user32_test`, whose 60 new checks were validated against real
+   Windows by a probe built from the same source, 0 of them failing
+   there, before gala ran one) with `InternetOpenA` beside them
+   (`wininet_test` and its WOW64 twin).
+
+   Three things the measurement settled that gala had wrong, none of
+   them guessable from the documentation: `UOI_IO` is a desktop's alone
+   and a window station answers ERROR_INVALID_FUNCTION, where gala
+   answered the flag for both; the setter has two disjoint routes told
+   apart by the handle, the TIMERPROC exception suppression taking
+   `GetCurrentProcess()`'s pseudo handle and refusing a real handle to
+   the same process with ERROR_INVALID_PARAMETER; and WinINet validates
+   its access type, so INTERNET_OPEN_TYPE_PROXY without a proxy name
+   and a number that is no access type are both
+   ERROR_INVALID_PARAMETER, where gala refused the two together as
+   unsupported proxies. Measuring the setter also cost a crashed
+   PowerShell: real user32 does not probe `pvInfo`, so a NULL one
+   faults the caller, which is the one case the test leaves out (gala
+   answers ERROR_INVALID_PARAMETER there, its own choice).
+
+   Rebuilding the 32-bit twin named a fourth divergence, in msvcrt:
+   today's mingw-w64 i686 runtime reaches stdio, MB_CUR_MAX and the
+   environment through `__p__iob`, `__p___mb_cur_max` and
+   `__p___initenv`, three exports real msvcrt has and gala's lacked, so
+   `wow64_wininet_test.exe` could not be rebuilt from its own source
+   and run until they were added -- a gap that would have met anyone
+   rebuilding a 32-bit C test with the packages WORKFLOW names
+   ("A 32-bit C program on msvcrt").
+
+   What gala still will not do it says instead of guessing: a session
+   with a proxy to route through, and INTERNET_FLAG_ASYNC, which
+   Windows gives a handle for and gala refuses rather than hand out a
+   session whose operations complete before returning and so never
+   report completion to a callback waiting for it -- a refusal the
+   caller sees at once where a handle would hang it. If Office turns
+   out to open its session asynchronously, that refusal is the next
+   thing to revisit, and the measurement it needs is what a request on
+   an async session returns on Windows.
+
+   Word's startup is rerun next to see which of its two walls it
+   reaches now. What the deciding thread polled before it gave up stays
+   open behind that, and the system-call event stream is the instrument
+   for it, since the flight recorder's 24 calls are shared by every
+   thread and tid 276's had already been pushed out of the ring by the
+   victim's own registry work.
+
+   One hazard to know before using that stream on Word: with
+   `events_match=<text>` set, `syscall_pid_wanted` answers no for every
+   process until some process's command line matches, so a needle that
+   matches nothing disables the stream and every `stack_at=` capture at
+   once, and `0 captures of the n asked for, 0 calls passed over` reads
+   the same as "nobody called it" (`kernel/src/events.rs`). The two
+   probe runs above were read that way for a while before the crash
+   reports said otherwise.
+
+   Naming the function behind a `module+offset` is hand work today, and
+   the nearest export below an address names the wrong one whenever the
+   right one is not exported: `+0x1cb05` reads as `TraceEvent+0x245`
+   that way, 0x10 past a stub a few bytes long, while `.pdata` places
+   it in a 590-byte function of its own. gala builds these DLLs, so the
+   tables are at hand -- teaching `cargo xtask triage` to name the
+   function behind every address in gala's own modules is a piece of
+   work of its own, and the one that makes the reports above readable
+   without a script on the side.
+
+   The credential store remains a gap of its own: CredReadW, CredWriteW,
+   CredDeleteW and CredFree are in advapi32's `unimplemented_exports!`
+   and end the process when called, and CredEnumerateW is not listed
+   even there, so a probe for it gets NULL. It is work for the program
+   that needs it -- a poison stub behind a function Office has just
+   found is worse than the miss that led to it -- and `advapi32_test` is
+   where it will be measured.
+
+   That this gap cost a run to find is why the triage names every
+   missing export and import the ledger holds, however few its hits
+   (the busiest thirty, named in full). A function gala lacks is not
+   like the other gaps: it is always one gala should have, never the
+   program's own doing, and a single hit is enough to end a program.
+   The line counts every `missing export` the ledger holds, including
+   exports of DLLs gala did not write: thirty of the 133 entries in a
+   later run are Office probing its own `c2r64.dll` for functions a
+   newer Click-to-Run has (`SaveRecording`, `StartProgressAgent`,
+   `HandleLoadIconW`), which are no gap of gala's. Nothing in the ledger
+   says whose a module is, so telling them apart is a piece of work of
+   its own.
+
+   The line is 131 entries long in this run and
+   `advapi32.dll!CredEnumerateW x1` is on it, while the ledger's top
+   five by hits, out of 463 entries, names none of the three functions
+   that have ended Word so far.
+
+   Who suspended a thread is now recorded (`nt/thread.rs`,
+   OBSERVABILITY "Suspensions", `user/suspend_test`): every raise and
+   every drop of a suspend count keeps a mark on the thread -- who
+   asked, where that thread called from, the count the call left behind
+   -- which every thread dump prints beside a thread that is suspended
+   or parked, together with the rip it is parked at, and a refused
+   suspension or resume is recorded with the status the caller is
+   answered with. What it says about Word so far is that nothing
+   mysterious stops its main thread: tid 16 is created suspended by
+   consolerun's CreateProcess (kernel32+0x30d5d) and resumed at once,
+   and OfficeClickToRun starts 25 threads of its own the same way --
+   which is why that pair is counted and not printed. The suspended main
+   thread the 900 s run's dump showed has a culprit of its own shape
+   now: tid 276 suspends tid 16 through kernel32's SuspendThread
+   (+0x6fd7) and resumes it at once (+0x62d7), 400 ms before the crash
+   above, and tid 272 suspends itself the same way -- so a run that
+   parks tid 16 for good names the thread that did it instead of
+   leaving a bare count. Loud in
+   the same stretch, and not yet tied to anything: Word asks again and
+   again for the WinRT identity factory
+   `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`,
+   which RoGetActivationFactory refuses with REGDB_E_CLASSNOTREG (the
+   loader then looking for `windows.security.authentication*.dll`,
+   which are not there), at 138 s, 348 s and 770 s -- a retry that
+   spreads out rather than a wait that ends. A program whose own
+   handler never gets asked was a gap of the same kind the class table
+   was, one layer down; what is left here is a handful of named
+   functions and no record of their absence.
+   The same silent-refusal shape is still in user32's other fixed
+   tables, each to be measured against a real program rather than
+   widened: `accel.rs` 32 accelerator tables (`MAX_TABLES`), `menu.rs`
+   64 items per menu (`MAX_ITEMS`, which a Word menu passes on its
+   own) and 512 menus, `timer.rs` 128 timers, `surface.rs` 16 foreign
+   surfaces. All four answer 0 or false when full and record nothing,
+   so a program they stop leaves a run with no trace of why -- the row
+   is the cheap half of that work and comes first.
    An absent key names nothing it was asked for, so a key seeded empty
    is how a program is made to say what it wanted: the `value` events of
    `events=file` then carry each name. Office's own logging switch,
@@ -7209,6 +7549,51 @@ among the slowest hand-offs.
    earlier frames come with the call path, and a 32-bit program's
    frames are above the WOW64 thunk the capture is taken at.
 
+   The screen's half of it is a hook: `hook=window=shot` takes a
+   screendump of the desktop as each top-level window becomes visible,
+   a second or two later if asked (`+<secs>`), of the windows whose
+   program or title holds a text if asked (`/text`), four times by
+   default. The kernel writes the request to the log as the window goes
+   up and xtask takes the picture -- the kernel knows the moment and
+   cannot encode a PNG, the host can and cannot know the moment, and a
+   serial-log line only works as a trigger when the line is known in
+   advance, which the first window of a run is and the splash that
+   follows it is not (`kernel/src/nt/hooks.rs`, scenarios `hook_test`
+   and `hook_match_test`, OBSERVABILITY "Hooks"). What is left of it:
+   one event (a window becoming visible) and one action (a picture of
+   the whole screen).
+
+   An exception a program swallows is a gap too, and used to be a
+   silent one: a top-level filter that returns
+   EXCEPTION_CONTINUE_EXECUTION has ntdll withdraw the note the kernel
+   keeps, no crash report is ever written and ntdll's own ledger row
+   sits on its death path, so nothing in the run said an exception had
+   happened -- Office's shared code swallows them. The withdrawal is
+   where it can be said, so it says it: a line naming the code, the
+   thread, the address as module+offset and what was read or written,
+   and a ledger row beside it (`nt::crashreport::continued`, scenarios
+   `crash_continued` and `crash_continued_other` and their ARM64 twins,
+   OBSERVABILITY "Crash reports"). A thread keeps its own notes, made
+   the first time it takes an exception (a note is large and most
+   threads never take one), so a withdrawal has only its own note to
+   reach and two threads' exceptions do not write over one another: the
+   report is written from the notes of the thread whose exception ends
+   the process, moved into the process as it is ended, and another
+   thread's unhandled exception gets a line of its own saying the report
+   is not written from it, carrying the same clause the withdrawal does
+   -- what the parameters describe (the verb and address of an access
+   violation, the type a C++ throw held, the DLL and the function or
+   ordinal a delay load wanted) and where it happened -- because the
+   code and its name alone leave a reader of the second line looking
+   for nothing in particular (scenarios `crash_unhandled_both` and
+   `crash_delay`). What the parameters mean is decoded in one place for
+   both ABIs (`nt::crashreport::decode_params`), so an ARM64 note says
+   as much as an x64 one. The process's own
+   slots are what is left for the kernel's own context and for a thread
+   whose notes could not be allocated, where one slot serves every
+   thread and a second exception does write over the first -- which it
+   says.
+
    What this is for: every program whose compatibility is worked on
    next runs into the same wall Word did, and the answer should not be
    another round of records typed by hand. Its gaps when done: the
@@ -7229,6 +7614,16 @@ among the slowest hand-offs.
    contract was measured on the pinned build as a standard user and is
    checked on both systems by `user/etw_test` (scenario `etw_test`,
    `ci-passing.txt`).
+
+   Nothing on a program's write path waits: both read paths are
+   lock-free and the two `GalaEtw` calls are made with no lock held,
+   because Office suspends its own threads while the process traces
+   and a lock there is one a stopped thread can be holding -- which
+   is where Word's main thread sat. `user/etwlock_test` is that shape
+   as a test (scenarios `etwlock_test` and `etwlock_armed`;
+   ARCHITECTURE "ETW, what a write may not wait for" for the
+   invariants it rests on and for the one cost taken, a session's
+   buffer that is never freed).
 
    A run can also ask for a session itself, without the program asking
    for one: `etw=<provider or name>[:<level>[:<keyword>[:<n>]]]`
@@ -7260,10 +7655,15 @@ among the slowest hand-offs.
    cut to fit gala's record from one whose description does not read.
    An event whose metadata is not TraceLogging's -- a manifest
    provider's, whose field names are in no part of it -- leaves the
-   line it can, with its size and which of the two it was. Scenarios
-   `etwfields_test` (the program's own account of every field shape it
-   wrote, which is real Windows') and `etwfields_armed` (those same
-   events decoded).
+   line it can: its size, which of the two it was, and the strings its
+   bytes carried (`kernel/src/nt/etw/strings.rs`, host unit tests),
+   which is what a payload's message, path or reason is and all there
+   is to read of one without its manifest. Scenarios `etwfields_test`
+   (the program's own account of every field shape it wrote, which is
+   real Windows') and `etwfields_armed` (those same events decoded);
+   `etwraw_test` and `etwraw_armed` are the manifest provider's four
+   events and the strings read out of them, the longest one cut, the
+   seventh counted, and a payload of numbers said to hold none.
 
    Next: OTel, the decoded events as logs and spans, by the mapping
    OT5 uses for everything else.

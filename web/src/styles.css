@@ -135,6 +135,21 @@ p {
 code {
   font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.875em;
+  /* Code reads left to right on the Arabic page too. */
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+pre {
+  direction: ltr;
+  text-align: left;
+}
+
+/* Arabic text: a face drawn for it first, and the line height it needs. */
+body:lang(ar) {
+  font-family:
+    "Segoe UI", "Noto Sans Arabic", "Geeza Pro", Tahoma, system-ui, sans-serif;
+  line-height: 1.75;
 }
 
 a {
@@ -158,11 +173,11 @@ a {
 
 .skip {
   position: absolute;
-  left: -9999px;
+  inset-inline-start: -9999px;
 }
 
 .skip:focus {
-  left: 1rem;
+  inset-inline-start: 1rem;
   top: 1rem;
   z-index: 10;
   background: var(--surface);
@@ -232,6 +247,21 @@ a {
 
 .top-nav a:hover {
   color: var(--ink);
+}
+
+.lang-switch {
+  flex: none;
+  font-size: 0.9375rem;
+  color: var(--ink-soft);
+  text-decoration: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 0.15rem 0.75rem;
+}
+
+.lang-switch:hover {
+  color: var(--ink);
+  border-color: var(--ink-faint);
 }
 
 @media (max-width: 52rem) {
@@ -382,7 +412,7 @@ a {
   align-self: center;
   color: var(--ink-faint);
   font-size: 0.8125rem;
-  text-align: right;
+  text-align: end;
 }
 
 .stack-cells {
@@ -447,7 +477,8 @@ a {
 }
 
 .stack-boundary {
-  margin: 0.25rem 0 0.25rem 11.75rem;
+  margin-block: 0.25rem;
+  margin-inline: 11.75rem 0;
   padding: 0.35rem 0;
   border-top: 2px dashed var(--accent);
   border-bottom: 2px dashed var(--accent);
@@ -469,11 +500,11 @@ a {
     gap: 0.25rem;
   }
   .stack-label {
-    text-align: left;
+    text-align: start;
     margin-top: 0.4rem;
   }
   .stack-boundary {
-    margin-left: 0;
+    margin-inline-start: 0;
   }
   .stack-cells-even {
     grid-template-columns: 1fr 1fr;
@@ -581,6 +612,16 @@ a {
   border-left-color: var(--accent);
 }
 
+/* Right to left, the flow runs leftward and its arrows point that way. */
+[dir="rtl"] .flow-arrow span {
+  border-left: 0;
+  border-right: 7px solid var(--ink-faint);
+}
+
+[dir="rtl"] .flow-cross span {
+  border-right-color: var(--accent);
+}
+
 @media (max-width: 56rem) {
   .flow ol {
     flex-direction: column;
@@ -588,13 +629,15 @@ a {
   .flow-arrow {
     flex-basis: 1.1rem;
   }
-  .flow-arrow span {
+  .flow-arrow span,
+  [dir="rtl"] .flow-arrow span {
     border-left: 5px solid transparent;
     border-right: 5px solid transparent;
     border-top: 7px solid var(--ink-faint);
     border-bottom: 0;
   }
-  .flow-cross span {
+  .flow-cross span,
+  [dir="rtl"] .flow-cross span {
     border-top-color: var(--accent);
   }
 }
@@ -895,14 +938,14 @@ a {
 .progress li:not(:last-child)::before {
   content: "";
   position: absolute;
-  left: 0.4375rem;
+  inset-inline-start: 0.4375rem;
   top: 1.1rem;
   bottom: -0.1rem;
-  border-left: 2px solid var(--line-strong);
+  border-inline-start: 2px solid var(--line-strong);
 }
 
 .progress-works:not(:last-child)::before {
-  border-left-color: var(--works) !important;
+  border-inline-start-color: var(--works) !important;
 }
 
 .progress-dot {
@@ -1039,8 +1082,8 @@ a {
 .planned li {
   display: flex;
   flex-direction: column;
-  padding-left: 0.9rem;
-  border-left: 2px solid var(--line-strong);
+  padding-inline-start: 0.9rem;
+  border-inline-start: 2px solid var(--line-strong);
 }
 
 .planned b {
@@ -1189,6 +1232,89 @@ a {
 
 .explain > div {
   min-width: 0;
+}
+
+/* ---------------------------------------------------------------- usb */
+
+.usb-needs ul,
+.usb-limits ul {
+  margin: 0.5rem 0 0;
+  padding-inline-start: 1.25rem;
+  color: var(--ink-soft);
+}
+
+.usb-needs h3,
+.usb-limits h3 {
+  font-size: 1.125rem;
+}
+
+.usb-steps {
+  list-style: none;
+  counter-reset: usb;
+  margin: 2rem 0;
+  padding: 0;
+  display: grid;
+  gap: 1.75rem;
+}
+
+.usb-steps > li {
+  counter-increment: usb;
+  position: relative;
+  padding-inline-start: 2.75rem;
+}
+
+.usb-steps > li::before {
+  content: counter(usb);
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0;
+  width: 1.9rem;
+  height: 1.9rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 650;
+  font-size: 0.95rem;
+}
+
+.usb-steps h3 {
+  font-size: 1.125rem;
+  margin-bottom: 0.3rem;
+}
+
+.usb-steps p {
+  color: var(--ink-soft);
+}
+
+/* One way per row: a command line must show whole, not scroll. */
+.usb-ways {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  margin-top: 0.9rem;
+}
+
+.usb-way {
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.usb-way h4 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+
+.usb-way p {
+  font-size: 0.9rem;
+}
+
+.usb-way .cmd {
+  margin-top: 0.6rem;
 }
 
 /* --------------------------------------------------------- principles */
