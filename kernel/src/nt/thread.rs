@@ -72,10 +72,14 @@ pub struct NtThread {
     pub priority: IrqMutex<(i32, i32)>,
     /// ThreadAffinityMask: the CPUs it may run on.
     affinity: core::sync::atomic::AtomicU64,
-    /// Queued user APCs (FIFO), run at alertable waits.
-    /// Queued user APCs; room is kept for the completion routines of I/O
-    /// requests in progress (`notify::Reserved`).
+    /// Queued user APCs (FIFO), run at alertable waits; room is kept for
+    /// the completion routines of I/O requests in progress
+    /// (`notify::Reserved`). Each carries who queued it (`ApcBy`).
     apcs: IrqMutex<crate::mm::heap::ReservedVec<UserApc>>,
+    /// The last user APC this thread was given, kept after it has left
+    /// the queue: what a crash report of an exception the APC raised
+    /// names the deciding thread by (`last_apc`).
+    apc_mark: IrqMutex<Option<UserApc>>,
     /// Set while the thread is in an alertable wait (an APC wakes it).
     alertable: core::sync::atomic::AtomicBool,
     /// Mutants it owns (abandoned if it exits).
@@ -407,6 +411,26 @@ pub fn refused(what: &str, target: Option<&ObjectRef>, handle: u64, status: NtSt
     }
 }
 
+/// Who queued a user APC, kept with it. An APC is how one thread makes
+/// another run code, so an exception one raises is a decision of the
+/// queueing thread and not of the thread that dies of it: Office's
+/// shared code ends a thread this way, suspending it, queueing an APC
+/// that raises 0xe0000002 in its context and resuming it (ROADMAP OF).
+/// The victim's stack and last calls then describe the victim, and this
+/// is the only record of who decided (`crashreport`).
+#[derive(Clone, Copy, Debug)]
+pub enum ApcBy {
+    /// Not queued yet (`UserApc::new`): `queue_apc` fills it in.
+    Unset,
+    /// Queued by (pid, tid) -- (0, 0) for the kernel's own code, an I/O
+    /// completion or a timer -- from `from`, the return address above
+    /// that thread's system-call stub (0: none, as for a WOW64 thread,
+    /// whose 64-bit registers are wow64.dll's), at `at` ms of uptime.
+    Thread { by: (u64, u64), from: u64, at: u64 },
+    /// Queued before a handover: the queuer is not carried (`carry`).
+    Carried,
+}
+
 /// A user-mode APC: `routine(args[0], args[1], args[2])`. A special one
 /// (QueueUserAPC2's QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) runs at the
 /// thread's next return to user mode, not only in an alertable wait.
@@ -415,6 +439,23 @@ pub struct UserApc {
     pub routine: u64,
     pub args: [u64; 3],
     pub special: bool,
+    /// Who queued it: `queue_apc` fills this in, so a crash report of an
+    /// exception `routine` raises can name them.
+    pub by: ApcBy,
+}
+
+impl UserApc {
+    /// An APC to queue. Who queued it is recorded when it is queued, not
+    /// here: the thread that builds one (an I/O request's completion
+    /// routine) need not be the one whose call queues it.
+    pub fn new(routine: u64, args: [u64; 3], special: bool) -> UserApc {
+        UserApc { routine, args, special, by: ApcBy::Unset }
+    }
+
+    /// One carried across a handover, whose queuer is not carried.
+    pub fn carried(routine: u64, args: [u64; 3], special: bool) -> UserApc {
+        UserApc { routine, args, special, by: ApcBy::Carried }
+    }
 }
 
 /// The base priority of every process (NORMAL_PRIORITY_CLASS).
@@ -798,6 +839,7 @@ fn create_inner(
         exit_time: IrqMutex::named("thread.exit_time", 0),
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
         apcs: IrqMutex::new(crate::mm::heap::ReservedVec::new()),
+        apc_mark: IrqMutex::named("thread.apc_mark", None),
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
@@ -1020,8 +1062,33 @@ pub fn queue_reserved_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStat
     queue_apc(object, apc, true)
 }
 
+/// Who is queueing a user APC, for its `ApcBy`: the calling thread and
+/// the return address above its system-call stub, as `note` records a
+/// suspension's caller. Reading that address copies user memory, which
+/// waits for a page that is not there, so this is called before any lock
+/// (no lock may be held across a wait).
+fn queued_by() -> ApcBy {
+    let asker = current();
+    let caller = asker.as_ref().map(as_thread);
+    let from = match caller.filter(|c| c.teb32 == 0) {
+        Some(c) => {
+            let in_syscall = *c.in_syscall.lock();
+            let regs = in_syscall.map(|(_, regs)| regs);
+            regs.and_then(|regs| super::abi::stub_return_address(&c.process, &regs)).unwrap_or(0)
+        }
+        None => 0,
+    };
+    ApcBy::Thread {
+        by: caller.map_or((0, 0), |c| (c.process.id, c.id)),
+        from,
+        at: platform::monotonic_ns() / 1_000_000,
+    }
+}
+
 fn queue_apc(object: &ObjectRef, apc: UserApc, reserved: bool) -> Result<(), NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    // Before the dispatcher lock: `queued_by` reads user memory.
+    let apc = UserApc { by: queued_by(), ..apc };
     wait::with_dispatcher_lock(|| {
         // Under the lock the thread's exit marks it under (`exit_current`).
         if t.has_exited() {
@@ -1092,9 +1159,26 @@ pub fn has_special_user_apc() -> bool {
 /// first special one and leaves normal APCs queued for an alertable wait.
 pub fn take_user_apc(special_only: bool) -> Option<UserApc> {
     let object = current()?;
-    let mut apcs = as_thread(&object).apcs.lock();
+    let t = as_thread(&object);
+    let mut apcs = t.apcs.lock();
     let at = if special_only { apcs.iter().position(|a| a.special)? } else { 0 };
-    (!apcs.is_empty()).then(|| apcs.remove(at))
+    let apc = (!apcs.is_empty()).then(|| apcs.remove(at))?;
+    drop(apcs);
+    // Kept after it has left the queue: an exception the routine raises
+    // is reported with who queued it (`last_apc`).
+    *t.apc_mark.lock() = Some(apc);
+    Some(apc)
+}
+
+/// The last user APC the current thread was given, with who queued it:
+/// what a crash report names the thread that decided an exception the
+/// APC's routine raised. A note takes it as the exception is recorded,
+/// because the report is written when the process's last thread has
+/// exited (`process::finish`) and no thread is there to ask by then.
+/// None when the thread has run no APC.
+pub fn delivered_apc() -> Option<UserApc> {
+    let object = current()?;
+    *as_thread(&object).apc_mark.lock()
 }
 
 /// Marks the current thread as in (or out of) an alertable wait.
@@ -1414,6 +1498,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         exit_time: IrqMutex::named("thread.exit_time", a.exited.map_or(0, |e| e.1)),
         priority: IrqMutex::new(a.priority),
         apcs: IrqMutex::new(crate::mm::heap::ReservedVec::from_vec(a.apcs)),
+        apc_mark: IrqMutex::named("thread.apc_mark", None),
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),

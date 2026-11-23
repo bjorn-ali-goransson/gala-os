@@ -8461,6 +8461,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("crash_raise", "ntdll.dll", "Windows/System32"),
+    ("crash_apc", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
     ("shootdown_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
@@ -14148,6 +14149,7 @@ const ARM64_TWINS: &[&str] = &[
     "crash_dispatched",
     "crash_filtered",
     "crash_raise",
+    "crash_apc",
     "seh_test",
     "context_test",
     "threadinfo_test",
@@ -20709,6 +20711,45 @@ const BASE_SCENARIOS: &[Scenario] = &[
             BOOT_OK_MARKER,
         ],
     },
+    Scenario {
+        // An exception another thread decided on: the main thread queues
+        // a user APC into a worker waiting alertably, and the APC's
+        // routine raises a code nothing handles, with no parameters --
+        // which is how Office's shared code ends a thread (ROADMAP OF).
+        // The victim's own stack and last calls describe its wait, so
+        // the report must name the thread that queued the APC, where it
+        // queued it from, and that thread's last calls: the failing
+        // NtClose just before the queueing is what says whose they are.
+        name: "crash_apc",
+        cmdline: "qemu_exit run=crash.exe args=apc",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the worker waits alertably",
+            "crash: the main thread queues the APC",
+            "crash: the APC raises 0xe0000043 on the worker",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000043 \
+             (exception) in thread",
+            "crash report:   no handler took it: ",
+            // The victim's own calls say nothing at all: the dispatch
+            // of the exception the APC raised in it -- 21 lookups for
+            // unwind data -- crowds the alertable wait it was in out of
+            // the 24-call ring, which is the second reason a report of
+            // the victim alone cannot explain this death.
+            "last calls, oldest first: ",
+            "GalaUnhandledException=0x00000000",
+            // Which APC it was, who queued it, and what that thread did:
+            // the write of its line, the handle that is not one and the
+            // queueing itself.
+            "crash report:   it was last given a user APC: routine ",
+            "(crash.exe+0x",
+            ", queued by pid 4 tid ",
+            ", called from ",
+            "last calls, oldest first: ",
+            "NtClose=0xc0000008, NtQueueApcThread=0x00000000",
+            "process crash.exe (pid 4) exited with status 0xe0000043",
+            BOOT_OK_MARKER,
+        ],
+    },
     // The Linux personality (ROADMAP LX milestone 1): each user/lx program,
     // static and static-pie, with the arguments and environment `cargo
     // xtask lx-expect` gives it on Linux.
@@ -23136,6 +23177,38 @@ fn at_deadline(pid: u32, what: AtDeadline) {
 #[cfg(not(target_os = "linux"))]
 fn at_deadline(_pid: u32, _what: AtDeadline) {}
 
+/// SIGQUIT at its default disposition and unblocked in the run however
+/// xtask was started, so the dump request at a deadline reaches it
+/// (`run_with_deadline`'s comment).
+#[cfg(target_os = "linux")]
+fn plain_dump_signal(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the closure runs in the child between fork and exec, where
+    // only async-signal-safe calls are allowed: sigaction and sigprocmask
+    // are both of them, and it allocates nothing and reads no state of
+    // xtask's. A zeroed sigaction is valid; its handler is filled in.
+    unsafe {
+        cmd.pre_exec(|| {
+            let mut plain: libc::sigaction = std::mem::zeroed();
+            plain.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut plain.sa_mask);
+            if libc::sigaction(libc::SIGQUIT, &plain, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut quit: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut quit);
+            libc::sigaddset(&mut quit, libc::SIGQUIT);
+            if libc::sigprocmask(libc::SIG_UNBLOCK, &quit, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn plain_dump_signal(_cmd: &mut Command) {}
+
 /// Runs `cmd` to its end, or to `deadline`: a run still going then is
 /// asked for its state dump (SIGQUIT) and killed `grace` later. Its
 /// standard output and error are read while it runs, so a program that
@@ -23147,8 +23220,16 @@ fn at_deadline(_pid: u32, _what: AtDeadline) {}
 /// so a hung run left no state dump -- the one thing it is read from
 /// (WORKFLOW "gala-um"). Which coreutils a host has must not decide
 /// whether a hang explains itself.
+///
+/// Nor how the gate was launched: a shell that starts a job in the
+/// background ignores SIGQUIT (and SIGHUP and SIGINT), a signal ignored
+/// when a program starts cannot be caught or trapped by it, and every
+/// run under `cargo xtask test &` would then be asked for a dump it
+/// could never answer. `plain_dump_signal` gives each run the plain
+/// disposition instead of the inherited one.
 fn run_with_deadline(cmd: &mut Command, deadline: Duration, grace: Duration) -> Result<UmRun> {
     use std::sync::mpsc::RecvTimeoutError::Timeout;
+    plain_dump_signal(cmd);
     let mut child =
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
@@ -33723,6 +33804,39 @@ mod um_scenarios {
         assert!(run.timed_out);
         assert_eq!(run.code, Some(3), "{}", run.log);
         assert!(run.log.contains("waiting") && run.log.contains("dumped"), "{}", run.log);
+    }
+
+    /// The dump request reaches the run however the gate was launched: a
+    /// shell that starts a job in the background ignores SIGQUIT, and a
+    /// program cannot trap a signal that was ignored when it started, so
+    /// a run under `cargo xtask test &` would inherit that and answer no
+    /// dump request at all. The run here starts from that disposition
+    /// itself -- nothing of xtask's own is changed, so the runs beside
+    /// it are untouched.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_run_answers_the_dump_request_though_it_starts_from_an_ignored_sigquit() {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new("sh");
+        let waiting = "while :; do sleep 0.05; done";
+        cmd.args(["-c", &format!("trap 'echo dumped; exit 3' QUIT; echo waiting; {waiting}")]);
+        // SAFETY: the closure runs in the child between fork and exec,
+        // where only async-signal-safe calls are allowed: signal(2) is
+        // one, and it allocates nothing and reads no state of xtask's.
+        // It is added before `run_with_deadline`'s own, which therefore
+        // runs after it (they run in the order they were added), so this
+        // is what a backgrounded shell leaves a run of its own.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let run = run_with_deadline(&mut cmd, Duration::from_millis(300), Duration::from_secs(5))
+            .expect("the run");
+        assert!(run.timed_out);
+        assert_eq!(run.code, Some(3), "{}", run.log);
+        assert!(run.log.contains("dumped"), "{}", run.log);
     }
 
     /// A run that does not answer the dump request is killed when its
