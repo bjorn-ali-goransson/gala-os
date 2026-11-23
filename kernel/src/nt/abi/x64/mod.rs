@@ -547,20 +547,13 @@ fn unhandled_note(call: &mut Call<'_>) -> NtStatus {
     for (i, p) in note.params.iter_mut().take(kept).enumerate() {
         *p = tri!(call.read_u64(record + 0x20 + 8 * i as u64));
     }
-    // A C++ throw: what was thrown, read now (the object and the
-    // runtime's type data are gone once the process has ended).
-    if code == crate::nt::crashreport::CXX_EXCEPTION {
-        let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
-        let params = &note.params[..note.params_len.min(4)];
-        note.cxx = crate::nt::crashreport::CxxThrow::decode(params, x86, &read);
-    }
-    // A delay-load failure: the DLL and function it was looking for.
-    use crate::nt::crashreport::{DELAY_DLL, DELAY_PROC, DelayLoad};
-    if matches!(code, DELAY_DLL | DELAY_PROC) && note.params_len >= 1 {
-        let info = note.params[0];
-        let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
-        note.delay = DelayLoad::decode(info, x86, &read);
-    }
+    // What the parameters describe, for the codes a report knows (a C++
+    // throw's thrown type, a delay load's DLL and function), read now:
+    // the thrown object, the runtime's type data and the DelayLoadInfo
+    // are all gone once the process has ended. The one decoder serves
+    // both ABIs (crashreport::decode_params).
+    let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
+    crate::nt::crashreport::decode_params(&mut note, &read);
     note.flags = tri!(call.read_u64(record)).wrapping_shr(32) as u32;
     note.walk = crate::nt::abi::walk_of(call, walk);
     // 32-bit code: the SEH registrations the dispatcher walked (the list

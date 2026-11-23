@@ -7584,8 +7584,16 @@ among the slowest hand-offs.
    reach and two threads' exceptions do not write over one another: the
    report is written from the notes of the thread whose exception ends
    the process, moved into the process as it is ended, and another
-   thread's unhandled exception gets a line saying the report is not
-   written from it (scenario `crash_unhandled_both`). The process's own
+   thread's unhandled exception gets a line of its own saying the report
+   is not written from it, carrying the same clause the withdrawal does
+   -- what the parameters describe (the verb and address of an access
+   violation, the type a C++ throw held, the DLL and the function or
+   ordinal a delay load wanted) and where it happened -- because the
+   code and its name alone leave a reader of the second line looking
+   for nothing in particular (scenarios `crash_unhandled_both` and
+   `crash_delay`). What the parameters mean is decoded in one place for
+   both ABIs (`nt::crashreport::decode_params`), so an ARM64 note says
+   as much as an x64 one. The process's own
    slots are what is left for the kernel's own context and for a thread
    whose notes could not be allocated, where one slot serves every
    thread and a second exception does write over the first -- which it

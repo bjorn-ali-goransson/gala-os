@@ -468,8 +468,9 @@ pub(in crate::nt) fn nt_continue(call: &mut Call<'_>) -> NtStatus {
 /// exception no handler took before the top-level filter runs (which may
 /// end the process with a status of its own), so the crash report still
 /// describes it; a null record withdraws it (the filter continued
-/// execution). As x64's, from ARM64's CONTEXT; a C++ throw's and a
-/// delay load's details are x64's only yet.
+/// execution). As x64's, from ARM64's CONTEXT, and what the parameters
+/// describe is decoded in the one place both ABIs use
+/// (crashreport::decode_params).
 pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     let record = match call.arg(0) {
         Ok(v) => v,
@@ -531,6 +532,11 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
             None => break,
         }
     }
+    // What the parameters describe, for the codes a report knows (a C++
+    // throw's thrown type, a delay load's DLL and function), read while
+    // the process still runs, as x64 does: the one decoder serves both.
+    let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
+    crate::nt::crashreport::decode_params(&mut note, &read);
     note.walk = crate::nt::abi::walk_of(call, walk);
     crate::nt::crashreport::keep_unhandled(&call.process, note);
     NtStatus::SUCCESS
