@@ -6571,8 +6571,13 @@ The kernel's side of OBSERVABILITY.md's dumps; crash reports are under
   with CPU 1 in `write_samples` for 20 s). A CPU's idle state for the choice is read lock-free
   (`sched::cpu_idle`, set at each switch). A QEMU dump NMI that arrives
   while a sample NMI is pending merges with it: that CPU misses the
-  dump (the dump waits for it half a second). With one CPU the tick
-  samples itself.
+  dump (the dump waits for it half a second). **Invariant: at most one
+  sample NMI is in flight per CPU**: a tick that finds the flag still
+  set sends none (counted, "not asked" in the `events:` line). Under KVM
+  an NMI can wait for its vCPU longer than a sample period; with two in
+  flight the first took the flag, the second found it clear and was
+  taken for a dump, whose half-second wait swallowed `events_sample`'s
+  probe. With one CPU the tick samples itself.
 - Invariants: NMI code uses only atomics and `try_lock` (it may interrupt
   any lock holder, the console's too, so it prints with
   `console::emergency_line`); diagnostics that peek at locks there use
