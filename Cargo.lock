@@ -37,6 +37,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "advapi32"
 version = "0.1.0"
 dependencies = [
+ "gala_lock",
  "gala_stubs",
  "ntrt",
 ]
@@ -818,6 +819,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "etwlock_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "etwraw_test"
 version = "0.1.0"
 dependencies = [
@@ -956,6 +964,10 @@ version = "0.1.0"
 
 [[package]]
 name = "gala_heap"
+version = "0.1.0"
+
+[[package]]
+name = "gala_lock"
 version = "0.1.0"
 
 [[package]]

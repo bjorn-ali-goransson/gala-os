@@ -28,8 +28,19 @@
 //! Windows answers (measured on the pinned build): a write on an
 //! unregistered handle is ERROR_INVALID_HANDLE where a write on a live
 //! one is ERROR_SUCCESS and goes nowhere.
+//!
+//! Nothing a program's write path reaches takes a lock. The list is
+//! only ever added to, a block is never freed, and the fields a write
+//! reads are either written before the block is published or atomic, so
+//! a walk reads what it finds and never waits. That is not a
+//! refinement: Office suspends its own threads to walk their stacks
+//! while the process traces, so a lock here is one a stopped thread can
+//! be holding, and every other writer would then spin for good -- which
+//! is where Word's main thread sat (`user/etwlock_test`, ROADMAP OF).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+use gala_lock::Lock;
 
 /// TRACEHANDLE values for the classic (MOF) providers at the end of this
 /// file: never 0 (0 is what failed registration leaves).
@@ -56,79 +67,98 @@ unsafe extern "system" {
 
 /// One `EventRegister`: a provider this process registered, and the block
 /// whose address is the REGHANDLE the program holds. A block is never
-/// freed -- an unregistered one is taken by the next registration -- so
-/// the memory is the most providers a process held at once (20 for a Word
-/// startup) and no stale handle is ever a live block of something else.
+/// freed -- an unregistered one is taken by the next registration of
+/// that same provider -- so the memory is the most providers a process
+/// held at once (20 for a Word startup) and no stale handle is ever a
+/// live block of something else.
 struct Provider {
-    /// The next block, live or not: the list is only ever added to.
+    /// The next block, live or not: the list is only ever added to, and
+    /// a block is published after this and `guid` are written, so a
+    /// walk that holds no lock never reads a half-made one.
     next: *mut Provider,
     /// Whether a program holds this handle now. EventUnregister clears
     /// it, and every call on it afterwards is ERROR_INVALID_HANDLE.
-    live: bool,
+    live: AtomicBool,
     /// Whether this provider's traits have been set: Windows answers a
     /// second EventProviderSetTraits ERROR_GEN_FAILURE.
-    traits: bool,
+    traits: AtomicBool,
     /// The provider the registration is for: what a session names when
     /// it enables one, and what an event is then weighed against.
+    ///
+    /// Written before the block is published and never again: a block
+    /// a program let go of is taken only by a registration of the same
+    /// provider (`take_block`). That is what lets a write read it
+    /// without a lock -- the sixteen bytes are this block's for good,
+    /// so there is no half-written id to read.
     guid: [u8; 16],
     /// The program's enable callback and the context it registered
     /// with, 0 for a registration that gave none. Held as addresses
     /// because a block is plain memory under a lock the callback must
-    /// not run beneath.
-    callback: usize,
-    context: usize,
+    /// not run beneath, and atomic because a walk reads them while
+    /// another registration may be taking the block.
+    callback: AtomicUsize,
+    context: AtomicUsize,
 }
 
-/// The newest block (0: none yet).
+/// The newest block (0: none yet). Stored with Release once a fresh
+/// block's own fields are written, and loaded with Acquire by every
+/// walk, so a walk that holds no lock sees a finished block or no
+/// block at all.
 static HEAD: AtomicUsize = AtomicUsize::new(0);
-/// Held across a walk of the list and a block's own fields.
-static LOCK: AtomicBool = AtomicBool::new(false);
 
-/// `f` with the provider list held.
-fn with_list<R>(f: impl FnOnce() -> R) -> R {
-    while LOCK.swap(true, Ordering::Acquire) {
-        core::hint::spin_loop();
-    }
-    let r = f();
-    LOCK.store(false, Ordering::Release);
-    r
-}
+/// Held while the list is added to and while a block is taken for a new
+/// registration. Nothing a write reaches takes it, and no call into a
+/// program's code runs beneath it -- an enable callback may register a
+/// provider of its own.
+static LOCK: Lock = Lock::new(b"advapi32.dll!the provider list");
 
-/// `f` with the registration `handle` names, or `None` when no live
-/// registration has that address. The walk is over the providers this
-/// process registered, on the calls a program makes once a provider and
-/// on writes that go nowhere -- a provider no session enabled builds no
-/// payload, so nothing on a drawing loop is behind it.
-fn with_provider<R>(handle: u64, f: impl FnOnce(&mut Provider) -> R) -> Option<R> {
-    with_list(|| {
-        let mut at = HEAD.load(Ordering::Relaxed);
-        while at != 0 {
-            // SAFETY: a block this DLL allocated and never frees. The
-            // handle is compared, never dereferenced.
-            let p = unsafe { &mut *(at as *mut Provider) };
-            if at as u64 == handle && p.live {
-                return Some(f(p));
-            }
-            at = p.next as usize;
+/// The registration `handle` names, or `None` when no live registration
+/// has that address.
+///
+/// No lock: this is the first thing every `EventWrite` asks, and a
+/// writer must not wait for a thread that may be suspended. A block is
+/// never freed and its `next` and `guid` are written before it is
+/// published, so the walk reads what it finds; `live` is atomic because
+/// `EventUnregister` and a new registration change it underfoot. A
+/// handle whose block is taken again between the two loads below reads
+/// as the registration it has become, which is what a program that
+/// writes on a handle it let go of asks for.
+fn find(handle: u64) -> Option<&'static Provider> {
+    let mut at = HEAD.load(Ordering::Acquire);
+    while at != 0 {
+        // SAFETY: a block this DLL allocated and never frees, published
+        // only once its own fields were written. The handle is
+        // compared, never dereferenced.
+        let p = unsafe { &*(at as *const Provider) };
+        if at as u64 == handle && p.live.load(Ordering::Acquire) {
+            return Some(p);
         }
-        None
-    })
+        at = p.next as usize;
+    }
+    None
 }
 
 /// A block for a new registration: one a program let go of, else a fresh
 /// one on the list. 0 when there is no memory for it.
 fn take_block(guid: &[u8; 16], callback: usize, context: usize) -> usize {
-    with_list(|| {
-        let mut at = HEAD.load(Ordering::Relaxed);
+    LOCK.with(|| {
+        let mut at = HEAD.load(Ordering::Acquire);
         while at != 0 {
             // SAFETY: ours, never freed.
-            let p = unsafe { &mut *(at as *mut Provider) };
-            if !p.live {
-                p.live = true;
-                p.traits = false;
-                p.guid = *guid;
-                p.callback = callback;
-                p.context = context;
+            let p = unsafe { &*(at as *const Provider) };
+            // Only a block that was this same provider's: a block's
+            // guid never changes, which is what lets a write read it
+            // with no lock. A registration of another provider gets a
+            // block of its own, so the memory is the most providers
+            // this process ever held at once (20 for a Word startup)
+            // rather than the most it registered.
+            if !p.live.load(Ordering::Relaxed) && p.guid == *guid {
+                p.traits.store(false, Ordering::Relaxed);
+                p.callback.store(callback, Ordering::Relaxed);
+                p.context.store(context, Ordering::Relaxed);
+                // Last, and with Release: a walk that reads `live` with
+                // Acquire sees the callback this registration gave.
+                p.live.store(true, Ordering::Release);
                 return at;
             }
             at = p.next as usize;
@@ -139,16 +169,19 @@ fn take_block(guid: &[u8; 16], callback: usize, context: usize) -> usize {
         if fresh.is_null() {
             return 0;
         }
-        // SAFETY: a zeroed block of exactly this size.
+        // SAFETY: a zeroed block of exactly this size, which no other
+        // thread can reach until it is published below.
         unsafe {
             (*fresh).next = HEAD.load(Ordering::Relaxed) as *mut Provider;
-            (*fresh).live = true;
-            (*fresh).traits = false;
             (*fresh).guid = *guid;
-            (*fresh).callback = callback;
-            (*fresh).context = context;
+            (*fresh).traits = AtomicBool::new(false);
+            (*fresh).callback = AtomicUsize::new(callback);
+            (*fresh).context = AtomicUsize::new(context);
+            (*fresh).live = AtomicBool::new(true);
         }
-        HEAD.store(fresh as usize, Ordering::Relaxed);
+        // Release: a walk that loads HEAD with Acquire reads a block
+        // whose own fields are all written.
+        HEAD.store(fresh as usize, Ordering::Release);
         fresh as usize
     })
 }
@@ -190,24 +223,19 @@ pub extern "system" fn EventRegister(
 }
 
 /// What a session asks of `guid`, told to every live registration for
-/// it, newest first. The list is only ever added to and a block's
-/// `next` never changes once set, so the walk needs the lock only to
-/// read a block's own fields -- and the callback, which is the
-/// program's code and may register a provider of its own, runs with no
-/// lock held.
+/// it, newest first. The walk takes no lock, like every other walk
+/// here; the callback, which is the program's code and may register a
+/// provider of its own, runs with no lock held either.
 pub(crate) fn tell(guid: &[u8; 16], is_enabled: u32, demands: crate::trace::Demands) {
-    let mut at = HEAD.load(Ordering::Relaxed);
+    let mut at = HEAD.load(Ordering::Acquire);
     while at != 0 {
-        let (next, told) = with_list(|| {
-            // SAFETY: ours, never freed.
-            let p = unsafe { &mut *(at as *mut Provider) };
-            let mine = p.live && p.guid == *guid && p.callback != 0;
-            (p.next as usize, if mine { Some((p.callback, p.context)) } else { None })
-        });
-        if let Some((callback, context)) = told {
-            call_back(callback, context, is_enabled, demands);
+        // SAFETY: ours, never freed, published whole.
+        let p = unsafe { &*(at as *const Provider) };
+        let callback = p.callback.load(Ordering::Relaxed);
+        if p.live.load(Ordering::Acquire) && p.guid == *guid && callback != 0 {
+            call_back(callback, p.context.load(Ordering::Relaxed), is_enabled, demands);
         }
-        at = next;
+        at = p.next as usize;
     }
 }
 
@@ -285,8 +313,13 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// handle that was never a registration's gets as well.
 #[unsafe(no_mangle)]
 pub extern "system" fn EventUnregister(handle: u64) -> u32 {
-    match with_provider(handle, |p| p.live = false) {
-        Some(()) => 0,
+    match find(handle) {
+        // Release: what the registration wrote is in view of whichever
+        // registration takes this block next.
+        Some(p) => {
+            p.live.store(false, Ordering::Release);
+            0
+        }
         None => ERROR_INVALID_HANDLE,
     }
 }
@@ -297,7 +330,7 @@ pub extern "system" fn EventUnregister(handle: u64) -> u32 {
 /// is FALSE with no row, which is what Windows answers, and so is a
 /// handle a program has let go of.
 fn answer(handle: u64, level: u8, keyword: u64, rows: [&[u8]; 3]) -> u8 {
-    let Some(guid) = with_provider(handle, |p| p.guid) else {
+    let Some(guid) = find(handle).map(|p| p.guid) else {
         return 0;
     };
     match crate::trace::demands(&guid) {
@@ -369,7 +402,7 @@ fn write(handle: u64, descriptor: *const u8, count: u32, data: *const u8, rows: 
     if descriptor.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    let Some(guid) = with_provider(handle, |p| p.guid) else {
+    let Some(guid) = find(handle).map(|p| p.guid) else {
         return ERROR_INVALID_HANDLE;
     };
     // SAFETY: the caller's descriptor, 16 bytes by definition: Level at
@@ -404,7 +437,7 @@ fn write(handle: u64, descriptor: *const u8, count: u32, data: *const u8, rows: 
 /// TraceLogging's (provider metadata, event metadata, payload) and a
 /// bare string is none of them. The row is the account of it.
 fn wrote_string(handle: u64, level: u8, keyword: u64, rows: [&[u8]; 2]) -> u32 {
-    let Some(guid) = with_provider(handle, |p| p.guid) else {
+    let Some(guid) = find(handle).map(|p| p.guid) else {
         return ERROR_INVALID_HANDLE;
     };
     match crate::trace::demands(&guid) {
@@ -512,18 +545,18 @@ pub extern "system" fn EventSetInformation(
             _ => ERROR_NOT_SUPPORTED,
         };
     }
-    let answer = with_provider(handle, |p| {
+    let answer = find(handle).map(|p| {
         if info.is_null() || length < 3 {
             return ERROR_INVALID_PARAMETER;
         }
-        if p.traits {
+        // A second one is refused, and the first of two at once wins:
+        // the swap is what decides which.
+        if p.traits.swap(true, Ordering::Relaxed) {
             return ERROR_GEN_FAILURE;
         }
-        p.traits = true;
         0
     });
     match answer {
-        // The row is written outside the list's lock: it is a system call.
         Some(0) => {
             note_traits(info, length);
             0
