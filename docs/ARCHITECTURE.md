@@ -2307,7 +2307,8 @@ Invariants:
   the APC, which is what Office's startup depends on (`apc_test`,
   ROADMAP OF). Every queued APC carries **who queued it** (`ApcBy`): the
   thread (pid, tid; (0, 0) for the kernel's own code, an I/O completion,
-  a timer), the return address above that thread's system-call stub and
+  a timer), the return address above that thread's system-call stub --
+  the wrapper's, for a program that queues through `QueueUserAPC` -- and
   the uptime of the call, filled in where it is queued and not where the
   APC was built. The thread keeps the last APC it was given after that
   APC has left the queue, and the exception's note takes that mark as it

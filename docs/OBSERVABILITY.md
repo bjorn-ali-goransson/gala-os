@@ -1247,10 +1247,14 @@ Scenario `suspend_test`.
 An APC is how one thread makes another run code, so an exception raised
 in one is the queueing thread's decision and not the dying thread's:
 **Office's shared code ends a thread this way.** It suspends the victim
-from `Mso30win32client.dll+0x8e4a70`, queues a user APC whose routine --
-`+0x8e4aac`, the same function 0x3c bytes on -- raises 0xe0000002 in the
-victim's context, and resumes it (ROADMAP OF). The victim's own stack
-and last calls then describe the wait it was in, which is what 24 frames
+from `Mso30win32client.dll+0x8e4a70`, queues a user APC whose routine is
+`Mso30win32client.dll+0x8e4ac0` and raises 0xe0000002 in the victim's
+context, and resumes it (ROADMAP OF). The routine's address comes from
+the record below and not from the unwind, which is the point: the
+unwind's frame above the raise is `+0x8e4aac`, *before* the routine's
+own entry, so the two are different functions and reading the routine
+off the stack would have named the wrong one. The victim's own stack and
+last calls describe the wait it was in instead, which is what 24 frames
 of Word's crash report were.
 
 So every queued APC carries who queued it, and the thread keeps the last
@@ -1279,6 +1283,14 @@ crash report:   thread 8's last calls, oldest first: ..., NtWriteFile=0x00000000
   upgrade, whose queuer is not carried.
 - An APC to a thread of another process is refused, so the queuer's
   address is always placed by this process's own images.
+- The address is the one the system call returns to, so a program that
+  queues through a wrapper is named by the wrapper. Word's report reads
+  `called from 0x3ff7fff8b67b (kernel32.dll+0x4b67b)` -- gala's own
+  `QueueUserAPC` -- and the code that decided is a frame further up.
+  Where the wrapper is the answer the record gives, the whole stack of
+  that call is the next question, and `stack_at=NtQueueApcThreadEx2`
+  with `stack_from=` on the deciding module ("Stack captures" below) is
+  what asks it.
 - The queueing thread's last calls come from the flight recorder, by
   tid, exactly as the dying thread's do; a thread whose calls have
   fallen out of the ring has no line.
@@ -1293,6 +1305,17 @@ Scenario `crash_apc`: a worker waits alertably, the main thread closes a
 handle that is not one and queues an APC that raises a code nothing
 handles, and the report must name the main thread, where it queued from,
 and that failing close among its last calls.
+
+Word's own death reads (`office_word`, ROADMAP OF):
+
+```
+crash report:   it was last given a user APC: routine 0x3ff7f8734ac0 (Mso30win32client.dll+0x8e4ac0), queued by pid 12 tid 272, called from 0x3ff7fff8b67b (kernel32.dll+0x4b67b) at 40599 ms
+crash report:   thread 272's last calls, oldest first: NtProtectVirtualMemory=0x00000000, NtQueueApcThreadEx2=0x00000000, NtResumeThread=0x00000000, NtSetInformationThread=0xc0000022, NtWaitForSingleObject=0x00000000, NtQueryInformationProcess=0x00000000, NtDelayExecution=0x00000000
+```
+
+-- the queue and the resume of the fail-fast, in that order, and a
+refused `NtSetInformationThread` after them that nothing else in the run
+records.
 
 ### Stack captures (`stack_at=`, `stack_from=`, `stack_words=`)
 
