@@ -1291,7 +1291,7 @@ it with `qemu-system-aarch64 -machine virt` (`qemu_aarch64`): the pinned
 QEMU's own `edk2-aarch64-code.fd` (or Ubuntu's AAVMF, `qemu-efi-aarch64`,
 or `AAVMF_CODE`/`AAVMF_VARS`), the image on a virtio-scsi CD, semihosting
 on for the kernel's exit. Software emulation only (KVM would need an
-ARM64 host); about 8 s to the kernel, most of it the firmware.
+ARM64 host); about 4 s to the kernel, most of it the firmware.
 
 - The serial log and verdicts are as x86-64's. There is no event stream
   and no firmware or phase log (no ISA debug consoles on `virt`).
@@ -1303,6 +1303,18 @@ ARM64 host); about 8 s to the kernel, most of it the firmware.
   PATH. Binutils' x86-64 build cannot read an aarch64 ELF.
 - While a phase is unported, its scenario ends the boot just before it
   (`stop_after=<phase>`); porting the next phase moves that on.
+- The firmware connects only the CD: the `scsi-cd` device carries
+  `bootindex=0` (`add_aarch64_cd`), and with a boot order in fw_cfg
+  ArmVirtQemu's boot manager connects just the devices it names. Without
+  one it connects every device, and its own network stack drives a
+  scenario's virtio-net card before the kernel (DHCP, IPv6 duplicate
+  address checks, router solicitations), where a send once crashed the
+  firmware's VirtioNetDxe (data abort at address 8, the serial log ends
+  in its `Synchronous Exception` dump, no boot phases). To see what the
+  firmware sends on the card, boot the firmware alone with
+  `-netdev user,id=n0 -device virtio-net-pci,netdev=n0 -object
+  filter-dump,id=f0,netdev=n0,file=fw.pcap`: with the boot order the
+  capture holds no packet (24 bytes, the header).
 
 ### QEMU
 
@@ -1408,7 +1420,12 @@ Run a program directly:
   host has), whose timeout(1) kills the program at the deadline instead
   of sending the chosen signal first and waiting, which left every hung
   run without the dump it is read from. A host tool's flavour must not
-  decide whether a hang explains itself.
+  decide whether a hang explains itself -- nor how the gate was
+  launched: a shell that starts a job in the background ignores SIGQUIT
+  (`grep SigIgn /proc/self/status` says so), a program cannot trap a
+  signal that was ignored when it started, and so every run under
+  `cargo xtask test &` inherited an unanswerable dump request until
+  `plain_dump_signal` gave each run the plain disposition.
 - A failure that reproduces in gala-um is in the NT layer or the
   user-mode DLLs; one that does not points at the kernel's machine code
   (paging, switches, interrupts) or at the emulator.
@@ -2282,8 +2299,12 @@ numbers, 0x7f.., fail there).
   `-D__USE_MINGW_ANSI_STDIO=0` for msvcrt's stdio); its scenario ships
   `x86/msvcrt.dll` to SysWOW64 too. mingw's i686 headers define
   `_USE_32BIT_TIME_T` (time_t is 32 bits and `time()` imports msvcrt's
-  `time`), make `setjmp` `_setjmp3(buf, NULL)`, reach stdin/stdout
-  through the `_iob` data import, and link mingw's own `_fpreset`
+  `time`), make `setjmp` `_setjmp3(buf, NULL)`, reach stdin/stdout,
+  MB_CUR_MAX and the environment through msvcrt's accessor functions
+  (`__p__iob`, `__p___mb_cur_max`, `__p___initenv`, beside `__p__fmode`
+  and `__p__commode`) where its x64 headers take the data exports
+  (`_iob` is still exported for a program built against an older
+  runtime), and link mingw's own `_fpreset`
   (fninit: the x87 at 64-bit precision, `_controlfp(0, 0)` 0x8001f, not
   msvcrt's 0x9001f): a test of msvcrt's `_fpreset` calls it through
   GetProcAddress.
@@ -4137,6 +4158,17 @@ for, with an optional `+<secs>` for a wait after it, and its file is
 named after the line (`office_word-desktop-shown-window-1s.png`):
 
     XTASK_SHOTS='desktop: shown window+1' cargo xtask boot-test office_word
+
+The moments nobody can name in advance are the kernel's to ask for:
+`hook=window=shot` on the kernel command line takes a screendump as each
+top-level window becomes visible, `+<secs>` after it if asked, and
+`hook=window/<text>:<n>=shot` only of the windows whose program or title
+holds the text, `n` at most. The files are named after the program and
+the window (`hook_test-hook-hook-test-exe-w4.png`), so a run with no idea
+when its windows go up still comes back with a picture of each
+(OBSERVABILITY "Hooks"; scenarios `hook_test`, `hook_match_test`):
+
+    cargo xtask boot-test office_word   # with hook=window=shot+1 in its cmdline
 
 A second guessed from the outside is missed as often as it is caught --
 Word's splash lives about 2 s of a 90 s run, and the run is as fast as

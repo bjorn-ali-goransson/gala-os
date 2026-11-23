@@ -402,6 +402,14 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(text) = cmdline.value("stack_words") {
         nt::stack_at::scan_words(text);
     }
+    // `hook=<event>[/<text>][:<n>]=<action>[+<secs>]`: what the kernel
+    // does when something happens on the screen, where the host cannot
+    // know in advance that it will (nt::hooks). Written more than once
+    // to arm more than one hook, so it reads every word and not the
+    // last.
+    for spec in cmdline.values("hook") {
+        nt::hooks::arm(spec);
+    }
     // `trace_from=<dll>!<Interface>::<Method>[:<n>]`: every call a
     // program makes into one of gala's DLLs, from the first time it
     // reaches that method (nt::tracecall). Needs `events=call`.

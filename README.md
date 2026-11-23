@@ -431,6 +431,7 @@ used (the full list is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 | `noscreen` | keep the screen console off (faster under emulation) |
 | `trace` | log every system call and user-mode fault |
 | `events=syscall,image,thread,process,fault` or `all` | a JSON event stream on the debug console |
+| `hook=window=shot+1` | a screendump as each top-level window becomes visible, 1 s after it does |
 | `failpoint=heap:every:97 failseed=7` | inject failures (debug builds) |
 | `record`, `replay=<file>` | record or replay a run's outside inputs |
 | `handover=<n>` | hand the machine to a fresh kernel n times at the end |

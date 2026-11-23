@@ -418,8 +418,7 @@ pub fn complete_count(r: Request, status: NtStatus, count: u64) {
     // ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED...): a request that
     // failed in its call never gets here (the caller reports it).
     if let Some((thread, apc)) = &r.apc {
-        reserved
-            .queue_apc(thread, UserApc { routine: apc.routine, args: apc.args, special: false });
+        reserved.queue_apc(thread, UserApc::new(apc.routine, apc.args, false));
     }
     if let Some(done) = &r.done {
         wait::set_signal(done, 1);

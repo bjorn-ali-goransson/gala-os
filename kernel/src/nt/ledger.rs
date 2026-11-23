@@ -353,6 +353,11 @@ pub fn user_what(code: u32) -> &'static str {
         7 => "load failed",
         8 => "missing import",
         9 => "reached",
+        // A wait a DLL's own lock took: the row names the lock, and the
+        // suffix says whether the thread waited for it, found another
+        // thread holding it, or re-entered it (`user/gala_lock`). It is
+        // what a DLL writes down instead of spinning silently.
+        10 => "waited",
         // 5 and anything else: a gap a DLL reports without a kind of its
         // own (gala's DLLs pass 5).
         _ => "other",

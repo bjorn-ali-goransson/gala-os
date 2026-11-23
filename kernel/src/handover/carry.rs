@@ -1727,7 +1727,7 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize, u64), Failed> {
         let mut apcs = Vec::new();
         for mut a in apc_table.iter() {
             let [routine, a0, a1, a2, special] = programs::read_apc(&mut a);
-            apcs.try_push(UserApc { routine, args: [a0, a1, a2], special: special != 0 })
+            apcs.try_push(UserApc::carried(routine, [a0, a1, a2], special != 0))
                 .map_err(no_memory)?;
         }
         let o = thread::adopt(thread::Adopted {
@@ -1808,7 +1808,7 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize, u64), Failed> {
             let apc = match get(q.apc_thread)? {
                 Some(thread) => {
                     let [routine, a0, a1, a2] = q.apc;
-                    Some((thread, UserApc { routine, args: [a0, a1, a2], special: false }))
+                    Some((thread, UserApc::carried(routine, [a0, a1, a2], false)))
                 }
                 None => None,
             };

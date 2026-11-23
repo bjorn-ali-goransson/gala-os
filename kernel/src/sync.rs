@@ -345,40 +345,59 @@ pub mod lockdep {
     }
 
     /// The edge table is open-addressed: a key's slots start at its hash
-    /// and go on until it or an empty slot (keys are never removed).
+    /// and go on until it or an empty slot (keys are never removed). The
+    /// probes are plain loops: lockdep runs at every lock taken, and the
+    /// kernel's debug build (opt-level 1) does not flatten iterator
+    /// chains, which made lockdep half of the kernel's time in lx_gimp.
     #[cfg(debug_assertions)]
-    fn slots(key: u32) -> impl Iterator<Item = &'static AtomicU32> {
-        let start = (key.wrapping_mul(0x9e37_79b1) as usize) % MAX_EDGES;
-        (0..MAX_EDGES).map(move |i| &EDGES[(start + i) % MAX_EDGES])
+    const _: () = assert!(MAX_EDGES.is_power_of_two());
+
+    #[cfg(debug_assertions)]
+    fn first_slot(key: u32) -> usize {
+        key.wrapping_mul(0x9e37_79b1) as usize & (MAX_EDGES - 1)
     }
 
     #[cfg(debug_assertions)]
     fn edge_seen(a: u16, b: u16) -> bool {
         let key = (u32::from(a) << 16) | u32::from(b);
-        for e in slots(key) {
-            match e.load(Ordering::Acquire) {
+        let mut i = first_slot(key);
+        for _ in 0..MAX_EDGES {
+            match EDGES[i].load(Ordering::Acquire) {
                 0 => return false,
                 k if k == key => return true,
-                _ => {}
+                _ => i = (i + 1) & (MAX_EDGES - 1),
             }
         }
         false
     }
 
+    /// Records "a held when b was taken". Nearly every order has been
+    /// seen before: it is read first, and only an empty slot is
+    /// claimed (a compare-exchange on every take would have each CPU
+    /// writing the table's lines).
     #[cfg(debug_assertions)]
     fn add_edge(a: u16, b: u16) {
         let key = (u32::from(a) << 16) | u32::from(b);
-        for e in slots(key) {
-            match e.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => return,
-                Err(k) if k == key => return,
-                Err(_) => {}
+        let mut i = first_slot(key);
+        for _ in 0..MAX_EDGES {
+            let e = &EDGES[i];
+            match e.load(Ordering::Acquire) {
+                k if k == key => return,
+                0 => match e.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire) {
+                    Ok(_) => return,
+                    Err(k) if k == key => return,
+                    Err(_) => {}
+                },
+                _ => {}
             }
+            i = (i + 1) & (MAX_EDGES - 1);
         }
     }
 
     /// The locks one CPU (one host thread, in tests and gala-um) holds:
-    /// the class in each slot and the thread that took it. The holder is
+    /// the class in each slot and the thread that took it, packed in the
+    /// first `depth` slots (a release moves the last into the gap), so
+    /// that a take, a release and the checks read only the held ones. The holder is
     /// kept because the slots belong to the CPU, not to the thread: a
     /// lock left held across a wait or a switch is found by whatever runs
     /// next, and only the holder says whose it was.
@@ -386,6 +405,7 @@ pub mod lockdep {
     struct Slots<'a> {
         class: &'a [AtomicU16; MAX_HELD],
         holder: &'a [AtomicU64; MAX_HELD],
+        depth: &'a AtomicU8,
     }
 
     #[cfg(debug_assertions)]
@@ -406,13 +426,63 @@ pub mod lockdep {
             self.class[i].store(0, Ordering::Relaxed);
             self.holder[i].store(0, Ordering::Relaxed);
         }
+
+        /// How many slots are taken (slots 0..depth).
+        fn depth(&self) -> usize {
+            usize::from(self.depth.load(Ordering::Relaxed)).min(MAX_HELD)
+        }
+
+        /// The first held lock that `keep` accepts (class, holder).
+        fn find(&self, keep: impl Fn(u16, u64) -> bool) -> Option<(u16, u64)> {
+            let mut i = 0;
+            while i < self.depth() {
+                let (class, by) = self.get(i);
+                if keep(class, by) {
+                    return Some((class, by));
+                }
+                i += 1;
+            }
+            None
+        }
+
+        /// Takes the next slot; false when all are taken.
+        fn push(&self, class: u16, holder: u64) -> bool {
+            let depth = self.depth();
+            if depth == MAX_HELD {
+                return false;
+            }
+            self.take(depth, class, holder);
+            self.depth.store(depth as u8 + 1, Ordering::Relaxed);
+            true
+        }
+
+        /// Frees the latest slot holding `class`, the last slot moving
+        /// into it.
+        fn remove(&self, class: u16) {
+            let depth = self.depth();
+            let mut i = depth;
+            while i > 0 {
+                i -= 1;
+                if self.get(i).0 == class {
+                    let last = depth - 1;
+                    if i != last {
+                        let (moved, by) = self.get(last);
+                        self.take(i, moved, by);
+                    }
+                    self.free(last);
+                    self.depth.store(last as u8, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
     }
 
     #[cfg(all(debug_assertions, not(any(test, feature = "hosted"))))]
     mod held {
         use super::{MAX_HELD, Slots};
-        use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
+        use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
         const CPUS: usize = crate::arch::smp::MAX_CPUS;
+        static DEPTH: [AtomicU8; CPUS] = [const { AtomicU8::new(0) }; CPUS];
         static HELD: [[AtomicU16; MAX_HELD]; CPUS] =
             [const { [const { AtomicU16::new(0) }; MAX_HELD] }; CPUS];
         static HOLDER: [[AtomicU64; MAX_HELD]; CPUS] =
@@ -431,7 +501,7 @@ pub mod lockdep {
         /// IrqMutex is held, so the CPU does not change under it).
         pub fn with<R>(f: impl FnOnce(&Slots<'_>) -> R) -> R {
             let cpu = here();
-            f(&Slots { class: &HELD[cpu], holder: &HOLDER[cpu] })
+            f(&Slots { class: &HELD[cpu], holder: &HOLDER[cpu], depth: &DEPTH[cpu] })
         }
 
         /// The thread taking a lock here: whoever the scheduler last put
@@ -461,10 +531,14 @@ pub mod lockdep {
     #[cfg(all(debug_assertions, any(test, feature = "hosted")))]
     mod held {
         use super::{MAX_HELD, Slots};
-        use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+        use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
         std::thread_local! {
-            static HELD: ([AtomicU16; MAX_HELD], [AtomicU64; MAX_HELD]) = const {
-                ([const { AtomicU16::new(0) }; MAX_HELD], [const { AtomicU64::new(0) }; MAX_HELD])
+            static HELD: ([AtomicU16; MAX_HELD], [AtomicU64; MAX_HELD], AtomicU8) = const {
+                (
+                    [const { AtomicU16::new(0) }; MAX_HELD],
+                    [const { AtomicU64::new(0) }; MAX_HELD],
+                    AtomicU8::new(0),
+                )
             };
             /// This host thread's number: here a kernel thread is a host
             /// thread, so the holder needs no word from the scheduler.
@@ -474,7 +548,7 @@ pub mod lockdep {
         static NEXT: AtomicU64 = AtomicU64::new(0);
 
         pub fn with<R>(f: impl FnOnce(&Slots<'_>) -> R) -> R {
-            HELD.with(|h| f(&Slots { class: &h.0, holder: &h.1 }))
+            HELD.with(|h| f(&Slots { class: &h.0, holder: &h.1, depth: &h.2 }))
         }
 
         pub fn current() -> u64 {
@@ -508,7 +582,7 @@ pub mod lockdep {
         }
         let me = held::current();
         held::with(|slots| {
-            for i in 0..MAX_HELD {
+            for i in 0..slots.depth() {
                 let (a, by) = slots.get(i);
                 if a == 0 || a == class {
                     continue;
@@ -527,13 +601,8 @@ pub mod lockdep {
                 }
                 add_edge(a, class);
             }
-            match (0..MAX_HELD).find(|&i| slots.get(i).0 == 0) {
-                Some(free) => {
-                    slots.take(free, class, me);
-                    class
-                }
-                None => 0, // nested too deep to track
-            }
+            // Nested too deep: untracked.
+            if slots.push(class, me) { class } else { 0 }
         })
     }
 
@@ -546,11 +615,7 @@ pub mod lockdep {
     pub fn release(class: u16) {
         #[cfg(debug_assertions)]
         if class != 0 {
-            held::with(|slots| {
-                if let Some(i) = (0..MAX_HELD).rev().find(|&i| slots.get(i).0 == class) {
-                    slots.free(i);
-                }
-            });
+            held::with(|slots| slots.remove(class));
         }
         #[cfg(not(debug_assertions))]
         let _ = class;
@@ -563,8 +628,7 @@ pub mod lockdep {
     pub fn none_held(class: u16) {
         #[cfg(all(debug_assertions, not(any(test, feature = "hosted"))))]
         if ON.load(Ordering::Acquire) {
-            let still =
-                held::with(|slots| (0..MAX_HELD).map(|i| slots.get(i)).find(|&(c, _)| c != 0));
+            let still = held::with(|slots| slots.find(|c, _| c != 0));
             if let Some((other, by)) = still {
                 // `by` is the thread that took the lock and `me` the one
                 // releasing: when they differ, the lock was held across a
@@ -595,8 +659,7 @@ pub mod lockdep {
     pub fn none_held_at_switch() {
         #[cfg(debug_assertions)]
         if ON.load(Ordering::Acquire) {
-            let still =
-                held::with(|slots| (0..MAX_HELD).map(|i| slots.get(i)).find(|&(c, _)| c != 0));
+            let still = held::with(|slots| slots.find(|c, _| c != 0));
             if let Some((class, by)) = still {
                 panic!(
                     "lockdep: {} gives up its CPU while holding {} (taken by {}): \
@@ -628,9 +691,7 @@ pub mod lockdep {
         #[cfg(debug_assertions)]
         if ON.load(Ordering::Acquire) && held::unchecked() == 0 {
             let me = held::current();
-            let mine = held::with(|slots| {
-                (0..MAX_HELD).map(|i| slots.get(i)).find(|&(c, by)| c != 0 && by == me)
-            });
+            let mine = held::with(|slots| slots.find(|c, by| c != 0 && by == me));
             if let Some((class, _)) = mine {
                 panic!(
                     "lockdep: {} copies user memory while holding {}: the copy waits \
@@ -687,15 +748,13 @@ pub mod lockdep {
     /// The thread recorded as holding `class` on this CPU (0: not held).
     #[cfg(test)]
     fn holder_of(class: u16) -> u64 {
-        held::with(|slots| {
-            (0..MAX_HELD).map(|i| slots.get(i)).find(|&(c, _)| c == class).map_or(0, |(_, by)| by)
-        })
+        held::with(|slots| slots.find(|c, _| c == class).map_or(0, |(_, by)| by))
     }
 
     #[cfg(test)]
     mod tests {
         use super::super::IrqMutex;
-        use super::{MAX_CLASSES, NAME_MAX, class_of, held, holder_of, name};
+        use super::{MAX_CLASSES, MAX_HELD, NAME_MAX, class_of, edge_seen, held, holder_of, name};
         use std::boxed::Box;
         use std::{format, vec::Vec};
 
@@ -765,6 +824,55 @@ pub mod lockdep {
             let message = held.unwrap_err();
             let text = message.downcast_ref::<std::string::String>().unwrap();
             assert!(text.contains("gives up its CPU while holding lockdep_switch_test"), "{text}");
+        }
+
+        /// Locks released out of order leave exactly the others held,
+        /// and the next lock records an order under each of those and
+        /// none under the released one; a CPU's slots fill to MAX_HELD
+        /// and are all free again after.
+        #[test]
+        fn locks_released_out_of_order_leave_the_rest_held() {
+            std::thread::spawn(|| {
+                let names: [&'static str; 4] =
+                    ["lockdep_ooo_a", "lockdep_ooo_b", "lockdep_ooo_c", "lockdep_ooo_d"];
+                let [a, b, c, d] = names.map(|n| IrqMutex::named(n, ()));
+                let [ca, cb, cc, cd] = names.map(class_of);
+                let (ga, gb, gc) = (a.lock(), b.lock(), c.lock());
+                drop(gb);
+                assert_eq!(holder_of(cb), 0, "the released lock is still held");
+                assert_ne!(holder_of(ca), 0);
+                assert_ne!(holder_of(cc), 0);
+                let gd = d.lock();
+                assert!(edge_seen(ca, cd) && edge_seen(cc, cd));
+                assert!(!edge_seen(cb, cd), "an order under a lock no longer held");
+                drop(ga);
+                drop(gd);
+                assert_eq!(holder_of(ca), 0);
+                assert_eq!(holder_of(cd), 0);
+                assert_ne!(holder_of(cc), 0);
+                drop(gc);
+                super::none_held_at_switch();
+
+                // Every slot, released from the middle out.
+                let many: Vec<&'static str> = (0..MAX_HELD)
+                    .map(|i| -> &'static str {
+                        Box::leak(format!("lockdep_ooo_{i}").into_boxed_str())
+                    })
+                    .collect();
+                let locks: Vec<IrqMutex<()>> =
+                    many.iter().map(|n| IrqMutex::named(n, ())).collect();
+                let mut guards: Vec<Option<_>> = locks.iter().map(|l| Some(l.lock())).collect();
+                for n in &many {
+                    assert_ne!(holder_of(class_of(n)), 0, "{n} untracked");
+                }
+                for i in (0..MAX_HELD).map(|k| (k * 7 + 3) % MAX_HELD) {
+                    guards[i] = None;
+                    assert_eq!(holder_of(class_of(many[i])), 0, "{} still held", many[i]);
+                }
+                super::none_held_at_switch();
+            })
+            .join()
+            .unwrap();
         }
 
         #[test]

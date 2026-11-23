@@ -12,6 +12,10 @@ bench = false
 
 [dependencies]
 gala_stubs = { path = "../gala_stubs" }
+# The lock the trace lists are changed under: it records what it
+# waits for and who holds it, which is the whole point of having one
+# here (nothing a write reaches takes it).
+gala_lock = { path = "../gala_lock" }
 
 # The 32-bit build (SysWOW64's advapi32): the memory routines, 64-bit
 # division helpers and unwind personality the compiler calls on x86.

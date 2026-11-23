@@ -597,6 +597,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `stack_at=<service>[:<n>]` | the calling thread's user stack the first `n` times a process reaches that system call, as `stack:` lines (OBSERVABILITY "Stack captures"; `n` default 4, at most 512; the processes are the ones `events_pid=`/`events_match=` choose; scenario `stack_at_test`) |
 | `stack_from=<module>` | of those, only the calls a module whose name contains the text is on the stack of; the others are passed over without spending a capture (a service another thread reaches in a loop spends any count before the call in question; scenario `stack_at_from_test`) |
 | `stack_words=<n>` | how many words of the caller's stack a capture reads (default 128, at most 512): a service that keeps a large frame of its own, such as user32's `MessageBoxW`, puts the program's frames past the default (OBSERVABILITY "Stack captures") |
+| `hook=<event>[/<text>][:<n>]=<action>[+<secs>]` | what the kernel does when something happens on the screen: `hook=window=shot` takes a screendump of the desktop as each top-level window becomes visible, `+<secs>` later if asked, `n` times (default 4, at most 64), of the windows whose program or title holds `<text>` if given. The kernel writes the request to the log and xtask takes the picture, into `target/screenshots/<scenario>-hook-<program>-w<id>.png`: the kernel knows when a window goes up and cannot encode a PNG, the host can and cannot know when (OBSERVABILITY "Hooks"; may be written more than once, 4 hooks at most; scenarios `hook_test`, `hook_match_test`) |
 | `trace_from=<dll>!<Interface>::<Method>[:<n>]` | every call a program makes into a DLL gala wrote, from the first time it reaches that method, `n` at most (default 4096), as `call` events; needs `events=call`, and the processes are the ones `events_pid=`/`events_match=` choose. What the missing-features ledger cannot show, its records being one a call site: a repeat. The arming is the process's, so one run spans every DLL gala wrote (OBSERVABILITY "Call tracing"; scenarios `trace_from_test`, `trace_from_budget_test`, `trace_from_across_test`) |
 | `imports=<program>[!<dll>][:<n>]` | the first call a program makes through each of its import slots, `n` slots at most (default 4096), as `import` events; needs `events=call`. The loader reserves a region it never commits and the kernel writes a trap address into each armed slot, so the first call faults into the kernel's page-fault path, is recorded, and goes on with the slot repaired. The one instrument that sees a call into a DLL gala did not write (OBSERVABILITY "Import tracing"; scenario `iat_trace_test`) |
 | `imports_repeat=<n>` | keep each armed slot armed instead of repairing it, so that every call through it faults and is recorded and not only the first, `n` later calls at most: the stream becomes the sequence of calls the program made rather than the set of names it reached. Needs `imports=`; costs a fault a call while a slot is armed and an event for each call recorded, which is what the budget bounds -- a fault whose record is not written takes none of it and leaves the slot armed, so `events_from=` beside this is a trace of one window of a run (scenarios `iat_repeat`, `import_window`) |
@@ -962,6 +963,17 @@ Invariants:
   `set/take_pending_continue`).
 - Every lock that may be held while preemptible is an `IrqMutex`: the
   timer interrupt then only preempts code that holds no locks.
+- Preemption never blocks a thread. One preempted between
+  `prepare_wait` and `wait` (already `Waiting`) is queued as ready, its
+  `Waiting` state kept aside (`Thread::preempted_wait`); when it runs
+  again it is `Waiting` again, unless a `wake` came meanwhile (its
+  `wait` then returns at once) or its deadline passed (`TimedOut`).
+  The code between the two halves may be what makes the thread
+  wakeable: the Linux personality records a thread as its signals'
+  sleeper after `prepare` (`lx::wait::block`), and a shell preempted
+  there, blocked as if in `wait`, slept through its children's SIGCHLD
+  for good (`arm_lx_xdesktop`'s sh in `wait`; the selftest
+  `preempted_waiter_runs_on_to_wait`).
 
 ## NT personality
 
@@ -2305,7 +2317,18 @@ Invariants:
   ARM64: MSFT_OP_CONTEXT over the CONTEXT at sp), so the walk passes it
   and reaches the handler of the frame below the alertable wait that ran
   the APC, which is what Office's startup depends on (`apc_test`,
-  ROADMAP OF). I/O completion routines
+  ROADMAP OF). Every queued APC carries **who queued it** (`ApcBy`): the
+  thread (pid, tid; (0, 0) for the kernel's own code, an I/O completion,
+  a timer), the return address above that thread's system-call stub --
+  the wrapper's, for a program that queues through `QueueUserAPC` -- and
+  the uptime of the call, filled in where it is queued and not where the
+  APC was built. The thread keeps the last APC it was given after that
+  APC has left the queue, and the exception's note takes that mark as it
+  is recorded -- a report is written once the process's last thread has
+  exited, when no thread is left to ask -- so a crash report of an
+  exception the routine raised names the thread that decided it and
+  prints that thread's last calls too -- which is what Office's cross-thread fail-fast needs
+  (OBSERVABILITY "Who queued a user APC", `crash_apc`). I/O completion routines
   use the same queue: a read or write with an ApcRoutine queues
   ApcRoutine(ApcContext, IoStatusBlock, 0) to the caller when it
   completes successfully, on a synchronous handle too (the I/O completes
@@ -4833,8 +4856,11 @@ definition for both layouts, "Plan: WOW64").
   traits are set, EventUnregister gives the block back, and a handle no
   live registration holds -- an unregistered one, or a value a program
   invented -- is answered ERROR_INVALID_HANDLE rather than
-  dereferenced (blocks are reused and never freed, so a stale handle
-  cannot reach memory that was something else). The answers are
+  dereferenced (a block is never freed, and an unregistered one is
+  reused only by a registration of the same provider, so a stale
+  handle reaches that provider or nothing at all, never a block that
+  became something else -- which is what lets a write read the list
+  with no lock, below). The answers are
   Windows' own, measured function by function on the pinned build: the
   four write forms (EventWrite, EventWriteTransfer, EventWriteEx,
   EventWriteString) succeed on a live registration and validate the
@@ -4889,7 +4915,8 @@ definition for both layouts, "Plan: WOW64").
   session's buffers as its provider, descriptor and payload bytes
   (nothing in gala consumes a buffering session's events; what reads
   an event is the session gala starts, below); one that does not fit
-  counts towards the EventsLost a query reports. Two answers are gala's
+  counts towards the EventsLost a query reports, and a write waits for
+  nothing ("ETW, what a write may not wait for"). Two answers are gala's
   reading where Windows is not measured: what MatchAllKeyword means
   when several sessions ask for one (a session that demands no
   particular bits frees the provider of the other's demand), and how
@@ -4908,6 +4935,53 @@ definition for both layouts, "Plan: WOW64").
   GetTraceLoggerHandle fails ERROR_INVALID_PARAMETER with no buffer
   and ERROR_BAD_LENGTH with a buffer that is no session's (Windows'
   own two answers).
+- **ETW, what a write may not wait for** (`etw.rs`, `trace.rs`):
+  nothing a program's write path reaches takes a lock. A write walks
+  the provider list, the session list and the enable list lock-free and
+  makes its two `GalaEtw` calls with nothing held, and so do
+  EventEnabled and the enable a registration finds. That is not a
+  performance choice: Office suspends its own threads to walk their
+  stacks while the process is tracing, so a lock on this path is one a
+  stopped thread can be holding, and every other writer then spins for
+  good -- silently, which is the part that costs the most. gala's
+  advapi32 took three such locks per event, and Word's main thread sat
+  in one of them. `user/etwlock_test` is that shape as a test: 4000
+  events written while another thread is suspended inside the write
+  path, which the pinned Windows build does in 16-78 ms, and gala in a
+  120-second deadlock before this and 170 ms after (scenarios
+  `etwlock_test` and `etwlock_armed`, the second with `etw=*` so that
+  every event is a system call and the suspension lands inside one).
+
+  What makes reading without a lock sound is that the three lists are
+  append-only and never freed, and that a block's identity is written
+  before it is published and never changed after: its GUID and its
+  `next`, with `live` stored last (Release) and loaded first
+  (Acquire), and a dead block reused only by a registration of the
+  same provider or an enable of the same provider. Every other field a
+  reader can see is atomic. *Changing* a list is still done under a
+  lock (`user/gala_lock`), which no write waits for and which, after a
+  second of waiting, records a `waited` row naming the lock and
+  whether another thread holds it rather than spinning without saying
+  so (OBSERVABILITY "Missing-features ledger").
+
+  A session's buffer is the one deliberate cost: it is never freed.
+  ControlTraceW's stop unpublishes it and leaves it, because a
+  lock-free writer may be copying into it at that moment and there is
+  no point at which the last of them is known to be out of it without
+  putting the wait back. The leak is bounded per process -- 256 MiB of
+  trace buffers, past which StartTraceW fails with a row naming the
+  capacity it wanted -- and that is the trade taken: a bounded leak
+  for a write path a suspended thread cannot stop. Room in the buffer
+  is reserved with a compare-exchange on its write offset, so writers
+  do not serialise on each other either, and an event that does not
+  fit counts towards EventsLost.
+
+  One thing a reader may see, which Windows' reader may see too: a
+  write that lands on a concurrent EnableTraceEx2 can read the level
+  from one side of the change and the keywords from the other. A
+  provider's demands are not atomic across a session's change on
+  Windows either, and nothing beyond that one event's reach depends on
+  it.
 - **The session gala starts** (`etw=`; `trace.rs` and the kernel's
   `nt::etw`, OBSERVABILITY "A session gala starts"): a run can ask for
   a program's telemetry without the program asking for it, which is
@@ -6769,7 +6843,11 @@ HTTP on 127.0.0.1:8080.
   accepts and ignores them, QueryOption fails with
   ERROR_WINHTTP_INVALID_OPTION).
 - **WinINet's functions** (`user/wininet`): InternetOpenW (DIRECT and
-  the PRECONFIG types: direct, no proxy is configured on gala),
+  the PRECONFIG types: direct, no proxy is configured on gala; the
+  access type is validated as Windows validates it, so
+  INTERNET_OPEN_TYPE_PROXY without a proxy name and a number that is no
+  access type at all are ERROR_INVALID_PARAMETER, while a proxy string
+  the other types are given is ignored; a NULL agent is an empty agent),
   InternetConnectW (INTERNET_SERVICE_HTTP; credentials recorded, not
   sent), HttpOpenRequestW (INTERNET_FLAG_SECURE, the IGNORE_CERT flags,
   NO_AUTO_REDIRECT; the cache flags have nothing to act on),
@@ -6791,7 +6869,8 @@ HTTP on 127.0.0.1:8080.
   option is ERROR_INTERNET_INCORRECT_HANDLE_TYPE; others are recorded
   and ERROR_INTERNET_INVALID_OPTION), InternetCloseHandle and
   InternetAttemptConnect (ERROR_SUCCESS: no dial-up). The A functions
-  ODT's setup.exe imports (`ansi.rs`): InternetConnectA,
+  ODT's setup.exe imports (`ansi.rs`): InternetOpenA (which Office's
+  shared runtime looks up before the W one), InternetConnectA,
   HttpOpenRequestA and HttpAddRequestHeadersA through the ANSI code page
   into the W ones; InternetCrackUrlA on the caller's bytes (the
   delimiters are ASCII, so a URL widened byte by byte has its
@@ -6959,7 +7038,8 @@ HTTP on 127.0.0.1:8080.
   (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED);
   WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW
   (`gala_stubs` stubs); named
-  proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
+  proxies (WinHttpOpen fails, and so does InternetOpenW given a proxy
+  name to route through) and WinHttpGetProxyForUrl;
   WinINet's FTP and Gopher, its cache and cookie store, and the A
   functions setup.exe does not import;
   WINHTTP_OPTION_DISABLE_FEATURE's WINHTTP_DISABLE_REDIRECTS (recorded
@@ -12765,10 +12845,27 @@ same program as SYSTEM).
   STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
   OpenInputDesktop (the process's station's Default, a new handle each
   time; STATUS_INVALID_DEVICE_REQUEST from a station that cannot receive
-  input), GetUserObjectInformationW/A (UOI_FLAGS, UOI_NAME, UOI_TYPE,
-  UOI_IO; the size with the NUL, also when short; the A form reports
-  the UTF-16 size when short and the ANSI bytes on success, as Windows
-  does), EnumWindowStationsW (the caller's session's), EnumDesktopsW.
+  input), GetUserObjectInformationW/A (UOI_FLAGS, UOI_NAME, UOI_TYPE and
+  UOI_IO, which is a desktop's alone -- a window station answers
+  ERROR_INVALID_FUNCTION, as Windows does; the size with the NUL, also
+  when short; the A form reports the UTF-16 size when short and the ANSI
+  bytes on success, as Windows does),
+  SetUserObjectInformationW/A, whose two routes the handle tells apart
+  (measured on 26100): a window station or desktop handle takes
+  UOI_FLAGS and nothing else, over a buffer that holds a whole
+  USEROBJECTFLAGS (a shorter one is ERROR_INVALID_DATA), and since what
+  a station is follows the session and not a write through one of its
+  handles, a write of what the getter already answers succeeds as on
+  Windows while one that would change something succeeds with a ledger
+  row saying it did not; the current process's pseudo handle is the
+  other route, taking UOI_TIMERPROC_EXCEPTION_SUPPRESSION and nothing
+  else (ERROR_INVALID_FUNCTION) as a BOOL of exactly four bytes, where a
+  real handle to the same process is ERROR_INVALID_PARAMETER and the
+  value cannot be read back -- gala calls a TIMERPROC with no handler
+  around it, which is what FALSE asks for, so TRUE leaves a row and
+  succeeds. Office's shared runtime delay-loads this function, which is
+  why its absence ended Word's startup. EnumWindowStationsW (the
+  caller's session's), EnumDesktopsW.
 - **Limits**: no DACLs on stations and desktops (any process of the
   session may open them); CreateWindowStation and CreateDesktop are
   unsupported (ledger; BR stage 3, Chromium's sandbox); SwitchDesktop
@@ -17060,6 +17157,13 @@ New code follows them; old code is brought in line (ROADMAP R1).
   - each CPU (each host thread in tests and gala-um) keeps the classes
     it holds (16 slots; interrupts are off while an IrqMutex is held, so
     the CPU does not change), and for each slot the thread that took it.
+    The held slots are packed first (a depth per CPU; a release moves
+    the last into the gap), so a take, a release and the checks read
+    only the locks held, and an order already recorded is only read
+    (`add_edge` claims a slot of the order table only for a new one):
+    lockdep runs at every lock taken, and scanning every slot each
+    time put it in 72% of the kernel's samples in lx_gimp in the debug
+    build (opt-level 1).
     The scheduler names that thread on every switch
     (`lockdep::running`), because lockdep cannot ask it: the scheduler's
     own state is behind one of these locks;
@@ -18129,7 +18233,7 @@ older entries).
 | 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
 | 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable; v2: the digest of the executable's layout, its primary token's object id; v3: the session; v4 (`handover_next`): the handovers it came through |
 | 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags). Kinds: OWNED (frame number, kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable laid out again from its file; the page is not mapped at adoption but comes back at its first touch from that layout, as only listed processes may map a layout's frames), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: comes back at its first touch, the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
-| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, object id, the system call (number, the user registers at the `syscall`), its deadline (absolute timer tick, or none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), suspend count, impersonation token id, a table of queued user APCs (routine, three arguments, and whether it is special -- the record's own stride says which, so a 32-byte one from an older writer reads 0 and means a normal APC); v3: its extended state after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; empty without XSAVE) |
+| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, object id, the system call (number, the user registers at the `syscall`), its deadline (absolute timer tick, or none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), suspend count, impersonation token id, a table of queued user APCs (routine, three arguments, and whether it is special -- the record's own stride says which, so a 32-byte one from an older writer reads 0 and means a normal APC; who queued an APC is not carried, and a report of one carried says so); v3: its extended state after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; empty without XSAVE) |
 | 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
 | 24 | CONSOLES | console input/output objects (no state) |
 | 25 | HANDLES | per process: (handle value, object id, granted access, attributes) |

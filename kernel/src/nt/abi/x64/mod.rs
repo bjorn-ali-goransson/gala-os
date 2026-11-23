@@ -496,9 +496,25 @@ pub(in crate::nt) fn create_wow64_thread(
 /// process's crash report, printed when it ends (nt::crashreport).
 pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     let (record, context) = (arg!(call, 0), arg!(call, 1));
+    let status = unhandled_note(call);
+    // ntdll's dispatcher does not look at the status, so a report the
+    // kernel could not read would leave no trace of itself.
+    if status != NtStatus::SUCCESS && record != 0 {
+        crate::nt::crashreport::unread(&call.process, record, context, "part");
+    }
+    status
+}
+
+/// The note itself (`gala_unhandled_exception`, which records what this
+/// refuses to read).
+fn unhandled_note(call: &mut Call<'_>) -> NtStatus {
+    let (record, context) = (arg!(call, 0), arg!(call, 1));
     let walk = arg!(call, 2);
     if record == 0 {
-        *call.process.unhandled_exception.lock() = None;
+        // The top-level filter continued execution, so the process
+        // carries on: the note goes, and the exception it swallowed is
+        // recorded now or never (nt::crashreport::continued).
+        crate::nt::crashreport::continued(&call.process);
         return NtStatus::SUCCESS;
     }
     // EXCEPTION_RECORD: code +0, address +0x10, parameter count +0x18,
@@ -531,20 +547,13 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     for (i, p) in note.params.iter_mut().take(kept).enumerate() {
         *p = tri!(call.read_u64(record + 0x20 + 8 * i as u64));
     }
-    // A C++ throw: what was thrown, read now (the object and the
-    // runtime's type data are gone once the process has ended).
-    if code == crate::nt::crashreport::CXX_EXCEPTION {
-        let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
-        let params = &note.params[..note.params_len.min(4)];
-        note.cxx = crate::nt::crashreport::CxxThrow::decode(params, x86, &read);
-    }
-    // A delay-load failure: the DLL and function it was looking for.
-    use crate::nt::crashreport::{DELAY_DLL, DELAY_PROC, DelayLoad};
-    if matches!(code, DELAY_DLL | DELAY_PROC) && note.params_len >= 1 {
-        let info = note.params[0];
-        let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
-        note.delay = DelayLoad::decode(info, x86, &read);
-    }
+    // What the parameters describe, for the codes a report knows (a C++
+    // throw's thrown type, a delay load's DLL and function), read now:
+    // the thrown object, the runtime's type data and the DelayLoadInfo
+    // are all gone once the process has ended. The one decoder serves
+    // both ABIs (crashreport::decode_params).
+    let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
+    crate::nt::crashreport::decode_params(&mut note, &read);
     note.flags = tri!(call.read_u64(record)).wrapping_shr(32) as u32;
     note.walk = crate::nt::abi::walk_of(call, walk);
     // 32-bit code: the SEH registrations the dispatcher walked (the list
@@ -571,7 +580,7 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
         }
         note.seh_end |= frame == u32::MAX;
     }
-    *call.process.unhandled_exception.lock() = Some(note);
+    crate::nt::crashreport::keep_unhandled(&call.process, note);
     NtStatus::SUCCESS
 }
 
@@ -592,7 +601,7 @@ pub(in crate::nt) fn keep_note(
     let mut regs = frame.user_regs();
     regs.set_ip(rip);
     let note = crate::nt::crashreport::Note::new(process, status, access, regs, is_compat(frame));
-    *process.last_exception.lock() = Some(note);
+    crate::nt::crashreport::keep_fault(process, note);
 }
 
 /// The dispatcher frame on the user stack: the CONTEXT at the new rsp,

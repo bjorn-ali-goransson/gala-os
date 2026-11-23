@@ -8460,7 +8460,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("hotswap_files", "hotswap_dll.dll@hotswap_late.dll", "gala"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
+    ("crash_continued", "ntdll.dll", "Windows/System32"),
+    ("crash_continued_other", "ntdll.dll", "Windows/System32"),
+    ("crash_unhandled_both", "ntdll.dll", "Windows/System32"),
+    ("crash_delay", "ntdll.dll", "Windows/System32"),
     ("crash_raise", "ntdll.dll", "Windows/System32"),
+    ("crash_apc", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
     ("shootdown_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
@@ -9579,6 +9584,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winevent_test", "gdi32.dll", "Windows/System32"),
     ("winevent_test", "bcryptprimitives.dll", "Windows/System32"),
     ("winevent_test", "user/bin/winevent_test.exe", "gala"),
+    ("hook_test", "ntdll.dll", "Windows/System32"),
+    ("hook_test", "kernel32.dll", "Windows/System32"),
+    ("hook_test", "msvcrt.dll", "Windows/System32"),
+    ("hook_test", "user32.dll", "Windows/System32"),
+    ("hook_test", "gdi32.dll", "Windows/System32"),
+    ("hook_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("hook_test", "user/bin/hook_test.exe", "gala"),
     ("uia_test", "ntdll.dll", "Windows/System32"),
     ("uia_test", "kernel32.dll", "Windows/System32"),
     ("uia_test", "msvcrt.dll", "Windows/System32"),
@@ -10982,6 +10994,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("etwarm_test", "ntdll.dll", "Windows/System32"),
     ("etwarm_test", "kernel32.dll", "Windows/System32"),
     ("etwarm_test", "advapi32.dll", "Windows/System32"),
+    ("etwlock_test", "ntdll.dll", "Windows/System32"),
+    ("etwlock_test", "kernel32.dll", "Windows/System32"),
+    ("etwlock_test", "advapi32.dll", "Windows/System32"),
     ("etwfields_test", "ntdll.dll", "Windows/System32"),
     ("etwfields_test", "kernel32.dll", "Windows/System32"),
     ("etwfields_test", "advapi32.dll", "Windows/System32"),
@@ -11410,6 +11425,7 @@ const USER_PROGRAMS: &[&str] = &[
     "caps_test",
     "etw_test",
     "etwarm_test",
+    "etwlock_test",
     "etwfields_test",
     "etwraw_test",
     "tray_test",
@@ -11661,7 +11677,9 @@ commands:
                and the named DLLs into the resumed machine (docs/WORKFLOW.md,
                Hot swapping DLLs and the kernel);
                XTASK_SHOTS=<secs>|<serial log line>[+<secs>],...: screendumps
-               of the screen as the run goes, in target/screenshots/
+               of the screen as the run goes, in target/screenshots/ (the
+               kernel asks for its own there too, at an event rather than a
+               second: hook=window=shot, docs/OBSERVABILITY.md, Hooks)
   snapshots    list the machine snapshots (target/snapshots): what, when, size,
                build; snapshots rm <name> deletes one
   hotswap-diff what a hot swap would patch: hotswap-diff <old> <old.map>
@@ -12114,6 +12132,9 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "setup"]))?;
     // The XML reader galapkg and msxml6.dll share.
     run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
+    // The lock gala's DLLs change their own tables under: what it does
+    // on each failed try, and the row it writes when it waits.
+    run_cmd(cargo().args(["test", "--package", "gala_lock"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
     run_cmd(cargo().args(["test", "--package", "schannel_tls"]))?;
     // The update feed's TUF metadata and the client's refusals (R8).
@@ -13389,10 +13410,7 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
         copy(&vars, &copy_path)?;
         cmd.arg("-drive").arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
     }
-    cmd.args(["-device", "virtio-scsi-pci,id=scsi0"])
-        .arg("-drive")
-        .arg(format!("if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={}", iso.display()))
-        .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0"]);
+    add_aarch64_cd(&mut cmd, iso);
     // The keyboard and mouse (`virt` has no PS/2 controller): what the
     // monitor's sendkey, mouse_move and mouse_button reach
     // (kernel/src/input/virtio.rs; `VirtioPace`).
@@ -13402,6 +13420,41 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     }
     cmd.args(extra.split_whitespace());
     Ok(cmd)
+}
+
+/// The image on a virtio-scsi CD, and the only device the firmware
+/// connects. `bootindex` puts a `bootorder` file in fw_cfg, and with one
+/// ArmVirtQemu's boot manager connects just the devices it names
+/// (QemuBootOrderLib's ConnectDevicesFromQemu) instead of every device
+/// (EfiBootManagerConnectAll). Without it, the firmware's own network
+/// stack drives a scenario's virtio-net card before the kernel does:
+/// DHCP, IPv6 duplicate-address checks and router solicitations, from
+/// timer events. One such send crashed the firmware's VirtioNetDxe
+/// (a data abort at address 8) in the middle of reading the CD, before
+/// the boot loader ran. With the boot order, the firmware sends nothing
+/// on the card (WORKFLOW "The aarch64 kernel's scenarios" says how to
+/// see that).
+fn add_aarch64_cd(cmd: &mut Command, iso: &Path) {
+    cmd.args(["-device", "virtio-scsi-pci,id=scsi0"])
+        .arg("-drive")
+        .arg(format!("if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={}", iso.display()))
+        .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0"]);
+}
+
+#[cfg(test)]
+mod aarch64_cd_tests {
+    use super::*;
+
+    /// The CD is the boot order's only entry, so the firmware connects
+    /// nothing else (no network card): see add_aarch64_cd.
+    #[test]
+    fn the_cd_is_the_boot_order() {
+        let mut cmd = Command::new("qemu-system-aarch64");
+        add_aarch64_cd(&mut cmd, Path::new("gala.iso"));
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let with_index: Vec<&String> = args.iter().filter(|a| a.contains("bootindex=")).collect();
+        assert_eq!(with_index, ["scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0"]);
+    }
 }
 
 fn find_ovmf() -> Result<Firmware> {
@@ -13839,6 +13892,9 @@ const UEFI_SCENARIOS: &[&str] = &[
     "selftest",
     "fault-pagefault",
     "gui_test",
+    // A framebuffer for the windows a hook takes pictures of (nt::hooks).
+    "hook_test",
+    "hook_match_test",
     "paint_thread_test",
     "virtio_gpu",
     "virtio_gpu_reset",
@@ -14147,7 +14203,12 @@ const ARM64_TWINS: &[&str] = &[
     "apc_test",
     "crash_dispatched",
     "crash_filtered",
+    "crash_continued",
+    "crash_continued_other",
+    "crash_unhandled_both",
+    "crash_delay",
     "crash_raise",
+    "crash_apc",
     "seh_test",
     "context_test",
     "threadinfo_test",
@@ -14216,6 +14277,7 @@ const ARM64_TWINS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "etwlock_test",
     "stack_at_test",
     "iocp_test",
     "symlink_test",
@@ -16936,6 +16998,58 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // A thread suspended in the middle of writing an event while
+        // another thread writes: what real Windows costs the writers
+        // for it, which is nothing (user/etwlock_test's header has the
+        // three measured runs). Office suspends its own threads to
+        // walk their stacks while it traces, so nothing on gala's
+        // provider side that a writer waits for may be held by a
+        // thread that is stopped -- and the lock the lists had was
+        // such a thing, which is where Word's main thread sat
+        // (ROADMAP OF).
+        name: "etwlock_test",
+        cmdline: "qemu_exit run=etwlock_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "advapi32.dll!StartTraceW(gala-etwlock-test)",
+            "etwlock_test: wrote 4000 events while the other thread was suspended, in 200 \
+             rounds taking ",
+            "advapi32.dll!ControlTraceW(stopped)",
+            "etwlock_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same suspensions with the whole write path armed
+        // (`etw=*`): every event is a system call now, so the window a
+        // suspension can land in is a call into the kernel rather than
+        // a few instructions, and the budget running out makes a write
+        // tell every provider the session is over. Nothing of that may
+        // be behind a lock either.
+        name: "etwlock_armed",
+        cmdline: "qemu_exit run=etwlock_test.exe etw=*",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for every provider, level 5 and every keyword, 256 events at most \
+             (etw=)",
+            "advapi32.dll!EventRegister(a session is asking)",
+            "etw: etwlock_test.exe 2b8e5c91-4d07-4f3a-91c6-5e0d8a7b4f12 level 4 keyword 0x1, \
+             4 bytes (no field metadata: a manifest provider's event), no string in \
+             its bytes",
+            "etwlock_test: wrote 4000 events while the other thread was suspended, in 200 \
+             rounds taking ",
+            "etwlock_test: ok",
+            // The budget goes first, which a write says and the session
+            // is ended by: the telling of every provider that it is over
+            // happens inside an `EventWrite`, and holds nothing while it
+            // does.
+            "advapi32.dll!EventWrite(the session etw= asked for is full)",
+            "etw: 256 events written to the session, from 1 provider (etw=); the budget is \
+             spent, so the session ends here, not the program",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // etw=<name>: the session gala starts on the program's behalf,
         // named by the provider name TraceLogging hashes into a GUID.
         // The program asked for no session, so every demand it is told
@@ -17885,6 +17999,54 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "winevent_test: own events ok",
             "winevent_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // A hook on the window event, taking a screendump of each window
+        // as it goes up (user/hook_test/main.c, mingw; nt::hooks,
+        // docs/OBSERVABILITY.md "Hooks"). What it proves is that the
+        // kernel asked for a picture of every one of the four windows
+        // and that the host wrote each to its own file: the count the
+        // arming line states is the count the run spends, and the files
+        // are named after the program and the window and not after a
+        // second of the run.
+        name: "hook_test",
+        cmdline: "qemu_exit hook=window=shot run=hook_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hook: armed: window shown -> screendump, 4 shots, 0.000 s after each (hook=)",
+            "window 'hook_test one' shown by hook_test.exe (pid",
+            "window 'hook_test two' shown by hook_test.exe (pid",
+            "window 'hook_test three' shown by hook_test.exe (pid",
+            "window 'hook_test three again' shown by hook_test.exe (pid",
+            "hook_test-hook-hook-test-exe-w",
+            "hook_test: all 4 windows shown",
+            "hook_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same four windows, with a hook that wants only the ones
+        // whose name holds "three" and has one picture to give. Two of
+        // the four hold it, so the fourth window finds the count spent:
+        // the line that says so carries the number of windows the match
+        // passed over, which is the only thing that can prove the match
+        // chose rather than the count (an expectation is a line that
+        // must appear, never one that must not). The second `hook=` word
+        // asks for an action there is none of: the warning says what the
+        // grammar is, and the run goes on with the first hook armed.
+        name: "hook_match_test",
+        cmdline: "qemu_exit hook=window/three:1=shot+1 hook=window=dump run=hook_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hook: hook=window=dump is not <event>[/<text>][:<n>]=<action>[+<secs>]",
+            "no hook armed",
+            "hook: armed: window shown -> screendump, 1 shot, 1.000 s after each (hook=), only \
+             those whose program or title holds \"three\" (either case)",
+            "window 'hook_test three' shown by hook_test.exe (pid",
+            "hook: window: no shots left of the 1 asked for (2 windows passed over by the match)",
+            "hook_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -20678,6 +20840,128 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // The exception that leaves nothing behind: no handler takes it,
+        // the top-level filter continues execution, and the process goes
+        // on to exit 0 -- so no crash report ever describes it and the
+        // ledger row ntdll writes is on the death path it never reaches.
+        // This is what Office's shared code does to the exceptions it
+        // swallows, and the kernel must name the code and the address at
+        // the moment ntdll withdraws its note. That the retried store
+        // goes through is what says execution was continued and not
+        // merely survived.
+        name: "crash_continued",
+        cmdline: "qemu_exit run=crash.exe args=continued",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to a read-only page",
+            "crash: the top-level filter continues execution",
+            "exception continued: crash.exe (pid 4) thread",
+            "its top-level filter continued past an unhandled 0xc0000005 (access violation: \
+             writing address 0x",
+            "(crash.exe+0x",
+            "an exception the top-level filter continued past",
+            "crash: the write that faulted went through; ok",
+            "process crash.exe (pid 4) exited with status 0x00000000",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // The same withdrawal, with another thread's unhandled exception
+        // pending under it: the swallowing thread reports its exception,
+        // the dying thread reports its own, and only then does the
+        // swallower's filter withdraw. It must withdraw its own and
+        // nothing else -- the dying thread's note is what the crash
+        // report is written from, and that thread raised its exception
+        // in user mode, so the kernel saw no fault and has nothing else
+        // to describe it with. The swallower's line naming its own
+        // access violation, and the report naming 0xe0000044, is what
+        // says each thread's note is its own.
+        name: "crash_continued_other",
+        cmdline: "qemu_exit run=crash.exe args=continued_other",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the swallower writes to a read-only page",
+            "crash: the raiser's filter has reported its exception",
+            "crash: the swallower's filter continues execution",
+            "its top-level filter continued past an unhandled 0xc0000005 (access violation: \
+             writing address 0x",
+            "crash: the swallower carried on; the raiser may die now",
+            "crash: the raiser's filter lets the process end",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
+             (exception) in thread",
+            "process crash.exe (pid 4) exited with status 0xe0000044",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // Two threads, each with an exception no handler takes, both
+        // reported before either ends anything: the first thread's is
+        // what ends the process. The report must be written from that
+        // one -- a note per process cannot, the second report writing
+        // over the first -- and must say that the second thread's note
+        // is not what it was written from, because a note left behind
+        // with nothing said of it is an exception that happened and is
+        // nowhere in the run.
+        name: "crash_unhandled_both",
+        cmdline: "qemu_exit run=crash.exe args=unhandled_both",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the first thread raises 0xe0000044, which nothing handles",
+            "crash: the first thread's filter has reported its exception",
+            "crash: the second thread raises 0xe0000045, which nothing handles either",
+            "crash: the second thread's filter has reported its exception",
+            "crash: the first thread's filter lets the process end",
+            // The note the report is not written from, said out loud,
+            // with where it happened: this exception names no parameters
+            // for a clause to describe (`crash_delay` has those).
+            "exception note: crash.exe (pid 4) thread",
+            "took an unhandled 0xe0000045 (exception) at 0x",
+            "(crash.exe+0x",
+            "too, and the crash report is not written from it: the process ends \
+             with 0xe0000044 (exception), which thread",
+            // And the report, from the note of the exception that ended it.
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
+             (exception) in thread",
+            "process crash.exe (pid 4) exited with status 0xe0000044",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // Two threads, each taking a delay-load failure no handler takes
+        // (the codes delayimp's helper raises, each with its
+        // DelayLoadInfo): the first looks for a function by name and is
+        // what ends the process, the second looks for a DLL by ordinal
+        // and no report is written from its note. The report must name
+        // the first's DLL and function, and the line about the second's
+        // note must name its DLL and ordinal -- two of Word's threads die
+        // of 0xc06d007f on the way to its window (ROADMAP OF) and one
+        // report is written, so a line with the code and not the name
+        // leaves the other looking for nothing in particular.
+        name: "crash_delay",
+        cmdline: "qemu_exit run=crash.exe args=delay",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the first thread raises 0xc06d007f for gala_absent.dll!GalaAbsentFunction",
+            "crash: the first thread's filter has reported its 0xc06d007f",
+            "crash: the second thread raises 0xc06d007e for gala_missing.dll ordinal 4660",
+            "crash: the second thread's filter has reported its 0xc06d007e",
+            "crash: the first thread's filter lets the process end",
+            // The note no report is written from: what it was looking
+            // for, and where it happened.
+            "exception note: crash.exe (pid 4) thread",
+            "took an unhandled 0xc06d007e (delay-loaded DLL not found: gala_missing.dll ordinal \
+             4660) at ",
+            "(crash.exe+0x",
+            // And the report, from the note of the exception that ended
+            // the process.
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc06d007f \
+             (delay-loaded function not found) in thread",
+            "crash report:   delay load of gala_absent.dll!GalaAbsentFunction",
+            "process crash.exe (pid 4) exited with status 0xc06d007f",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // An exception the program raises itself, with a code nothing
         // decodes and three parameters, which no handler takes (what
         // Office's shared code does with 0xe0000002, ROADMAP OF): the
@@ -20706,6 +20990,45 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "NtWriteFile=0x00000000",
             "NtClose=0xc0000008, GalaUnhandledException=0x00000000",
             "process crash.exe (pid 4) exited with status 0xe0000042",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // An exception another thread decided on: the main thread queues
+        // a user APC into a worker waiting alertably, and the APC's
+        // routine raises a code nothing handles, with no parameters --
+        // which is how Office's shared code ends a thread (ROADMAP OF).
+        // The victim's own stack and last calls describe its wait, so
+        // the report must name the thread that queued the APC, where it
+        // queued it from, and that thread's last calls: the failing
+        // NtClose just before the queueing is what says whose they are.
+        name: "crash_apc",
+        cmdline: "qemu_exit run=crash.exe args=apc",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the worker waits alertably",
+            "crash: the main thread queues the APC",
+            "crash: the APC raises 0xe0000043 on the worker",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000043 \
+             (exception) in thread",
+            "crash report:   no handler took it: ",
+            // The victim's own calls say nothing at all: the dispatch
+            // of the exception the APC raised in it -- 21 lookups for
+            // unwind data -- crowds the alertable wait it was in out of
+            // the 24-call ring, which is the second reason a report of
+            // the victim alone cannot explain this death.
+            "last calls, oldest first: ",
+            "GalaUnhandledException=0x00000000",
+            // Which APC it was, who queued it, and what that thread did:
+            // the write of its line, the handle that is not one and the
+            // queueing itself.
+            "crash report:   it was last given a user APC: routine ",
+            "(crash.exe+0x",
+            ", queued by pid 4 tid ",
+            ", called from ",
+            "last calls, oldest first: ",
+            "NtClose=0xc0000008, NtQueueApcThread=0x00000000",
+            "process crash.exe (pid 4) exited with status 0xe0000043",
             BOOT_OK_MARKER,
         ],
     },
@@ -21829,6 +22152,7 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("hook_match_test", "hook_test"),
     ("d2d1_window", "d2d1_test"),
     ("d2d1_window", "d2d1_window"),
     ("office_install_gui", "office_install"),
@@ -21854,6 +22178,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("etwfields_armed", "etwfields_test"),
     ("etwraw_armed", "etwraw_test"),
     ("etw_armed_all", "etwarm_test"),
+    ("etwlock_armed", "etwlock_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),
@@ -22937,6 +23262,8 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("busybox", "child processes (pipelines are child processes)"),
     ("cmd_test", "child processes (one NT process per Linux process)"),
     ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
+    ("hook_test", "needs a screen (the hook's screendumps come from QEMU's monitor)"),
+    ("hook_match_test", "needs a screen (the hook's screendumps come from QEMU's monitor)"),
     ("paint_thread_test", "needs a screen (the square must reach the desktop)"),
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
@@ -23136,6 +23463,38 @@ fn at_deadline(pid: u32, what: AtDeadline) {
 #[cfg(not(target_os = "linux"))]
 fn at_deadline(_pid: u32, _what: AtDeadline) {}
 
+/// SIGQUIT at its default disposition and unblocked in the run however
+/// xtask was started, so the dump request at a deadline reaches it
+/// (`run_with_deadline`'s comment).
+#[cfg(target_os = "linux")]
+fn plain_dump_signal(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the closure runs in the child between fork and exec, where
+    // only async-signal-safe calls are allowed: sigaction and sigprocmask
+    // are both of them, and it allocates nothing and reads no state of
+    // xtask's. A zeroed sigaction is valid; its handler is filled in.
+    unsafe {
+        cmd.pre_exec(|| {
+            let mut plain: libc::sigaction = std::mem::zeroed();
+            plain.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut plain.sa_mask);
+            if libc::sigaction(libc::SIGQUIT, &plain, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut quit: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut quit);
+            libc::sigaddset(&mut quit, libc::SIGQUIT);
+            if libc::sigprocmask(libc::SIG_UNBLOCK, &quit, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn plain_dump_signal(_cmd: &mut Command) {}
+
 /// Runs `cmd` to its end, or to `deadline`: a run still going then is
 /// asked for its state dump (SIGQUIT) and killed `grace` later. Its
 /// standard output and error are read while it runs, so a program that
@@ -23147,8 +23506,16 @@ fn at_deadline(_pid: u32, _what: AtDeadline) {}
 /// so a hung run left no state dump -- the one thing it is read from
 /// (WORKFLOW "gala-um"). Which coreutils a host has must not decide
 /// whether a hang explains itself.
+///
+/// Nor how the gate was launched: a shell that starts a job in the
+/// background ignores SIGQUIT (and SIGHUP and SIGINT), a signal ignored
+/// when a program starts cannot be caught or trapped by it, and every
+/// run under `cargo xtask test &` would then be asked for a dump it
+/// could never answer. `plain_dump_signal` gives each run the plain
+/// disposition instead of the inherited one.
 fn run_with_deadline(cmd: &mut Command, deadline: Duration, grace: Duration) -> Result<UmRun> {
     use std::sync::mpsc::RecvTimeoutError::Timeout;
+    plain_dump_signal(cmd);
     let mut child =
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
@@ -24289,7 +24656,7 @@ fn run_vm_once(
         serial.push('\n');
     }
     serial += &snap_note;
-    serial += &shots.missed();
+    serial += &shots.notes();
     if let Some(note) = dump_note {
         serial += &note;
     }
@@ -24483,9 +24850,34 @@ fn fewer_cpus(got: u32, want: u32) -> String {
 /// is missed as often as it is caught (Word's splash lives about 2 s of a
 /// 90 s run, and the run is as fast as the host is free), while
 /// `XTASK_SHOTS='desktop: shown window+1'` catches it on every run.
+///
+/// A line only works when the line is known in advance, which the first
+/// window of a run is and the ones after it are not. Those the kernel
+/// asks for itself (`hook=window=shot`, `nt::hooks`, OBSERVABILITY
+/// "Hooks"): it writes a request to the serial log as the event happens,
+/// and [`Shots::hook_requests`] turns each into one of these, written to
+/// `target/screenshots/<scenario>-hook-<name>.png`.
 struct Shots {
     shots: Vec<Shot>,
+    /// The scenario the files are named after. A hook's request arrives
+    /// while the run goes, so its file cannot be named in advance.
+    scenario: String,
+    /// How far the serial log has been read for hook requests.
+    scanned: u64,
+    /// What was written and what failed, for the serial log ([`notes`]).
+    ///
+    /// [`notes`]: Shots::notes
+    took: String,
+    /// Whether the line saying the host will take no more hook shots has
+    /// been written.
+    full: bool,
 }
+
+/// The most screendumps one run's hooks may ask the host for. The kernel
+/// bounds what it asks for (`nt::hooks`); this is the host's own guard,
+/// because the requests come from a guest and each picture is about a
+/// quarter of a megabyte.
+const MAX_HOOK_SHOTS: usize = 64;
 
 /// One screendump: what it waits for, how long it waits after that, the
 /// file it is written to, and where it has got to.
@@ -24521,14 +24913,82 @@ impl Shots {
         // The timed ones in their order, so their files are written in
         // it; the ones a line brings are taken when it comes.
         shots.sort_by(|a, b| a.order().total_cmp(&b.order()));
-        Ok(Self { shots })
+        Ok(Self {
+            shots,
+            scenario: scenario.to_string(),
+            scanned: 0,
+            took: String::new(),
+            full: false,
+        })
+    }
+
+    /// A screendump for every hook request the serial log has grown
+    /// since the last poll: `hook: shot +<secs> <name>: ...`, which the
+    /// kernel writes as it happens (`nt::hooks`). The delay counts from
+    /// here and not from the event, which is at most one poll earlier.
+    ///
+    /// The log is read from where the last poll stopped, so watching a
+    /// long run for requests costs its new bytes and not the whole file.
+    fn hook_requests(&mut self, elapsed: Duration, log: &Path) {
+        use std::io::{Read, Seek, SeekFrom};
+        const MARK: &str = "hook: shot +";
+        let Ok(mut file) = fs::File::open(log) else { return };
+        if file.seek(SeekFrom::Start(self.scanned)).is_err() {
+            return;
+        }
+        let mut grown = Vec::new();
+        if file.read_to_end(&mut grown).is_err() {
+            return;
+        }
+        // Whole lines only; what is left of one is read again next poll,
+        // when the rest of it has been written.
+        let Some(end) = grown.iter().rposition(|&b| b == b'\n') else { return };
+        self.scanned += end as u64 + 1;
+        for line in String::from_utf8_lossy(&grown[..end]).lines() {
+            let Some(at) = line.find(MARK) else { continue };
+            let Some((after, name)) = hook_request(&line[at + MARK.len()..]) else {
+                let note = format!("xtask: screenshot: {line:?} is not a hook request\n");
+                eprint!("{note}");
+                self.took += &note;
+                continue;
+            };
+            if self.shots.len() >= MAX_HOOK_SHOTS {
+                if !self.full {
+                    self.full = true;
+                    self.took += &format!(
+                        "xtask: screenshot: {MAX_HOOK_SHOTS} hook shots is all one run takes; \
+                         the requests after that are left\n"
+                    );
+                }
+                return;
+            }
+            // A window shown, hidden and shown again asks twice, and the
+            // second picture must not write over the first.
+            let base = format!("{}-hook-{name}", self.scenario);
+            let mut png = format!("{base}.png");
+            let mut nth = 2;
+            while self.shots.iter().any(|s| s.file == png) {
+                png = format!("{base}-{nth}.png");
+                nth += 1;
+            }
+            self.shots.push(Shot {
+                when: When::At(elapsed.as_secs_f64() + after),
+                after: 0.0,
+                file: png,
+                seen: None,
+                taken: false,
+            });
+        }
     }
 
     /// Takes the screendumps whose time has come; one that fails is
     /// reported on stderr and the run goes on (a picture is not a verdict).
     fn take_due(&mut self, socket: &Path, elapsed: Duration, log: &Path) {
+        self.hook_requests(elapsed, log);
         // Read once a poll, and only while a line is still waited for.
         let mut serial: Option<Vec<u8>> = None;
+        // Gathered as the shots are walked, which holds a borrow of them.
+        let mut took = String::new();
         for shot in self.shots.iter_mut().filter(|s| !s.taken) {
             if shot.seen.is_none() {
                 shot.seen = match &shot.when {
@@ -24550,13 +25010,23 @@ impl Shots {
             let taken = fs::create_dir_all(&dir)
                 .map_err(|e| format!("creating {dir:?}: {e}"))
                 .and_then(|()| screendump_png(socket, &png));
-            match taken {
+            let note = match taken {
                 Ok(()) => {
-                    eprintln!("xtask: wrote {} ({:.0} s in)", png.display(), elapsed.as_secs_f64())
+                    format!("xtask: wrote {} ({:.0} s in)\n", png.display(), elapsed.as_secs_f64())
                 }
-                Err(e) => eprintln!("xtask: screenshot {}: {e}", shot.file),
-            }
+                Err(e) => format!("xtask: screenshot {}: {e}\n", shot.file),
+            };
+            eprint!("{note}");
+            took += &note;
         }
+        self.took += &took;
+    }
+
+    /// The screendumps a run wrote, then the ones it never reached: what
+    /// a hook asked for is named by nothing else, the request having
+    /// been the guest's and not the command's.
+    fn notes(&self) -> String {
+        self.took.clone() + &self.missed()
     }
 
     /// The ones the run never reached, for the serial log: a line that
@@ -24611,6 +25081,18 @@ impl Shot {
             When::Line(_) => f64::INFINITY,
         }
     }
+}
+
+/// `<secs> <name>: ...` of a `hook: shot` request, as its delay and the
+/// name its file carries. The name is slugged again here: it was written
+/// by a guest, and a file the host writes is never named by text the
+/// host has not itself reduced to letters, digits and dashes.
+fn hook_request(rest: &str) -> Option<(f64, String)> {
+    let (secs, rest) = rest.split_once(' ')?;
+    let (name, _) = rest.split_once(':')?;
+    let after = secs.parse::<f64>().ok().filter(|s| (0.0..=60.0).contains(s))?;
+    let name = slug(name);
+    (!name.is_empty()).then_some((after, name))
 }
 
 /// A file name out of a line's text: its letters and digits, and a `-`
@@ -24672,6 +25154,24 @@ mod shots {
         }] if t == 2.0));
         // An empty list is no shots, not an error.
         assert!(Shots::parse("", "hello").expect("empty").shots.is_empty());
+    }
+
+    #[test]
+    fn a_hook_request_is_a_delay_and_a_name() {
+        let r = hook_request("1.000 winword-exe-w3: window 'Doc1' shown by WINWORD.EXE (pid 12)");
+        assert_eq!(r, Some((1.0, "winword-exe-w3".to_string())));
+        let r = hook_request("0.000 window-w1: window '' shown by  (pid 4)");
+        assert_eq!(r, Some((0.0, "window-w1".to_string())));
+        // The name is a guest's text: whatever it holds, the file is
+        // named by letters, digits and dashes.
+        let r = hook_request("0.000 ../../etc/passwd: window 'x' shown by y (pid 4)");
+        assert_eq!(r, Some((0.0, "etc-passwd".to_string())));
+        // Not a request at all: no name, no delay, or a delay longer
+        // than a hook may ask for.
+        assert!(hook_request("1.0 a-name-without-a-colon").is_none());
+        assert!(hook_request("soon a-name: x").is_none());
+        assert!(hook_request("600.0 a-name: x").is_none());
+        assert!(hook_request("0.000 ...: x").is_none());
     }
 
     #[test]
@@ -32533,7 +33033,7 @@ fn iso(release: bool, args: &[String]) -> Result {
             "xtask: QEMU: qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 1G -smp 2 \
              -bios <AAVMF/edk2-aarch64 code> -device virtio-gpu-pci -device virtio-keyboard-pci \
              -device virtio-mouse-pci -device virtio-scsi-pci -drive \
-             if=none,id=cd,media=cdrom,file={} -device scsi-cd,drive=cd",
+             if=none,id=cd,media=cdrom,file={} -device scsi-cd,drive=cd,bootindex=0",
             path.display()
         );
         return Ok(());
@@ -33723,6 +34223,39 @@ mod um_scenarios {
         assert!(run.timed_out);
         assert_eq!(run.code, Some(3), "{}", run.log);
         assert!(run.log.contains("waiting") && run.log.contains("dumped"), "{}", run.log);
+    }
+
+    /// The dump request reaches the run however the gate was launched: a
+    /// shell that starts a job in the background ignores SIGQUIT, and a
+    /// program cannot trap a signal that was ignored when it started, so
+    /// a run under `cargo xtask test &` would inherit that and answer no
+    /// dump request at all. The run here starts from that disposition
+    /// itself -- nothing of xtask's own is changed, so the runs beside
+    /// it are untouched.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_run_answers_the_dump_request_though_it_starts_from_an_ignored_sigquit() {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new("sh");
+        let waiting = "while :; do sleep 0.05; done";
+        cmd.args(["-c", &format!("trap 'echo dumped; exit 3' QUIT; echo waiting; {waiting}")]);
+        // SAFETY: the closure runs in the child between fork and exec,
+        // where only async-signal-safe calls are allowed: signal(2) is
+        // one, and it allocates nothing and reads no state of xtask's.
+        // It is added before `run_with_deadline`'s own, which therefore
+        // runs after it (they run in the order they were added), so this
+        // is what a backgrounded shell leaves a run of its own.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let run = run_with_deadline(&mut cmd, Duration::from_millis(300), Duration::from_secs(5))
+            .expect("the run");
+        assert!(run.timed_out);
+        assert_eq!(run.code, Some(3), "{}", run.log);
+        assert!(run.log.contains("dumped"), "{}", run.log);
     }
 
     /// A run that does not answer the dump request is killed when its

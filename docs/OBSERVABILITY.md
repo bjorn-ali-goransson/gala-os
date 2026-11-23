@@ -532,7 +532,14 @@ that row is in the dump only when the filter freed the slot it took.
   `reached` (not a gap at all: the first call that reached a method gala
   answers, so that a program stopping in the middle of a path leaves the
   path it took; it is told from a call answered S_OK, which `other`
-  records with the HRESULT as its detail) and `other`. Both
+  records with the HRESULT as its detail), `waited` (not a gap either:
+  a lock inside one of gala's own DLLs that a thread has been waiting
+  a second for, named `<dll>!<what the lock protects>` with a suffix
+  saying whether the thread waited for it, found another thread
+  holding it, or re-entered it -- `user/gala_lock`, what a DLL writes
+  down instead of spinning silently, and the row that would have
+  named the holder of the trace lock Word's main thread hung in) and
+  `other`. Both
   `stub` and `not implemented` are also logged as they happen, because a
   run cut short by a snapshot never dumps the ledger; only `stub`'s line
   says the process ended. The Windows Runtime's:
@@ -1104,8 +1111,82 @@ top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
 "ended with status S after an unhandled exception C"; a filter that
-continues execution withdraws it. Scenarios `crash`, `crash_dispatched`
-and `crash_filtered`. An exception in 32-bit code (a WOW64 process, CS
+continues execution withdraws it, and the withdrawal is said out loud as
+it happens:
+
+```
+exception continued: crash.exe (pid 4) thread 8: its top-level filter continued past an unhandled 0xc0000005 (access violation: writing address 0x20000) at 0x140001c5c (crash.exe+0x1c5c)
+```
+
+That line, and a ledger row beside it (`GalaUnhandledException`, "an
+exception the top-level filter continued past", so a long run's gaps
+carry it too), are the whole record of such an exception. Nothing else
+in the run would hold it: no crash report is ever written, and the
+ledger row ntdll writes is on its death path, so a program that carries
+on past an exception nobody handled used to leave nothing at all behind
+-- which is what Office's shared code does.
+
+A report the kernel could not read is said out loud as well, because
+ntdll's dispatcher does not look at the status it gets back and would
+carry on as if the note had been kept:
+
+```
+exception report unread: crash.exe (pid 4) thread 12: the record of ntdll's report (record 0x3ff98, context 0x3fbe0) could not be read, so no note is kept and no crash report will describe this exception
+```
+
+with a ledger row beside it. **An EXCEPTION_RECORD is only as long as the
+parameters it carries**, so it is read a word at a time and never as a
+block of its full size: a record that lands at the top of a thread's
+stack has fewer bytes above it than that, and ARM64 read the whole of it,
+failed and kept no note -- so an exception that went on to end the
+process was described by nothing at all. The CONTEXT beside it is one
+size and is read whole.
+
+**A thread keeps its own notes**, made the first time it takes an
+exception (a note is large and most threads never take one), so two
+threads' exceptions do not write over one another. The crash report is
+written from the notes of the thread whose exception ends the process --
+the thread that set its exit status -- which `process::terminate` moves
+into the process there and then (`nt::crashreport::promote`): the last
+moment a note can be had from its thread, because the report itself is
+written once the process's last thread has exited and no thread is left
+to ask. A withdrawal reaches only the withdrawing thread's own note.
+
+Another thread's unhandled exception, still on its way to ending the
+process, stays where it is and gets a line of its own, with what its
+parameters describe and where it happened:
+
+```
+exception note: crash.exe (pid 4) thread 12 took an unhandled 0xc06d007e (delay-loaded DLL not found: gala_missing.dll ordinal 4660) at 0x140001174 (crash.exe+0x1174) too, and the crash report is not written from it: the process ends with 0xc06d007f (delay-loaded function not found), which thread 8 took
+```
+
+so an exception that happened and ended nothing is still named
+somewhere, by the name it would carry in a crash report. The clause
+after the code is one piece of text (`About`) shared by the three lines
+that describe an exception outside a report -- this one, the withdrawal
+above and the warning that a thread had no room for notes of its own:
+the verb and address of an access violation, the type a C++ throw
+carried, the DLL and the function or ordinal a delay load wanted. What
+the parameters mean is decoded in one place for both ABIs
+(`nt::crashreport::decode_params`), so a note made on ARM64 says as
+much as one made on x64. A line that gives the code and its name and
+nothing else is not enough: two of Word's threads die of 0xc06d007f on
+the way to its window (ROADMAP OF) and one report is written, so the
+other thread's line would otherwise leave a reader looking for nothing
+in particular. The kernel's fault notes are not named that way: one is kept
+for every fault, including the faults a handler goes on to take, so a
+fault note left behind says nothing by itself.
+
+The process's own slots remain, for a note no thread can keep: the
+kernel's own context, and a thread whose notes could not be allocated --
+which says so (`there was no room for the thread's notes`), because one
+slot serves every thread of the process and the next exception there
+does write over this one. That is also the only case left where a
+withdrawal can meet a note which is not its own, and it leaves it, for
+the crash report. Scenarios `crash`, `crash_dispatched`,
+`crash_filtered`, `crash_continued`, `crash_continued_other`,
+`crash_unhandled_both` and `crash_delay` (two threads, a delay-loaded
+function and a delay-loaded DLL), each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
 eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`
@@ -1174,6 +1255,11 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 - A delay-load failure (0xc06d007e, 0xc06d007f: the delay-load
   helper's DLL or function not found): `delay load of DLL!function` (or
   `ordinal N`), from the DelayLoadInfo its first parameter points to.
+- The user APC the thread was last given, when it was given one: its
+  routine, who queued it, where from, and that thread's last calls as
+  well. An exception raised in an APC is the queueing thread's decision
+  and not the dying thread's, which the lines above cannot show ("Who
+  queued a user APC" below). Scenario `crash_apc`.
 
 ### Suspensions (who stopped a thread)
 
@@ -1242,6 +1328,81 @@ The events `thread suspend` and `thread resume` (`events=thread`) carry
 `thread suspend refused` with `handle`, `what` and `status`.
 
 Scenario `suspend_test`.
+
+### Who queued a user APC (an exception another thread decided)
+
+An APC is how one thread makes another run code, so an exception raised
+in one is the queueing thread's decision and not the dying thread's:
+**Office's shared code ends a thread this way.** It suspends the victim
+from `Mso30win32client.dll+0x8e4a70`, queues a user APC whose routine is
+`Mso30win32client.dll+0x8e4ac0` and raises 0xe0000002 in the victim's
+context, and resumes it (ROADMAP OF). The routine's address comes from
+the record below and not from the unwind, which is the point: the
+unwind's frame above the raise is `+0x8e4aac`, *before* the routine's
+own entry, so the two are different functions and reading the routine
+off the stack would have named the wrong one. The victim's own stack and
+last calls describe the wait it was in instead, which is what 24 frames
+of Word's crash report were.
+
+So every queued APC carries who queued it, and the thread keeps the last
+one it was given after that APC has left the queue. A crash report is
+written when the process's **last** thread has exited, so no thread is
+there to ask by then: the exception's note takes that mark as the
+exception is recorded, while the thread is still the current one, and
+carries it to the report with everything else. The report names both
+(`kernel/src/nt/crashreport.rs`):
+
+```
+crash report:   it was last given a user APC: routine 0x140001000 (crash.exe+0x1000), queued by pid 4 tid 8, called from 0x140001424 (crash.exe+0x1424) at 1218 ms
+crash report:   thread 8's last calls, oldest first: ..., NtWriteFile=0x00000000, NtClose=0xc0000008, NtQueueApcThread=0x00000000, NtWaitForSingleObject=0xc000004b
+```
+
+- Who queued it is the thread that made the call, with the return
+  address above its system-call stub and the image that address is in --
+  the same address a suspension's mark names its caller by -- and the
+  uptime of the call.
+- The routine is to be read against the frames of the unwind above it:
+  when the exception was raised inside that APC, one of those frames is
+  the routine. A thread that ran an APC earlier and died of something
+  else has the line too, which is why it says `last given`.
+- `the kernel` is gala's own code: an I/O completion routine, a timer's
+  APC. `queued before a handover` is an APC carried across a kernel
+  upgrade, whose queuer is not carried.
+- An APC to a thread of another process is refused, so the queuer's
+  address is always placed by this process's own images.
+- The address is the one the system call returns to, so a program that
+  queues through a wrapper is named by the wrapper. Word's report reads
+  `called from 0x3ff7fff8b67b (kernel32.dll+0x4b67b)` -- gala's own
+  `QueueUserAPC` -- and the code that decided is a frame further up.
+  Where the wrapper is the answer the record gives, the whole stack of
+  that call is the next question, and `stack_at=NtQueueApcThreadEx2`
+  with `stack_from=` on the deciding module ("Stack captures" below) is
+  what asks it.
+- The queueing thread's last calls come from the flight recorder, by
+  tid, exactly as the dying thread's do; a thread whose calls have
+  fallen out of the ring has no line.
+- The dying thread's own last calls can say nothing at all: dispatching
+  the exception the APC raised looks up unwind data frame by frame, and
+  those calls crowd out everything the thread did before (`crash_apc`:
+  21 of them, and not the alertable wait left). The queueing thread's
+  ring holds no dispatch, so its calls are the ones that explain the
+  death.
+
+Scenario `crash_apc`: a worker waits alertably, the main thread closes a
+handle that is not one and queues an APC that raises a code nothing
+handles, and the report must name the main thread, where it queued from,
+and that failing close among its last calls.
+
+Word's own death reads (`office_word`, ROADMAP OF):
+
+```
+crash report:   it was last given a user APC: routine 0x3ff7f8734ac0 (Mso30win32client.dll+0x8e4ac0), queued by pid 12 tid 272, called from 0x3ff7fff8b67b (kernel32.dll+0x4b67b) at 40599 ms
+crash report:   thread 272's last calls, oldest first: NtProtectVirtualMemory=0x00000000, NtQueueApcThreadEx2=0x00000000, NtResumeThread=0x00000000, NtSetInformationThread=0xc0000022, NtWaitForSingleObject=0x00000000, NtQueryInformationProcess=0x00000000, NtDelayExecution=0x00000000
+```
+
+-- the queue and the resume of the fail-fast, in that order, and a
+refused `NtSetInformationThread` after them that nothing else in the run
+records.
 
 ### Stack captures (`stack_at=`, `stack_from=`, `stack_words=`)
 
@@ -1327,6 +1488,81 @@ stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
   are above what is scanned and are not placed by this yet; and the
   scan is bounded (512 words at the most, `stack_words=`) because it
   runs on a kernel stack, so an arbitrarily deep stack is not reached.
+
+### Hooks (`hook=`)
+
+`hook=<event>[/<text>][:<n>]=<action>[+<secs>]` says what the kernel does
+when something happens on the screen. There is one event, `window` (a
+top-level window became visible), and one action, `shot` (a screendump of
+the whole desktop), so the short form of it is `hook=window=shot`
+(`kernel/src/nt/hooks.rs`, scenarios `hook_test` and `hook_match_test`).
+
+It answers what a picture of a run leaves open: what the screen looked
+like when the program put its window up. The host can take a picture at a
+second of the run (`XTASK_SHOTS`, "Screen" and WORKFLOW "Screenshots"),
+but a second guessed from the outside is missed as often as it is caught,
+and it can wait for a line of the serial log -- which only works when the
+line is known in advance. The first window of a run is; the ones after it
+are not, and Word's splash goes up with an empty title. The kernel is the
+one that knows, so the kernel is the one that asks.
+
+The two halves meet through a line. The kernel writes the request as the
+window goes up:
+
+```
+hook: armed: window shown -> screendump, 4 shots, 0.000 s after each (hook=)
+hook: shot +0.000 hook-test-exe-w4: window 'hook_test three again' shown by hook_test.exe (pid 4)
+```
+
+and xtask, which polls the log every 50 ms for the screendumps it was
+asked for itself, reads the new lines, waits the `+<secs>` and takes the
+picture through the same monitor socket as screen checks, into
+`target/screenshots/<scenario>-hook-<name>.png` -- `<name>` being the
+program's name in lower case with every run of anything but a letter or a
+digit as one `-`, then `-w` and the window's id, so two windows of one
+program are two files and a window shown twice does not write over its
+own earlier picture (`-2`, `-3`). The file written is named in the run's
+own log (`xtask: wrote ...`), which is what a scenario's expectations are
+checked against. The kernel cannot encode a PNG and the host cannot know
+when to take one: this is the whole of why it is split.
+
+A delay is what the picture is usually worth taking after. `+0` is the
+instant the window became visible, which is before the program has
+painted it -- `hook_test`'s fourth window is white in its own picture and
+the three before it are not. `hook=window=shot+1` catches a window the
+program has drawn.
+
+Which windows, and how many:
+
+- **The match** (`hook=window/<text>=shot`) takes only the windows whose
+  program or title holds the text, either case. A desktop with a taskbar
+  and a start menu on it shows windows nobody asked about.
+- **The count** (`:<n>`, 4 by default, 64 at most) is how many pictures
+  the hook has to give. When it runs out with windows still matching, one
+  line says so and carries the number of windows the match passed over:
+
+```
+hook: window: no shots left of the 1 asked for (2 windows passed over by the match)
+```
+
+  which is what tells a count that was too small from a match that was
+  too narrow. (A scenario's expectation is a line that must appear, never
+  one that must not, so this count is also the only thing that can prove
+  the match excluded anything: `hook_match_test`.)
+
+- **Cost and bounds**: an unarmed hook is one relaxed atomic load on the
+  path of every window that goes up. Four hooks at most are armed in a
+  boot (`hook=` may be written more than once), each at most 64 pictures,
+  each picture about 3 MB of `target/screenshots`; the host takes 64 of
+  them in a run whatever the guest asks for. The kernel writes a request
+  and never a file, and the name in it is reduced to letters, digits and
+  dashes twice, once by the kernel and once by the host, because the text
+  came from a guest.
+- **Limits**: the event is a window becoming visible (`winstate::show`),
+  so a window that is moved, retitled or redrawn is not one, and neither
+  is a window shown again that was already shown. The action is a picture
+  of the whole screen, not of the window. gala-um has no screen to take a
+  picture of, so the scenarios are x86 UEFI boots.
 
 ### Call tracing (`trace_from=`)
 
@@ -2224,7 +2460,8 @@ always on and cheap:
 The kernel's screen console mirrors the serial log on the framebuffer;
 `cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel
 cmdline...]` saves PNGs at chosen times in `target/screenshots/`
-(WORKFLOW "Screenshots").
+(WORKFLOW "Screenshots"). A picture of a moment nobody can name in
+advance is the kernel's to ask for instead ("Hooks").
 
 ### Benchmarks
 
