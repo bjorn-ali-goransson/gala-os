@@ -2051,21 +2051,32 @@ need gala's.
    ends before the splash. The unwind itself is sound this time: the
    single frame with `no unwind data found` is `NtQuerySystemTime`'s
    16-byte syscall stub, the rip the APC interrupted, a leaf that needs
-   no entry (ntdll's `.pdata` starts above its 209 stubs). The nearest
-   named gap is 127 ms before the raise:
-   **`advapi32.dll!CredEnumerateW`, a missing export**, at the end of a
-   long identity stretch (`Identity/ServiceAuthInfoCache`,
-   `IdentityCRL`, `CredStoreKeyToAuthScheme`, and
-   `WebAuthenticationCoreManager`, which RoGetActivationFactory
-   refuses). gala's advapi32 keeps the rest of the credential store in
-   `unimplemented_exports!` -- CredReadW, CredWriteW, CredDeleteW and
-   CredFree end the process when called -- and CredEnumerateW is not
-   listed even there, so Office's probe for it gets NULL. On Windows a
-   user with nothing stored is answered ERROR_NOT_FOUND and Word starts,
-   so the next piece of work is a credential store that answers that
-   way, the whole family at once: a poison stub behind a function
-   Office has just found is worse than the miss that led to it.
-   `advapi32_test` is where it is measured.
+   no entry (ntdll's `.pdata` starts above its 209 stubs).
+
+   The nearest named gap, 127 ms before the raise, is **not** what
+   Office is reporting: `advapi32.dll!CredEnumerateW`, a missing export
+   at the end of a long identity stretch
+   (`Identity/ServiceAuthInfoCache`, `IdentityCRL`,
+   `CredStoreKeyToAuthScheme`, and `WebAuthenticationCoreManager`, which
+   RoGetActivationFactory refuses). A throwaway export that answers as
+   Windows answers a user with nothing stored -- FALSE with
+   ERROR_NOT_FOUND -- was measured against the whole run: the function
+   leaves the list of functions gala lacks, Office asks it and goes on,
+   and the same 0xe0000002 is raised 650 ms later than before (33.7 s
+   against 33.0 s into Word's own run). A gap next to a crash is a
+   suspect, not a cause, and a probe run costs less than a credential
+   store would have. What raises it is still unnamed; a stack capture on
+   the raise (OBSERVABILITY "Stack captures": `stack_at=` on
+   kernel32's RaiseException with `stack_from=mso30win32client`) is what
+   names a caller without a record typed by hand, and is the next step.
+
+   The credential store remains a gap of its own: CredReadW, CredWriteW,
+   CredDeleteW and CredFree are in advapi32's `unimplemented_exports!`
+   and end the process when called, and CredEnumerateW is not listed
+   even there, so a probe for it gets NULL. It is work for the program
+   that needs it -- a poison stub behind a function Office has just
+   found is worse than the miss that led to it -- and `advapi32_test` is
+   where it will be measured.
 
    That this gap cost a run to find is why the triage names every
    missing export and import the ledger holds, however few its hits
