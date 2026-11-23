@@ -10,18 +10,37 @@
 //! The process's activation filter (CoRegisterActivationFilter) has its
 //! say on every activation before anything is looked up: it may refuse
 //! the class or replace it.
-//! A server process's reference count and suspension
-//! (CoAddRefServerProcess, CoReleaseServerProcess, CoSuspendClassObjects,
-//! CoResumeClassObjects) are kept as documented; with no local servers
-//! nothing is refused while suspended.
+//!
+//! Before the registry comes the table of classes the process answers
+//! for itself (CoRegisterClassObject): an OLE server registers its own
+//! class objects and is then handed them back, which is how Word loads
+//! what it saved. An apartment owns a registration -- every thread of
+//! the multi-threaded apartment shares one, a single-threaded apartment
+//! has its own -- and CoUninitialize takes the apartment's registrations
+//! with it. A registration is read by an activation that names an
+//! in-process context and by no other, whatever context the
+//! registration itself named, because the table belongs to the process
+//! and a local activation goes to the service control manager instead
+//! (all of it measured, `ole32_test`).
+//!
+//! A server process's reference count (CoAddRefServerProcess,
+//! CoReleaseServerProcess) is kept as documented. The suspension that
+//! the documentation pairs with it is the service control manager's,
+//! which gala has none of: a count reaching zero leaves these
+//! registrations serving, as on Windows. CoSuspendClassObjects does
+//! suspend them, and nothing lifts that -- CoResumeClassObjects in an
+//! apartment is an error on Windows and here.
 
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+use gala_lock::Lock;
 
 use super::{
-    E_INVALIDARG, E_POINTER, GetProcAddress, Guid, HResult, LoadLibraryW, apartment, com_call,
-    guid_text, missing, ole_iid, put, reached, release,
+    E_INVALIDARG, E_POINTER, GetProcAddress, Guid, HResult, LoadLibraryW, add_ref, apartment,
+    com_call, guid_text, missing, ole_iid, put, reached, release,
 };
 
 const CO_E_NOT_SUPPORTED: HResult = 0x8000_4021u32 as i32;
@@ -71,6 +90,13 @@ unsafe extern "system" {
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32;
+    fn GetCurrentThreadId() -> u32;
+}
+
+/// This thread, as a registration's owning apartment is written down.
+pub(crate) fn thread_id() -> u32 {
+    // SAFETY: no arguments, no output.
+    unsafe { GetCurrentThreadId() }
 }
 
 const IID_ICLASSFACTORY: Guid = ole_iid(1);
@@ -272,6 +298,25 @@ pub extern "system" fn CoGetClassObject(
         missing(b"ole32.dll!CoGetClassObject(out-of-process server)", detail);
         return REGDB_E_CLASSNOTREG;
     }
+    // A class this process answers for comes before the registry, and
+    // beats it (measured). Only an in-process activation reads the
+    // table, which is what the check above has just established.
+    if let Some((object, key, single_use)) = registered(&clsid_value) {
+        // The class object is asked for the caller's interface, and it
+        // is that reference the caller is given: a reference on the
+        // class object itself goes with it (measured: one more on the
+        // object than before, for an IClassFactory the caller releases).
+        let hr = com_call!(object, 0, fn(*const Guid, *mut *mut c_void) -> HResult, iid, out);
+        release(object);
+        if hr < 0 {
+            put(out, core::ptr::null_mut());
+            return hr;
+        }
+        if single_use {
+            spend(key);
+        }
+        return hr;
+    }
     let Some(path) = inproc_server(&clsid_value) else {
         missing(b"ole32.dll!CoGetClassObject(class not registered)", detail);
         return REGDB_E_CLASSNOTREG;
@@ -437,46 +482,386 @@ pub extern "system" fn CoCreateInstance(
 // ---- The server process's lifetime ----
 
 /// The process's server reference count (CoAddRefServerProcess).
-static SERVER_REFS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-/// Whether the class objects are suspended (CoSuspendClassObjects, or
-/// CoReleaseServerProcess reaching 0) until CoResumeClassObjects.
-static SUSPENDED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SERVER_REFS: AtomicU32 = AtomicU32::new(0);
 
 /// CoAddRefServerProcess: the process's server reference count, plus one
 /// (the new count).
 #[unsafe(no_mangle)]
 pub extern "system" fn CoAddRefServerProcess() -> u32 {
-    SERVER_REFS.fetch_add(1, core::sync::atomic::Ordering::AcqRel).wrapping_add(1)
+    SERVER_REFS.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
 }
 
 /// CoReleaseServerProcess: the count minus one (the new count, never
-/// below 0); at 0 the class objects are suspended, as documented, so no
-/// new activation reaches a server that is shutting down.
+/// below 0).
+///
+/// The documentation says the class objects are suspended when the count
+/// reaches 0, so that no new activation reaches a server that is shutting
+/// down. What it means is the ones the service control manager hands out,
+/// and this process has none of those: measured on Windows, a class
+/// registered here goes on being activated here after the count reaches 0
+/// (`ole32_test`). So the count is all this keeps.
 #[unsafe(no_mangle)]
 pub extern "system" fn CoReleaseServerProcess() -> u32 {
-    use core::sync::atomic::Ordering;
     let old = SERVER_REFS
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| Some(n.saturating_sub(1)))
         .unwrap_or(0);
-    let now = old.saturating_sub(1);
-    if now == 0 {
-        SUSPENDED.store(true, Ordering::Release);
-    }
-    now
+    old.saturating_sub(1)
 }
 
-/// CoSuspendClassObjects: the process's class objects take no new
-/// activations (gala's activations are in-process, through
-/// DllGetClassObject: nothing to refuse yet); S_OK.
+/// CoSuspendClassObjects: the class objects this process has registered
+/// take no new activations; S_OK.
+///
+/// Nothing lifts it: CoResumeClassObjects, the call the documentation
+/// pairs with this one, is an error in a process the service control
+/// manager did not start as a server, which is every process here
+/// (measured). A registration made after this one stands, as a class
+/// object that did not exist to be suspended.
 #[unsafe(no_mangle)]
 pub extern "system" fn CoSuspendClassObjects() -> HResult {
-    SUSPENDED.store(true, core::sync::atomic::Ordering::Release);
+    CLASSES.lock.with(|| {
+        // SAFETY: under the lock.
+        for r in unsafe { &mut *CLASSES.slots.get() }.iter_mut().filter(|r| r.key != 0) {
+            r.suspended = true;
+        }
+    });
     super::S_OK
 }
 
-/// CoResumeClassObjects: activations are taken again; S_OK.
+/// CoResumeClassObjects: on Windows this is the service control
+/// manager's business, and a process it did not start as a server is
+/// told so -- CO_E_RESUME_NOT_A_SERVER, with whatever was suspended left
+/// suspended (measured, in every state an apartment can be in: with a
+/// suspended registration, with a plain one, and with none at all).
+/// With no apartment at all it is S_OK, where there can be no
+/// registration either way.
 #[unsafe(no_mangle)]
 pub extern "system" fn CoResumeClassObjects() -> HResult {
-    SUSPENDED.store(false, core::sync::atomic::Ordering::Release);
+    if apartment().is_some() || super::implicit_mta() {
+        reached(b"ole32.dll!CoResumeClassObjects(not started as a server)", 0);
+        return CO_E_RESUME_NOT_A_SERVER;
+    }
     super::S_OK
+}
+
+// ---- The class objects this process answers for ----
+
+/// REGCLS: how a registration is used (the low two bits) and the flags
+/// over them. Anything outside these is E_INVALIDARG (measured).
+const REGCLS_SINGLEUSE: u32 = 0;
+const REGCLS_MULTI_SEPARATE: u32 = 2;
+const REGCLS_SUSPENDED: u32 = 4;
+const REGCLS_SURROGATE: u32 = 8;
+const REGCLS_AGILE: u32 = 0x10;
+const REGCLS_KNOWN: u32 = 3 | REGCLS_SUSPENDED | REGCLS_SURROGATE | REGCLS_AGILE;
+
+/// What CoResumeClassObjects answers a process the service control
+/// manager did not start as a server: Win32 1734 as an HRESULT, which is
+/// what Windows says and is documented nowhere.
+const CO_E_RESUME_NOT_A_SERVER: HResult = 0x8007_06c6u32 as i32;
+
+/// One registration (CoRegisterClassObject).
+#[derive(Clone, Copy)]
+struct Registration {
+    /// The key the caller was given, which is never 0; 0 in a free slot.
+    /// Keys only ever rise, so the greatest key of a class is its
+    /// newest registration -- the one that serves (measured).
+    key: u32,
+    clsid: Guid,
+    /// The class object, holding the one reference the registration took.
+    object: *mut c_void,
+    /// The apartment it belongs to: the single-threaded apartment's
+    /// thread, or 0 for the multi-threaded one, which all of its threads
+    /// share.
+    thread: u32,
+    /// REGCLS_SINGLEUSE: it serves one activation.
+    single_use: bool,
+    /// A single-use registration that has served. It keeps its reference
+    /// and its key still revokes it, but no activation finds it again
+    /// (measured).
+    spent: bool,
+    /// Registered REGCLS_SUSPENDED, or suspended by
+    /// CoSuspendClassObjects since. Nothing lifts it.
+    suspended: bool,
+    /// How many look-ups are between taking this registration out of
+    /// the table and taking their reference on its class object. The
+    /// registration's own reference stands until the last of them is
+    /// done, so a revoke in that window cannot free the object under a
+    /// thread that is about to call AddRef on it.
+    borrows: u32,
+    /// Revoked while borrowed: no look-up finds it, and the slot and
+    /// the reference go when the last borrow ends.
+    retired: bool,
+}
+
+const FREE: Registration = Registration {
+    key: 0,
+    clsid: GUID_NULL,
+    object: core::ptr::null_mut(),
+    thread: 0,
+    single_use: false,
+    spent: false,
+    suspended: false,
+    borrows: 0,
+    retired: false,
+};
+
+/// How many registrations a process may hold at once. Windows has no
+/// such limit; one past this is E_OUTOFMEMORY with a row to say so
+/// (ARCHITECTURE "COM: ole32 and oleaut32", Limits).
+const REGISTRATIONS: usize = 128;
+
+struct Classes {
+    lock: Lock,
+    slots: UnsafeCell<[Registration; REGISTRATIONS]>,
+    /// The next key. It only rises, so a key is never reused and a
+    /// stale one names nothing.
+    next_key: AtomicU32,
+}
+
+// SAFETY: `slots` is only touched under `lock`.
+unsafe impl Sync for Classes {}
+
+static CLASSES: Classes = Classes {
+    lock: Lock::new(b"ole32.dll!the class objects"),
+    slots: UnsafeCell::new([FREE; REGISTRATIONS]),
+    next_key: AtomicU32::new(1),
+};
+
+/// Whether a registration owned by apartment `thread` (0 the MTA) is
+/// this thread's to use.
+fn mine(owner: u32, in_mta: bool) -> bool {
+    if owner == 0 { in_mta } else { owner == thread_id() }
+}
+
+/// This thread's apartment, as a registration records it: Some(0) for
+/// the multi-threaded apartment (the implicit one included), Some(this
+/// thread) for a single-threaded one, None for a thread with no
+/// apartment at all.
+fn owning_apartment() -> Option<u32> {
+    match apartment() {
+        Some(1) => Some(0),
+        Some(_) => Some(thread_id()),
+        None if super::implicit_mta() => Some(0),
+        None => None,
+    }
+}
+
+/// The class object this process has registered for `clsid` and this
+/// thread may use, with a reference taken on it: the newest such
+/// registration, passing over the suspended, the spent and the retired.
+///
+/// AddRef is the program's code, so the lock is let go before it is
+/// called (gala_lock: nothing is held across a call into a program).
+/// What keeps the object alive in between is the borrow the look-up
+/// leaves on the registration: a revoke meanwhile takes the
+/// registration out of reach but leaves its reference until the borrow
+/// ends.
+fn registered(clsid: &Guid) -> Option<(*mut c_void, u32, bool)> {
+    let in_mta = apartment() == Some(1) || (apartment().is_none() && super::implicit_mta());
+    let (slot, object, key, single_use) = CLASSES.lock.with(|| {
+        // SAFETY: under the lock.
+        let slots = unsafe { &mut *CLASSES.slots.get() };
+        let slot = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r.key != 0
+                    && r.clsid == *clsid
+                    && !r.suspended
+                    && !r.spent
+                    && !r.retired
+                    && mine(r.thread, in_mta)
+            })
+            .max_by_key(|(_, r)| r.key)?
+            .0;
+        let r = &mut slots[slot];
+        r.borrows += 1;
+        Some((slot, r.object, r.key, r.single_use))
+    })?;
+    add_ref(object);
+    give_back(slot);
+    Some((object, key, single_use))
+}
+
+/// Gives back the borrow `registered` took, and finishes the revoke
+/// that was waiting on it, if there was one.
+fn give_back(slot: usize) {
+    let left = CLASSES.lock.with(|| {
+        // SAFETY: under the lock.
+        let r = &mut unsafe { &mut *CLASSES.slots.get() }[slot];
+        r.borrows -= 1;
+        if r.borrows == 0 && r.retired {
+            let object = r.object;
+            *r = FREE;
+            return object;
+        }
+        core::ptr::null_mut()
+    });
+    // Released with the lock let go, as a revoke does.
+    if !left.is_null() {
+        release(left);
+    }
+}
+
+/// Marks a single-use registration as having served, once it has: the
+/// next activation of that class does not find it.
+fn spend(key: u32) {
+    CLASSES.lock.with(|| {
+        // SAFETY: under the lock.
+        if let Some(r) = unsafe { &mut *CLASSES.slots.get() }.iter_mut().find(|r| r.key == key) {
+            r.spent = true;
+        }
+    });
+}
+
+/// CoRegisterClassObject(rclsid, pUnk, dwClsContext, flags, lpdwRegister):
+/// the class object this process answers for `rclsid` with, until it is
+/// revoked or the apartment ends.
+///
+/// Measured on Windows (`ole32_test`), where the documentation says
+/// little of it: the registration takes one reference on the class object
+/// and gives it back when it is revoked, while an activation leaves the
+/// count where it found it; the same class may be registered twice, and
+/// the newer serves until it is revoked, when the older serves again; a
+/// registration beats the registry; the apartment owns it, so every
+/// thread of the MTA shares one and another apartment sees nothing of it;
+/// REGCLS_SINGLEUSE serves once and then holds its reference without
+/// serving; REGCLS_SUSPENDED registers and never serves; and the key is
+/// never 0. The refusals: a NULL key is E_INVALIDARG, no apartment is
+/// CO_E_NOTINITIALIZED with the caller's key untouched, and a flag that
+/// is not a flag, or no class object at all, is E_INVALIDARG with the key
+/// zeroed -- so the apartment is looked at before the key is written and
+/// the rest after.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoRegisterClassObject(
+    clsid: *const Guid,
+    object: *mut c_void,
+    context: u32,
+    flags: u32,
+    key: *mut u32,
+) -> HResult {
+    if clsid.is_null() || key.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's CLSID.
+    let asked = unsafe { *clsid };
+    let detail = u64::from(u32::from_le_bytes([asked[0], asked[1], asked[2], asked[3]]));
+    let Some(thread) = owning_apartment() else {
+        missing(b"ole32.dll!CoRegisterClassObject(COM not initialized, no MTA)", detail);
+        return CO_E_NOTINITIALIZED;
+    };
+    put(key, 0);
+    if flags & !REGCLS_KNOWN != 0 || object.is_null() {
+        return E_INVALIDARG;
+    }
+    // What gala does not keep apart, said out loud: a separate
+    // registration for the local server is the same thing here, where
+    // there is no local server, and a surrogate is a process gala has no
+    // way to be.
+    if flags & 3 == REGCLS_MULTI_SEPARATE {
+        reached(b"ole32.dll!CoRegisterClassObject(REGCLS_MULTI_SEPARATE)", detail);
+    }
+    if flags & REGCLS_SURROGATE != 0 {
+        missing(b"ole32.dll!CoRegisterClassObject(REGCLS_SURROGATE)", detail);
+    }
+    // A class object registered for an out-of-process context alone is
+    // one no other process can reach here: gala has no service control
+    // manager to hand it out. It is registered all the same, and found
+    // by this process, as on Windows.
+    if context != 0 && context & CLSCTX_INPROC == 0 {
+        missing(b"ole32.dll!CoRegisterClassObject(out-of-process server)", detail);
+    }
+    // The class object's own reference, taken before the lock: the
+    // table must not be held across a call into a program's code.
+    add_ref(object);
+    let new = Registration {
+        key: CLASSES.next_key.fetch_add(1, Ordering::AcqRel),
+        clsid: asked,
+        object,
+        thread,
+        single_use: flags & 3 == REGCLS_SINGLEUSE,
+        spent: false,
+        suspended: flags & REGCLS_SUSPENDED != 0,
+        borrows: 0,
+        retired: false,
+    };
+    let taken = CLASSES.lock.with(|| {
+        // SAFETY: under the lock.
+        let slot = unsafe { &mut *CLASSES.slots.get() }.iter_mut().find(|r| r.key == 0);
+        match slot {
+            Some(slot) => {
+                *slot = new;
+                true
+            }
+            None => false,
+        }
+    });
+    if !taken {
+        // The one failure Windows does not have. The row names the
+        // class, so a program that cannot register its own is one row
+        // away from being explained.
+        missing(b"ole32.dll!CoRegisterClassObject(no room for another)", detail);
+        release(object);
+        return super::E_OUTOFMEMORY;
+    }
+    reached(b"ole32.dll!CoRegisterClassObject", detail);
+    put(key, new.key);
+    super::S_OK
+}
+
+/// CoRevokeClassObject(dwRegister): the registration ends and its
+/// reference on the class object is given back. A key that was revoked
+/// already, or was never one, is S_OK (measured).
+#[unsafe(no_mangle)]
+pub extern "system" fn CoRevokeClassObject(key: u32) -> HResult {
+    let object = CLASSES.lock.with(|| {
+        // SAFETY: under the lock.
+        let slot = unsafe { &mut *CLASSES.slots.get() }
+            .iter_mut()
+            .find(|r| r.key != 0 && !r.retired && r.key == key)?;
+        if slot.borrows > 0 {
+            // A look-up is between this slot and its AddRef: the
+            // registration goes out of reach now and its reference
+            // when that borrow ends.
+            slot.retired = true;
+            return None;
+        }
+        let object = slot.object;
+        *slot = FREE;
+        Some(object)
+    });
+    // Released with the lock let go: Release is the program's code.
+    if let Some(object) = object {
+        release(object);
+    }
+    super::S_OK
+}
+
+/// The registrations of an apartment that is ending end with it, each
+/// class object released (measured: CoUninitialize with a registration
+/// standing revokes it and releases the object, and its key then names
+/// nothing).
+pub(crate) fn revoke_apartment(thread: u32) {
+    let mut gone = [core::ptr::null_mut::<c_void>(); REGISTRATIONS];
+    let n = CLASSES.lock.with(|| {
+        // SAFETY: under the lock.
+        let mut n = 0;
+        for r in unsafe { &mut *CLASSES.slots.get() }.iter_mut() {
+            if r.key == 0 || r.retired || r.thread != thread {
+                continue;
+            }
+            if r.borrows > 0 {
+                r.retired = true;
+                continue;
+            }
+            gone[n] = r.object;
+            n += 1;
+            *r = FREE;
+        }
+        n
+    });
+    // Released with the lock let go, as a revoke does.
+    for object in &gone[..n] {
+        release(*object);
+    }
 }

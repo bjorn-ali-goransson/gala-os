@@ -34,6 +34,7 @@ mod absent;
 mod bindctx;
 mod class;
 mod marshal;
+mod persist;
 mod props;
 mod roerror;
 mod stream;
@@ -664,8 +665,15 @@ pub extern "system" fn CoUninitialize() {
     if state.refs > 0 {
         state.refs -= 1;
         if state.refs == 0 {
-            if state.kind == 1 {
-                MTA_THREADS.fetch_sub(1, Ordering::Relaxed);
+            // The class objects this apartment registered go with it,
+            // each released (ARCHITECTURE "COM: ole32 and oleaut32").
+            // The MTA outlives this thread while another holds it.
+            let last_of_the_mta =
+                state.kind == 1 && MTA_THREADS.fetch_sub(1, Ordering::AcqRel) == 1;
+            if state.kind == 2 {
+                class::revoke_apartment(class::thread_id());
+            } else if last_of_the_mta {
+                class::revoke_apartment(0);
             }
             state.set_kind(0);
             // Leaving COM disables call cancellation (CoDisableCall

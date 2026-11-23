@@ -1745,6 +1745,7 @@ dependencies = [
 name = "ole32"
 version = "0.1.0"
 dependencies = [
+ "gala_lock",
  "gala_stubs",
  "ntrt",
 ]
