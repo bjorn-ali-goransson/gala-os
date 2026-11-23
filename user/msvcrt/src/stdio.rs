@@ -134,7 +134,7 @@ pub(crate) const FILE_SIZE: usize = size_of::<File>();
 
 /// _iob: msvcrt's FILE array (_IOB_ENTRIES, 20), stdin, stdout and stderr
 /// first: 32-bit programs reach the console streams through this data
-/// export, 64-bit ones through `__iob_func`.
+/// export or through `__p__iob`, 64-bit ones through `__iob_func`.
 #[unsafe(no_mangle)]
 pub static mut _iob: [File; 20] = {
     let mut iob = [File::on(-1); 20];
@@ -213,6 +213,14 @@ static mut STD: [Stream; 3] =
 /// __iob_func(): `_iob`, whose first three are stdin, stdout and stderr.
 #[unsafe(no_mangle)]
 pub extern "C" fn __iob_func() -> *mut u8 {
+    (&raw mut _iob).cast()
+}
+
+/// __p__iob(): `_iob` as well. mingw-w64's i686 headers reach the
+/// console streams through this accessor, where its x64 headers take
+/// `__iob_func`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __p__iob() -> *mut u8 {
     (&raw mut _iob).cast()
 }
 

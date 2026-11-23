@@ -319,7 +319,8 @@ fn give(call: &Call<'_>, bytes: &[u8], buffer: u64, length: u64, needed: u64) ->
 /// GetUserObjectInformationW of a window station or desktop handle:
 /// UOI_FLAGS (USEROBJECTFLAGS: the handle's inheritance, WSF_VISIBLE for
 /// a visible station), UOI_NAME, UOI_TYPE ("WindowStation", "Desktop";
-/// UTF-16 with the NUL), UOI_IO (a BOOL: the desktop receives input).
+/// UTF-16 with the NUL), UOI_IO (a BOOL: the desktop receives input; a
+/// window station answers ERROR_INVALID_FUNCTION, as Windows does).
 /// *Needed gets the size, also when Length is short.
 pub(super) fn gala_user_object_information(call: &mut Call<'_>) -> NtStatus {
     let (h, index, buffer) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
@@ -348,7 +349,12 @@ pub(super) fn gala_user_object_information(call: &mut Call<'_>) -> NtStatus {
             tri!(push_text(&mut bytes, entry.object.type_name().bytes().map(u16::from)));
         }
         UOI_IO => {
-            let io = u32::from(desktop.is_some_and(|d| d.receives_input()));
+            // A desktop's alone: a window station handle answers
+            // STATUS_NOT_IMPLEMENTED, which is ERROR_INVALID_FUNCTION.
+            let Some(desktop) = desktop else {
+                return NtStatus::NOT_IMPLEMENTED;
+            };
+            let io = u32::from(desktop.receives_input());
             tri!(bytes.try_extend_from_slice(&io.to_le_bytes()).map_err(|_| NtStatus::NO_MEMORY));
         }
         _ => {

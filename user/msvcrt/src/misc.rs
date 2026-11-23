@@ -340,6 +340,14 @@ pub extern "C" fn ___mb_cur_max_func() -> i32 {
 #[unsafe(no_mangle)]
 pub static __mb_cur_max: i32 = 1;
 
+/// __p___mb_cur_max: the address of `__mb_cur_max`, which mingw-w64's
+/// i686 headers read MB_CUR_MAX through. Ours is the C locale's 1 for
+/// the life of the process and nothing writes it.
+#[unsafe(no_mangle)]
+pub extern "C" fn __p___mb_cur_max() -> *mut i32 {
+    (&raw const __mb_cur_max).cast_mut()
+}
+
 /// _ismbblead(c): whether `c` is the lead byte of a multibyte character
 /// in the multibyte code page. Ours is single-byte (as `__mb_cur_max`
 /// says; on en-US Windows it is ANSI 1252): no byte leads one, 0.

@@ -61,10 +61,19 @@ unsafe extern "system" {
 }
 
 const STATUS_BUFFER_TOO_SMALL: u32 = 0xc000_0023;
+const ERROR_INVALID_FUNCTION: u32 = 1;
+const ERROR_INVALID_DATA: u32 = 13;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_NOT_SUPPORTED: u32 = 50;
+const UOI_FLAGS: i32 = 1;
 const UOI_NAME: i32 = 2;
 const UOI_TYPE: i32 = 3;
+const UOI_TIMERPROC_EXCEPTION_SUPPRESSION: i32 = 7;
+/// The bytes of a USEROBJECTFLAGS (fInherit, fReserved, dwFlags).
+const USEROBJECTFLAGS: usize = 12;
+/// GetCurrentProcess()'s pseudo handle, which SetUserObjectInformation
+/// takes instead of a user object for the TIMERPROC suppression.
+const CURRENT_PROCESS: usize = usize::MAX;
 /// The longest window station or desktop name handled (characters).
 const MAX_NAME: usize = 256;
 
@@ -224,8 +233,12 @@ pub extern "system" fn CloseDesktop(desktop: usize) -> i32 {
 
 /// GetUserObjectInformationW(hObj, nIndex, pvInfo, nLength,
 /// lpnLengthNeeded) of a window station or desktop: UOI_FLAGS, UOI_NAME,
-/// UOI_TYPE, UOI_IO; *lpnLengthNeeded the bytes (with the NUL), also
-/// when the buffer is short (ERROR_INSUFFICIENT_BUFFER).
+/// UOI_TYPE, UOI_IO (a desktop's alone); *lpnLengthNeeded the bytes
+/// (with the NUL), also when the buffer is short
+/// (ERROR_INSUFFICIENT_BUFFER). The current process's pseudo handle has
+/// nothing to read: the one thing it sets (the TIMERPROC exception
+/// suppression) is write-only, and Windows answers
+/// ERROR_INVALID_FUNCTION for it.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetUserObjectInformationW(
     object: usize,
@@ -234,6 +247,10 @@ pub extern "system" fn GetUserObjectInformationW(
     length: u32,
     needed: *mut u32,
 ) -> i32 {
+    if object == CURRENT_PROCESS {
+        set_last_error(ERROR_INVALID_FUNCTION);
+        return 0;
+    }
     if index < 0 {
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
@@ -314,6 +331,109 @@ pub extern "system" fn GetUserObjectInformationA(
         }
     }
     1
+}
+
+/// SetUserObjectInformationW(hObj, nIndex, pvInfo, nLength): two routes,
+/// told apart by the handle (measured on 26100).
+///
+/// A window station or desktop handle takes UOI_FLAGS and nothing else
+/// (ERROR_INVALID_PARAMETER); pvInfo must hold a whole USEROBJECTFLAGS
+/// (ERROR_INVALID_DATA for a shorter buffer; a larger one is taken).
+/// What a station is, gala decides and not a write through one of its
+/// handles -- WSF_VISIBLE follows the interactive station of a user
+/// (the kernel's nt::winsta) -- so a write of what
+/// GetUserObjectInformationW already answers succeeds as on Windows,
+/// and one that would change something succeeds with a row saying it
+/// did not.
+///
+/// The current process's pseudo handle is the other route: it takes
+/// UOI_TIMERPROC_EXCEPTION_SUPPRESSION and nothing else
+/// (ERROR_INVALID_FUNCTION), a BOOL of exactly four bytes, and a real
+/// handle to the same process is not it (ERROR_INVALID_PARAMETER).
+/// gala calls a TIMERPROC with no exception handler around it, which is
+/// what FALSE asks for and what Microsoft recommends; TRUE is recorded
+/// and cannot be given. Office's shared runtime delay-loads this
+/// function, so its absence ends the process.
+///
+/// A NULL pvInfo faults the caller on Windows; gala answers
+/// ERROR_INVALID_PARAMETER instead (gala's choice).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetUserObjectInformationW(
+    object: usize,
+    index: i32,
+    info: *const u8,
+    length: u32,
+) -> i32 {
+    if object == CURRENT_PROCESS {
+        if index != UOI_TIMERPROC_EXCEPTION_SUPPRESSION {
+            set_last_error(ERROR_INVALID_FUNCTION);
+            return 0;
+        }
+        if length as usize != size_of::<u32>() || info.is_null() {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        // SAFETY: the caller's BOOL, the four bytes nLength covers.
+        let suppress = unsafe { info.cast::<u32>().read_unaligned() };
+        let what = b"user32.dll!SetUserObjectInformationW(UOI_TIMERPROC_EXCEPTION_SUPPRESSION)";
+        if suppress != 0 {
+            crate::window::unsupported(what, u64::from(suppress));
+        } else {
+            crate::window::reached(what, 0);
+        }
+        return 1;
+    }
+    if index != UOI_FLAGS {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (length as usize) < USEROBJECTFLAGS {
+        set_last_error(ERROR_INVALID_DATA);
+        return 0;
+    }
+    if info.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // The handle must be a window station or desktop, and what it holds
+    // now is what gala can keep: the kernel's own answer says both.
+    let mut held = [0u8; USEROBJECTFLAGS];
+    let mut needed = 0;
+    // SAFETY: our buffer and output.
+    let status = unsafe {
+        GalaUserObjectInformation(
+            object,
+            UOI_FLAGS as u32,
+            held.as_mut_ptr(),
+            USEROBJECTFLAGS as u32,
+            &mut needed,
+        )
+    };
+    if status != 0 {
+        return done(status, 0);
+    }
+    // SAFETY: the caller's buffer, the bytes nLength covers.
+    let asked = unsafe { core::slice::from_raw_parts(info, USEROBJECTFLAGS) };
+    if asked != &held[..] {
+        let flags = u32::from_le_bytes([asked[8], asked[9], asked[10], asked[11]]);
+        crate::window::unsupported(
+            b"user32.dll!SetUserObjectInformationW(UOI_FLAGS change)",
+            u64::from(flags),
+        );
+    }
+    1
+}
+
+/// SetUserObjectInformationA: the same call, since no index it takes
+/// holds text.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetUserObjectInformationA(
+    object: usize,
+    index: i32,
+    info: *const u8,
+    length: u32,
+) -> i32 {
+    SetUserObjectInformationW(object, index, info, length)
 }
 
 /// Calls `callback` with each name of the list GalaUserObjectEnum gives
