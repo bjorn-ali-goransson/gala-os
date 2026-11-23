@@ -124,6 +124,12 @@ pub struct Note {
     pub params: [u64; PARAMS],
     pub params_len: usize,
     pub params_count: usize,
+    /// The last user APC this thread was given, with who queued it
+    /// (`thread::delivered_apc`), taken while the thread is still the
+    /// current one: an exception raised in an APC is the queueing
+    /// thread's decision, and by the time the report is written the
+    /// thread is gone.
+    pub apc: Option<super::thread::UserApc>,
 }
 
 /// Exception parameters a report keeps (EXCEPTION_MAXIMUM_PARAMETERS,
@@ -235,6 +241,7 @@ impl Note {
             params: [0; PARAMS],
             params_len: 0,
             params_count: 0,
+            apc: super::thread::delivered_apc(),
         }
     }
 }
@@ -779,8 +786,66 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             Calls(&calls[..kept])
         );
     }
+    // An APC is how one thread makes another run code, so an exception
+    // raised inside one is the queueing thread's decision, and that
+    // thread's calls are what explain it: Office's shared code ends a
+    // thread this way, and the victim's own stack and last calls then
+    // describe its wait (ROADMAP OF). The routine says which APC it was,
+    // to be read against the frames above.
+    if let Some(apc) = note.apc {
+        // Resolved before the lines: `module_at` takes the views' lock
+        // and the lines the console's (the order at the top of `report`).
+        // An APC to another process is refused, so the queuer's address
+        // is placed by this process's images.
+        let routine = At::of(process, apc.routine);
+        let from = match apc.by {
+            super::thread::ApcBy::Thread { from, .. } if from != 0 => Some(At::of(process, from)),
+            _ => None,
+        };
+        info!(
+            "crash report:   it was last given a user APC: routine {routine}{}",
+            Queuer(apc.by, from)
+        );
+        if let super::thread::ApcBy::Thread { by: (_, tid), .. } = apc.by
+            && tid != 0
+            && tid != note.tid
+        {
+            let kept = crate::flight::thread_calls(tid, &mut calls);
+            if kept > 0 {
+                info!(
+                    "crash report:   thread {tid}'s last calls, oldest first: {}",
+                    Calls(&calls[..kept])
+                );
+            }
+        }
+    }
     super::abi::report_registers(note, &stack);
     report_memory(process, note);
+}
+
+/// Who queued a user APC, as the report says it: the thread and where it
+/// called from (with the image it is in, resolved before the line), the
+/// kernel's own code, or that the record does not say.
+struct Queuer(super::thread::ApcBy, Option<At>);
+
+impl fmt::Display for Queuer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use super::thread::ApcBy;
+        match self.0 {
+            ApcBy::Unset => write!(f, ", with no record of who queued it"),
+            ApcBy::Carried => write!(f, ", queued before a handover (the queuer is not carried)"),
+            ApcBy::Thread { by: (0, 0), at, .. } => write!(f, ", queued by the kernel at {at} ms"),
+            ApcBy::Thread { by, from, at } => {
+                write!(f, ", queued by pid {} tid {}", by.0, by.1)?;
+                match (&self.1, from) {
+                    (Some(place), _) => write!(f, ", called from {place}")?,
+                    (None, 0) => (),
+                    (None, from) => write!(f, ", called from {from:#x}")?,
+                }
+                write!(f, " at {at} ms")
+            }
+        }
+    }
 }
 
 /// A thread's last system calls, oldest first: each by name with the

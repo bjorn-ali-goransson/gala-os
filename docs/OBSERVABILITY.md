@@ -1168,6 +1168,11 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 - A delay-load failure (0xc06d007e, 0xc06d007f: the delay-load
   helper's DLL or function not found): `delay load of DLL!function` (or
   `ordinal N`), from the DelayLoadInfo its first parameter points to.
+- The user APC the thread was last given, when it was given one: its
+  routine, who queued it, where from, and that thread's last calls as
+  well. An exception raised in an APC is the queueing thread's decision
+  and not the dying thread's, which the lines above cannot show ("Who
+  queued a user APC" below). Scenario `crash_apc`.
 
 ### Suspensions (who stopped a thread)
 
@@ -1236,6 +1241,58 @@ The events `thread suspend` and `thread resume` (`events=thread`) carry
 `thread suspend refused` with `handle`, `what` and `status`.
 
 Scenario `suspend_test`.
+
+### Who queued a user APC (an exception another thread decided)
+
+An APC is how one thread makes another run code, so an exception raised
+in one is the queueing thread's decision and not the dying thread's:
+**Office's shared code ends a thread this way.** It suspends the victim
+from `Mso30win32client.dll+0x8e4a70`, queues a user APC whose routine --
+`+0x8e4aac`, the same function 0x3c bytes on -- raises 0xe0000002 in the
+victim's context, and resumes it (ROADMAP OF). The victim's own stack
+and last calls then describe the wait it was in, which is what 24 frames
+of Word's crash report were.
+
+So every queued APC carries who queued it, and the thread keeps the last
+one it was given after that APC has left the queue. A crash report is
+written when the process's **last** thread has exited, so no thread is
+there to ask by then: the exception's note takes that mark as the
+exception is recorded, while the thread is still the current one, and
+carries it to the report with everything else. The report names both
+(`kernel/src/nt/crashreport.rs`):
+
+```
+crash report:   it was last given a user APC: routine 0x140001000 (crash.exe+0x1000), queued by pid 4 tid 8, called from 0x140001424 (crash.exe+0x1424) at 1218 ms
+crash report:   thread 8's last calls, oldest first: ..., NtWriteFile=0x00000000, NtClose=0xc0000008, NtQueueApcThread=0x00000000, NtWaitForSingleObject=0xc000004b
+```
+
+- Who queued it is the thread that made the call, with the return
+  address above its system-call stub and the image that address is in --
+  the same address a suspension's mark names its caller by -- and the
+  uptime of the call.
+- The routine is to be read against the frames of the unwind above it:
+  when the exception was raised inside that APC, one of those frames is
+  the routine. A thread that ran an APC earlier and died of something
+  else has the line too, which is why it says `last given`.
+- `the kernel` is gala's own code: an I/O completion routine, a timer's
+  APC. `queued before a handover` is an APC carried across a kernel
+  upgrade, whose queuer is not carried.
+- An APC to a thread of another process is refused, so the queuer's
+  address is always placed by this process's own images.
+- The queueing thread's last calls come from the flight recorder, by
+  tid, exactly as the dying thread's do; a thread whose calls have
+  fallen out of the ring has no line.
+- The dying thread's own last calls can say nothing at all: dispatching
+  the exception the APC raised looks up unwind data frame by frame, and
+  those calls crowd out everything the thread did before (`crash_apc`:
+  21 of them, and not the alertable wait left). The queueing thread's
+  ring holds no dispatch, so its calls are the ones that explain the
+  death.
+
+Scenario `crash_apc`: a worker waits alertably, the main thread closes a
+handle that is not one and queues an APC that raises a code nothing
+handles, and the report must name the main thread, where it queued from,
+and that failing close among its last calls.
 
 ### Stack captures (`stack_at=`, `stack_from=`, `stack_words=`)
 

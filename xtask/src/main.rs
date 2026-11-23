@@ -8461,6 +8461,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("crash_raise", "ntdll.dll", "Windows/System32"),
+    ("crash_apc", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
     ("shootdown_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
@@ -14148,6 +14149,7 @@ const ARM64_TWINS: &[&str] = &[
     "crash_dispatched",
     "crash_filtered",
     "crash_raise",
+    "crash_apc",
     "seh_test",
     "context_test",
     "threadinfo_test",
@@ -20706,6 +20708,45 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "NtWriteFile=0x00000000",
             "NtClose=0xc0000008, GalaUnhandledException=0x00000000",
             "process crash.exe (pid 4) exited with status 0xe0000042",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // An exception another thread decided on: the main thread queues
+        // a user APC into a worker waiting alertably, and the APC's
+        // routine raises a code nothing handles, with no parameters --
+        // which is how Office's shared code ends a thread (ROADMAP OF).
+        // The victim's own stack and last calls describe its wait, so
+        // the report must name the thread that queued the APC, where it
+        // queued it from, and that thread's last calls: the failing
+        // NtClose just before the queueing is what says whose they are.
+        name: "crash_apc",
+        cmdline: "qemu_exit run=crash.exe args=apc",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the worker waits alertably",
+            "crash: the main thread queues the APC",
+            "crash: the APC raises 0xe0000043 on the worker",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000043 \
+             (exception) in thread",
+            "crash report:   no handler took it: ",
+            // The victim's own calls say nothing at all: the dispatch
+            // of the exception the APC raised in it -- 21 lookups for
+            // unwind data -- crowds the alertable wait it was in out of
+            // the 24-call ring, which is the second reason a report of
+            // the victim alone cannot explain this death.
+            "last calls, oldest first: ",
+            "GalaUnhandledException=0x00000000",
+            // Which APC it was, who queued it, and what that thread did:
+            // the write of its line, the handle that is not one and the
+            // queueing itself.
+            "crash report:   it was last given a user APC: routine ",
+            "(crash.exe+0x",
+            ", queued by pid 4 tid ",
+            ", called from ",
+            "last calls, oldest first: ",
+            "NtClose=0xc0000008, NtQueueApcThread=0x00000000",
+            "process crash.exe (pid 4) exited with status 0xe0000043",
             BOOT_OK_MARKER,
         ],
     },

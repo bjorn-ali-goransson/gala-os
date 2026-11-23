@@ -216,7 +216,7 @@ fn worker(_: usize) {
                 // TimerApcRoutine(TimerContext, TimerLowValue, TimerHighValue)
                 let at = platform::system_time();
                 let args = [context, at & 0xffff_ffff, at >> 32];
-                let _ = thread::queue_user_apc(&thread, UserApc { routine, args, special: false });
+                let _ = thread::queue_user_apc(&thread, UserApc::new(routine, args, false));
             }
         }
         drop(timers);
