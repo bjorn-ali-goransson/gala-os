@@ -1,7 +1,8 @@
-//! Status callbacks (InternetSetStatusCallbackW, INTERNET_STATUS_CALLBACK)
-//! of a synchronous session, as Microsoft documents them ("InternetSet
-//! StatusCallback", "INTERNET_STATUS_CALLBACK") and Wine's conformance
-//! tests (dlls/wininet/tests/http.c, run on Windows) show them:
+//! Status callbacks (InternetSetStatusCallbackW, INTERNET_STATUS_CALLBACK),
+//! as Microsoft documents them ("InternetSetStatusCallback",
+//! "INTERNET_STATUS_CALLBACK"), Wine's conformance tests
+//! (dlls/wininet/tests/http.c, run on Windows) show them and
+//! `wininet_test`'s step 13 measured them on an asynchronous session:
 //!
 //! - Per handle: a connection and a request get their parent's callback
 //!   when made; InternetSetStatusCallbackW changes one handle's and
@@ -20,11 +21,18 @@
 //!   RESPONSE_RECEIVED (41, a DWORD: the header block's bytes), REDIRECT
 //!   (110, the new URL as UTF-16).
 //!
-//! Not sent: REQUEST_COMPLETE and the other asynchronous completions (no
-//! asynchronous sessions), CLOSING_CONNECTION / CONNECTION_CLOSED, the
-//! cookie and privacy notifications (no cookies), DETECTING_PROXY. A
-//! failed handshake has no notification in WinINet (its error code says
-//! it).
+//! - REQUEST_COMPLETE (100), for an operation on a handle of a session
+//!   opened INTERNET_FLAG_ASYNC: an INTERNET_ASYNC_RESULT of what the
+//!   operation returned (1 for a send, the new handle for
+//!   InternetOpenUrlW) with dwError 0, or dwResult 0 with the error it
+//!   failed with. Windows reports it from a thread of WinINet's own after
+//!   the call has returned ERROR_IO_PENDING; gala's engine finishes the
+//!   operation inside the call and reports it from there (`lib.rs`,
+//!   `completed`).
+//!
+//! Not sent: CLOSING_CONNECTION / CONNECTION_CLOSED, the cookie and
+//! privacy notifications (no cookies), DETECTING_PROXY. A failed
+//! handshake has no notification in WinINet (its error code says it).
 //!
 //! The engine is given a snapshot of the request's callback before each
 //! call into it (`observer`): a callback changed from inside a callback
@@ -46,6 +54,7 @@ const RECEIVING_RESPONSE: u32 = 40;
 const RESPONSE_RECEIVED: u32 = 41;
 const HANDLE_CREATED: u32 = 60;
 const HANDLE_CLOSING: u32 = 70;
+const REQUEST_COMPLETE: u32 = 100;
 const REDIRECT: u32 = 110;
 
 /// INTERNET_INVALID_STATUS_CALLBACK.
@@ -80,6 +89,17 @@ pub fn created(parent: &Observer, h: usize) {
 pub fn closing(o: &Observer, h: usize) {
     let mut h = h;
     deliver(o, HANDLE_CLOSING, (&raw mut h).cast(), size_of::<usize>() as u32);
+}
+
+/// REQUEST_COMPLETE for an operation on an asynchronous session's handle,
+/// with the INTERNET_ASYNC_RESULT it reports: dwResult (a DWORD_PTR, what
+/// the operation returned) and dwError (a DWORD, which the structure's
+/// padding rounds up to a word on x64), so the two words the callback is
+/// given the length of -- 16 bytes on x64, 8 on x86.
+pub fn request_complete(o: &Observer, result: usize, error: u32) {
+    let mut r = [result, error as usize];
+    let length = (r.len() * size_of::<usize>()) as u32;
+    deliver(o, REQUEST_COMPLETE, r.as_mut_ptr().cast(), length);
 }
 
 /// The engine's steps as notifications.
