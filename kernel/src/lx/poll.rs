@@ -117,13 +117,14 @@ pub fn readiness(object: &Object) -> u16 {
 /// would be woken by (epoll's EPOLLET: a ready object is reported again
 /// once it moved). A pipe's read end counts writes (and the last writer
 /// going), its write end reads (and the last reader going); a socket its
-/// arrivals; what is always ready never changes.
+/// arrivals (a unix socket's also its peer's reads that leave room to
+/// write); what is always ready never changes.
 pub fn events_count(object: &Object) -> u64 {
     match object {
         Object::PipeRead(p) => p.state.lock().read_events,
         Object::PipeWrite(p) => p.state.lock().write_events,
         Object::Socket(s) => socket::arrivals(s),
-        Object::Unix(u) => u.core.arrivals(),
+        Object::Unix(u) => u.core.changes(),
         Object::Epoll(e) => u64::from(e.has_ready()),
         Object::EventFd(e) => e.changes(),
         Object::TimerFd(t) => t.changes(),
