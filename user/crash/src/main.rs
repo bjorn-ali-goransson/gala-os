@@ -85,6 +85,18 @@
 //! continuing: the retried store then succeeds, which is what proves
 //! execution really was continued rather than the process merely
 //! surviving.
+//!
+//! With the argument `vectored` (and ntdll, scenario `crash_vectored`)
+//! every kind of handler is asked and none takes it: two vectored
+//! exception handlers run before the frames and one vectored continue
+//! handler after them, each passing the exception on, and nothing
+//! registers a top-level filter. The report must say so. A program that
+//! registered nothing and one whose handlers all declined leave the
+//! same frames behind, and which of the two it is decides where to
+//! look: Office raises 0x1e198795 for a handler of its own and seven
+//! frame handlers pass it on (ROADMAP OF), so whether anything of
+//! Office's was asked outside those frames is a question the report has
+//! to answer rather than be read source for.
 
 #![no_std]
 #![no_main]
@@ -134,6 +146,10 @@ const RAISED_BY_OTHER: u32 = 0xe000_0044;
 /// ends nothing, so a run tells the note the report must be written from
 /// (0xe0000044) from the note it must not be.
 const RAISED_SECOND: u32 = 0xe000_0045;
+
+/// The code `vectored` raises, past handlers that all decline: as
+/// `RAISED`, and distinct from it so a run says which mode raised.
+const RAISED_VECTORED: u32 = 0xe000_0046;
 
 /// The codes the delay-load helper raises when a delay-loaded call needs
 /// something it cannot find (delayimp.h's VcppException of
@@ -579,6 +595,58 @@ fn arg_is<const N: usize>(word: [u8; N]) -> bool {
     trimmed.ends_with(&word)
 }
 
+/// The vectored handlers of `vectored`: each passes the exception on, so
+/// that the search runs its whole length -- the vectored handlers, the
+/// frames, the continue handlers -- and the report is reached with every
+/// one of them asked and none of them taking it. Two exception handlers,
+/// so that a count of them is not a count of one thing or nothing.
+extern "system" fn passing_first(_pointers: *mut u8) -> i32 {
+    ntrt::print("crash: the first vectored handler passes it on\r\n");
+    EXCEPTION_CONTINUE_SEARCH
+}
+
+extern "system" fn passing_second(_pointers: *mut u8) -> i32 {
+    ntrt::print("crash: the second vectored handler passes it on\r\n");
+    EXCEPTION_CONTINUE_SEARCH
+}
+
+extern "system" fn passing_continue(_pointers: *mut u8) -> i32 {
+    ntrt::print("crash: the continue handler passes it on\r\n");
+    EXCEPTION_CONTINUE_SEARCH
+}
+
+/// `vectored`: an exception every kind of handler is asked about and
+/// none takes, with no top-level filter under them. What the report has
+/// to say is that the search was asked everywhere it could be, because
+/// a program that registered nothing leaves the same frames behind as
+/// one whose handlers all declined (Office's raise, ROADMAP OF).
+fn vectored() -> u32 {
+    let ntdll = find_ntdll();
+    let add = ntdll.and_then(|n| find_export(n, b"RtlAddVectoredExceptionHandler"));
+    let add_continue = ntdll.and_then(|n| find_export(n, b"RtlAddVectoredContinueHandler"));
+    let (Some(add), Some(add_continue)) = (add, add_continue) else {
+        ntrt::print("crash: no vectored handler to register\r\n");
+        return 2;
+    };
+    // SAFETY: the documented signature (First, Handler), returning the
+    // cookie the handler is withdrawn with (null: refused).
+    let add: extern "system" fn(u32, usize) -> usize = unsafe { core::mem::transmute(add) };
+    // SAFETY: as above.
+    let add_continue: extern "system" fn(u32, usize) -> usize =
+        unsafe { core::mem::transmute(add_continue) };
+    let registered = add(0, passing_first as *const () as usize) != 0
+        && add(0, passing_second as *const () as usize) != 0
+        && add_continue(0, passing_continue as *const () as usize) != 0;
+    if !registered {
+        ntrt::print("crash: a vectored handler was refused\r\n");
+        return 2;
+    }
+    ntrt::print("crash: raising 0xe0000046 past two handlers and one continue handler\r\n");
+    raise_bare(RAISED_VECTORED);
+    ntrt::print("crash: the raise returned?!\r\n");
+    1
+}
+
 /// Raises RAISED with three parameters and no handler anywhere:
 /// RtlRaiseException captures this frame's context, fills the
 /// exception's address with the return address here and dispatches.
@@ -709,6 +777,9 @@ fn main() -> u32 {
     }
     if arg_is(*b"continued") {
         return continued();
+    }
+    if arg_is(*b"vectored") {
+        return vectored();
     }
     if arg_is(*b"raise") {
         return raise();

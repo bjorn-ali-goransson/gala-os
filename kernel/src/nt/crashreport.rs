@@ -79,6 +79,15 @@ pub struct Walk {
     pub asked: u32,
     /// Why the walk stopped, as gala's ntdll's `END_*` number it.
     pub ended: u32,
+    /// Vectored exception handlers asked, before the frames, all of
+    /// which passed it on (one that took it would have continued
+    /// execution, and there would be no report).
+    pub vectored: u32,
+    /// Vectored continue handlers asked, after the frames, likewise.
+    pub continued: u32,
+    /// 1: a top-level filter is registered. It is asked after this
+    /// report is written, so it says there is one, not what it did.
+    pub filter: u32,
 }
 
 impl Walk {
@@ -91,6 +100,15 @@ impl Walk {
             3 => "the stack's base: the stack's end",
             4 => "no unwind data for the frame",
             _ => "the walk's own limit",
+        }
+    }
+
+    /// Whether anything registered a top-level filter.
+    pub fn top_filter(&self) -> &'static str {
+        if self.filter != 0 {
+            "a top-level filter is set (asked after this report)"
+        } else {
+            "no top-level filter is set"
         }
     }
 }
@@ -992,6 +1010,21 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
                     if walk.asked >> i & 1 != 0 { " (its handler passed it on)" } else { "" }
                 );
             }
+        }
+        // Outside the frames: the vectored handlers, and whether there
+        // is a last chance under them. A program that registered none
+        // leaves the same frames behind as one whose handlers all
+        // declined, and which of the two it is decides where to look.
+        if walk.vectored == 0 && walk.continued == 0 {
+            info!("crash report:   vectored handlers: none registered; {}", walk.top_filter());
+        } else {
+            info!(
+                "crash report:   vectored handlers: {} asked before the frames, {} after, \
+                 none taking it; {}",
+                walk.vectored,
+                walk.continued,
+                walk.top_filter()
+            );
         }
     }
     if note.params_len > 0 && note.access.is_none() && note.delay.is_none() && note.cxx.is_none() {

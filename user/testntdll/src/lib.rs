@@ -73,6 +73,15 @@ mod unimplemented;
 ///   these empty: its registration list is reported from the TEB32.
 /// - `ended`: why the walk stopped, which tells the stack's end from a
 ///   chain that derailed.
+/// - `vectored`, `continued`: vectored exception handlers asked before
+///   the frames, and vectored continue handlers asked after them. Each
+///   was asked and none took it -- one that had would have continued
+///   execution, and there would be no report -- so what the counts add
+///   is that nothing registering any is a different thing from all of
+///   them declining, and the frames look the same either way.
+/// - `filter`: whether a top-level filter is registered. It is asked
+///   after the report is written, so this says there is one, not what
+///   it did.
 ///
 /// A raise nothing handles is what Office's shared code ends a process
 /// with (0xe0000002, ROADMAP OF), where which of the three it is decides
@@ -94,6 +103,12 @@ pub struct Walk {
     pub asked: u32,
     /// Why the search stopped: `END_*`.
     pub ended: u32,
+    /// Vectored exception handlers asked, before the frames.
+    pub vectored: u32,
+    /// Vectored continue handlers asked, after them.
+    pub continued: u32,
+    /// 1: a top-level filter is registered (asked after the report).
+    pub filter: u32,
 }
 
 /// Frames of the walk kept in the record (the rest are counted only).
@@ -3018,12 +3033,20 @@ pub extern "system" fn RtlRemoveVectoredContinueHandler(cookie: *mut core::ffi::
 }
 
 /// Calls the handlers of one table in order; whether one of them returned
-/// EXCEPTION_CONTINUE_EXECUTION. The exception dispatchers'.
-fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> bool {
+/// EXCEPTION_CONTINUE_EXECUTION. The exception dispatchers'. `asked`
+/// counts the handlers it reached, which the crash report needs to tell
+/// a table nothing registered from one whose handlers all declined
+/// (`Walk`).
+fn call_handlers(
+    table: &[(usize, usize)],
+    pointers: &mut ExceptionPointers,
+    asked: &mut u32,
+) -> bool {
     for &(cookie, raw) in table {
         if cookie == 0 {
             break;
         }
+        *asked += 1;
         // SAFETY: handlers were registered as `VectoredHandler`s.
         let handler: VectoredHandler = unsafe { core::mem::transmute(raw) };
         if handler(pointers) == EXCEPTION_CONTINUE_EXECUTION {

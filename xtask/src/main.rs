@@ -8465,6 +8465,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("crash_unhandled_both", "ntdll.dll", "Windows/System32"),
     ("crash_delay", "ntdll.dll", "Windows/System32"),
     ("crash_raise", "ntdll.dll", "Windows/System32"),
+    ("crash_vectored", "ntdll.dll", "Windows/System32"),
     ("crash_apc", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
     ("shootdown_test", "ntdll.dll", "Windows/System32"),
@@ -21051,6 +21052,9 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "frames unwound, 0 handlers asked",
             "crash report:     the walk stopped at ",
             "crash report:     frame 0: ",
+            // Nothing was registered anywhere else, which is the other
+            // half of what `crash_vectored` asserts.
+            "crash report:   vectored handlers: none registered; no top-level filter is set",
             "crash report:   3 parameters: 0x8007000e, 0x",
             "(crash.exe+0x",
             ", 0xfeedface",
@@ -21060,6 +21064,33 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "NtWriteFile=0x00000000",
             "NtClose=0xc0000008, GalaUnhandledException=0x00000000",
             "process crash.exe (pid 4) exited with status 0xe0000042",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // The same raise, with every kind of handler registered and each
+        // passing it on: two vectored exception handlers before the
+        // frames, one continue handler after them, and no top-level
+        // filter. A program that registered nothing leaves the same
+        // frames behind as one whose handlers all declined, so the
+        // report must count what was asked outside the frames too --
+        // which is the question Office's raise leaves open (ROADMAP OF),
+        // where seven frame handlers pass it on and nothing says whether
+        // anything else was ever asked.
+        name: "crash_vectored",
+        cmdline: "qemu_exit run=crash.exe args=vectored",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: raising 0xe0000046 past two handlers and one continue handler",
+            "crash: the first vectored handler passes it on",
+            "crash: the second vectored handler passes it on",
+            "crash: the continue handler passes it on",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000046 \
+             (exception) in thread",
+            "crash report:   no handler took it: ",
+            "crash report:   vectored handlers: 2 asked before the frames, 1 after, \
+             none taking it; no top-level filter is set",
+            "process crash.exe (pid 4) exited with status 0xe0000046",
             BOOT_OK_MARKER,
         ],
     },

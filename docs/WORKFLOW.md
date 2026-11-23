@@ -873,6 +873,15 @@ cargo xtask snapshots rm office-merge
   in about 21 s of run time (40 s with the build check), against 1706 s
   from boot. With "Office's fast path"'s link in /dev/shm and
   `XTASK_SNAPSHOTS=/dev/shm/snapshots`, nothing large touches `/`.
+  The scenarios that show a window cannot be snapshotted at all:
+  `office_word`, `office_excel` and `office_install_gui` boot through
+  UEFI for the framebuffer those windows need (`UEFI_SCENARIOS`), and a
+  UEFI boot has no snapshot ("Limits" below), which a save answers with
+  `machine snapshots of UEFI boots are not supported yet`. Forcing
+  `XTASK_FIRMWARE=bios` is not a way round it, since the framebuffer is
+  what those scenarios are for. So Word and Excel are iterated on from
+  boot, and what stands in for a snapshot there is arming one run to
+  answer several questions at once.
 - **Where**: `target/snapshots/<name>/`, or `$XTASK_SNAPSHOTS/<name>/`
   when that is set. The frozen image is moved into the snapshot, not
   copied, so the snapshots must be on the file system of the scenario's
