@@ -27471,9 +27471,12 @@ fn monitor_closed(monitor: &std::os::unix::net::UnixStream) -> bool {
 /// each command is `virtio_events`.
 #[derive(Default)]
 struct InputPace {
-    /// The guest's counters' address and the devices they count, once
-    /// found in the serial log.
+    /// The guest's counters' physical address and the devices they
+    /// count, once found in the serial log.
     guest: Option<(u64, Counted)>,
+    /// Where `pmemsave` writes the counters (`guest_ps2_read`): next to
+    /// the serial log.
+    file: PathBuf,
     /// The counters when this check began (a resumed snapshot's are not
     /// 0), plus what this check has sent since.
     want: (u64, u64),
@@ -27506,7 +27509,7 @@ impl InputPace {
     ) -> Result {
         let (at, _) = self.find(monitor, log, clock)?;
         let began = ScreenWait::start(clock);
-        let mut read = guest_ps2_read(monitor, at)?;
+        let mut read = guest_ps2_read(monitor, at, &self.file)?;
         while read.0 < self.want.0 || read.1 < self.want.1 {
             if let Some(why) = began.over(clock, PS2_TAKEN_WAIT) {
                 return Err(format!(
@@ -27520,7 +27523,7 @@ impl InputPace {
                 ));
             }
             thread::sleep(Duration::from_millis(20));
-            read = guest_ps2_read(monitor, at)?;
+            read = guest_ps2_read(monitor, at, &self.file)?;
         }
         if read.0 > self.want.0 || read.1 > self.want.1 {
             return Err(format!(
@@ -27545,8 +27548,8 @@ impl InputPace {
         }
     }
 
-    /// The guest's counters' address and what they count; the first
-    /// time, also where they stand.
+    /// The guest's counters' physical address and what they count; the
+    /// first time, also where they stand.
     fn find(
         &mut self,
         monitor: &mut std::os::unix::net::UnixStream,
@@ -27576,10 +27579,11 @@ impl InputPace {
             thread::sleep(Duration::from_millis(100));
         };
         let at = rest
-            .split_whitespace()
-            .next()
-            .and_then(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok())
-            .ok_or_else(|| format!("unreadable input counters line `{rest}`"))?;
+            .split_once("(physical ")
+            .and_then(|(_, r)| r.split(';').next())
+            .and_then(|a| u64::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok())
+            .filter(|&a| a != 0)
+            .ok_or_else(|| format!("no physical address in the input counters line `{rest}`"))?;
         let counted = if virtio {
             Counted::VirtioEvents
         } else {
@@ -27590,7 +27594,9 @@ impl InputPace {
             )
         };
         self.guest = Some((at, counted));
-        self.want = guest_ps2_read(monitor, at)?;
+        self.file = std::path::absolute(log.with_extension("input-counters"))
+            .map_err(|e| format!("{}: {e}", log.display()))?;
+        self.want = guest_ps2_read(monitor, at, &self.file)?;
         Ok((at, counted))
     }
 
@@ -27717,14 +27723,28 @@ fn ps2_bytes(command: &str, packet: u64, buttons: &mut u8) -> Result<(u64, u64)>
     Ok((keyboard, mouse))
 }
 
-/// The guest's PS/2 counters at `at` (`input: bytes read at`): (keyboard
-/// bytes, mouse bytes) read, through the monitor's `x`.
-fn guest_ps2_read(monitor: &mut std::os::unix::net::UnixStream, at: u64) -> Result<(u64, u64)> {
+/// The guest's input counters at physical address `at` (`input: bytes
+/// read at <virtual> (physical <at>; ...)`): (keyboard, mouse) read,
+/// through the monitor's `pmemsave` into `file`. Not `x` or `xp`: both
+/// synchronize CPU 0's state first (`run_on_cpu`, from the main loop the
+/// monitor runs in), and while CPU 0 is in a virtio-gpu reset (the
+/// guest's write to the device's status) QEMU waits on the main loop
+/// for the reset's bottom half: each waits for the other and the VM
+/// hangs (QEMU 11.1, `virtio_gpu_reset` and `cpu_memory_rw_debug`; seen
+/// as virtio_gpu_reset stopping at step 5 under KVM). `pmemsave` reads
+/// guest RAM with no vCPU.
+fn guest_ps2_read(
+    monitor: &mut std::os::unix::net::UnixStream,
+    at: u64,
+    file: &Path,
+) -> Result<(u64, u64)> {
     use std::io::{Read, Write};
-    writeln!(monitor, "x /2gx {at:#x}").map_err(|e| e.to_string())?;
-    // The reply: "<address>: 0x<keyboard> 0x<mouse>", after the echo of
-    // whatever was sent before.
-    let _ = monitor.set_read_timeout(Some(Duration::from_millis(100)));
+    let _ = fs::remove_file(file);
+    writeln!(monitor, "pmemsave {at:#x} 16 \"{}\"", file.display()).map_err(|e| e.to_string())?;
+    // QEMU writes the 16 bytes at once when it closes the file; what the
+    // monitor says (the echo, the prompt) is drained so its socket never
+    // fills, and kept for the message if the file never comes.
+    let _ = monitor.set_read_timeout(Some(Duration::from_millis(20)));
     let mut said = Vec::new();
     let mut buf = [0u8; 4096];
     let start = Instant::now();
@@ -27732,24 +27752,24 @@ fn guest_ps2_read(monitor: &mut std::os::unix::net::UnixStream, at: u64) -> Resu
         if let Ok(n) = monitor.read(&mut buf) {
             said.extend_from_slice(&buf[..n]);
         }
-        let text = String::from_utf8_lossy(&said);
-        let reply = text.lines().find_map(|l| {
-            let (address, values) = l.trim().split_once(": ")?;
-            if u64::from_str_radix(address, 16).ok()? != at {
-                return None;
-            }
-            let mut v = values
-                .split_whitespace()
-                .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
-            Some((v.next()??, v.next()??))
-        });
-        if reply.is_some() || start.elapsed() > Duration::from_secs(10) {
-            break reply;
+        if let Ok(bytes) = fs::read(file)
+            && bytes.len() == 16
+        {
+            let word =
+                |i: usize| u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap_or_default());
+            break Some((word(0), word(8)));
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            break None;
         }
     };
     let _ = monitor.set_read_timeout(None);
     found.ok_or_else(|| {
-        format!("the monitor did not answer `x /2gx {at:#x}`: {:?}", String::from_utf8_lossy(&said))
+        format!(
+            "the monitor's `pmemsave {at:#x} 16` wrote no 16 bytes to {} in 10 s: {:?}",
+            file.display(),
+            String::from_utf8_lossy(&said)
+        )
     })
 }
 

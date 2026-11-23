@@ -8297,8 +8297,10 @@ session's is shown by nothing unless GalaSession attaches a presenter
   sample-rate knock 200, 100, 80, then device id 3: 4-byte packets, the
   fourth byte's low nibble the signed movement, positive towards the
   user). It counts the bytes it reads from each device (`BYTES_READ`:
-  keyboard, mouse) and logs their address once (`input: bytes read at
-  <address> ..., mouse packets of N bytes`): xtask's screen checks send
+  keyboard, mouse) and logs their address once, virtual and physical
+  (`input: bytes read at <address> (physical <address>; ...), mouse
+  packets of N bytes`; the physical one from the kernel's load address,
+  as the image is physically contiguous): xtask's screen checks send
   their next input only once the guest has read all they sent, as
   QEMU's 16-byte PS/2 queues lose what does not fit (WORKFLOW "Screen
   checks"). The `input:` line at exit counts packets, presses, wheel

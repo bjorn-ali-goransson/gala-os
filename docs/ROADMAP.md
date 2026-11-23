@@ -1369,19 +1369,13 @@ the kernel.
   Word draws with (ROADMAP OF).
 
 **Next**:
-1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
-   answering its monitor (no `x`, no `info registers`, no NMI) after the
-   guest started its program; not reproduced locally. A failed log now
-   carries every QEMU thread's stack when the monitor gives nothing:
-   the next occurrence says which thread holds QEMU, and whether the
-   device reset (`gpureset=`) is in it.
-2. G1's rest: shasha's pointer on the hardware cursor,
+1. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-3. G2's rest: a drawn triangle in `d3d11_test` (DXVK is in, but
+2. G2's rest: a drawn triangle in `d3d11_test` (DXVK is in, but
    nothing is drawn through the pipeline yet), then DXVK's d3d9 and
    d3d10core and its own tests, then vkd3d-proton 3.1 (d3d12,
    d3d12core) beside the program the same way. Drawing needs DXBC
@@ -1401,9 +1395,9 @@ the kernel.
    expects Windows' S_OK on Windows). It is replaced by a real compiler
    with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
    on it) behind this DLL's exports, PREBUILT.
-4. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
+3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
-5. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
+4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
    until there is spare capacity; hardware partitioning and passthrough
    are out of scope).
 
