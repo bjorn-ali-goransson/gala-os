@@ -904,18 +904,54 @@ pub fn dump() {
         v
     };
     for s in bound {
-        crate::info!("dump: unix: {}", Described(&s));
+        crate::info!("dump: unix: {}", described(&s));
     }
 }
 
 /// A socket as the state dump shows it: kind, owner, name, phase (a
 /// connection's records queued to this side, shutdown, the peer), the
 /// threads waiting on it.
-pub struct Described<'a>(pub &'a Socket);
+///
+/// Rendered here, under the socket's locks, into text that prints with
+/// no lock at all: the console formats a line while it holds the serial
+/// port, so a `Display` that took the socket's locks there made the
+/// serial port -> ConnState edge, the reverse of a socket's own logging,
+/// and lockdep stopped the state dump with a panic (arm_lx_gimp).
+pub fn described(s: &Socket) -> Description {
+    let mut d = Description { buf: [0; DESCRIPTION], len: 0, cut: false };
+    let _ = s.describe(&mut d);
+    d
+}
 
-impl fmt::Display for Described<'_> {
+const DESCRIPTION: usize = 256;
+
+/// A socket's description, already rendered (see [`described`]).
+pub struct Description {
+    buf: [u8; DESCRIPTION],
+    len: usize,
+    /// Longer than the buffer: the end is cut and marked.
+    cut: bool,
+}
+
+impl fmt::Write for Description {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for c in s.chars() {
+            let n = c.len_utf8();
+            if self.len + n > DESCRIPTION {
+                self.cut = true;
+                return Ok(());
+            }
+            c.encode_utf8(&mut self.buf[self.len..]);
+            self.len += n;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Description {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.describe(f)
+        f.write_str(core::str::from_utf8(&self.buf[..self.len]).unwrap_or("?"))?;
+        if self.cut { f.write_str(" (cut)") } else { Ok(()) }
     }
 }
 
@@ -942,6 +978,21 @@ mod tests {
 
     fn right(n: u32) -> Right {
         Box::new(n)
+    }
+
+    #[test]
+    fn a_description_is_rendered_before_it_is_printed() {
+        let (a, _b) = Socket::pair(Kind::Stream, ME).unwrap();
+        let d = described(&a);
+        // Printing takes none of the socket's locks: with them held here
+        // (as a thread logging under them would), it still prints.
+        let st = a.state.lock();
+        let Phase::Connected { conn, .. } = &st.phase else { panic!("not connected") };
+        let _conn = conn.state.lock();
+        let text = alloc::format!("{d}");
+        assert!(text.contains("by pid 7"), "{text}");
+        assert!(text.contains("connected (side"), "{text}");
+        assert!(!text.contains("(cut)"), "{text}");
     }
 
     #[test]

@@ -5204,6 +5204,10 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   makes lockdep panic (debug kernels). The console's lock must stay the
   last one taken: take what the line needs first (`quota::peaks()`),
   and do not log while holding a lock that a line's formatting takes.
+  A description that needs locks is rendered into a buffer first and
+  the buffer is logged (`unix::described`, used by the state dump:
+  a `Display` that read a socket's state under the port made the
+  dump of a Wayland client's connection panic).
 - **Host unit tests have no console**: code that logs (`info!`, `warn!`)
   writes to the serial port and crashes a host test (SIGSEGV); keep the
   logging out of the tested path or under `cfg!(not(test))`.
