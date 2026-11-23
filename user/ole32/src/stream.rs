@@ -14,8 +14,13 @@
 //!   and fails with STG_E_SEEKERROR below 0 or past 4 GiB (and for an
 //!   unknown origin), still reporting the position; SetSize takes the
 //!   low 32 bits.
-//! - A block the caller freed reads as empty and fails SetSize and Write
-//!   with E_OUTOFMEMORY (GlobalLock/GlobalReAlloc fail).
+//! - A block the caller freed keeps the size and handle the stream
+//!   cached, and every call that touches the memory faults: reads are
+//!   STG_E_READFAULT and writes STG_E_WRITEFAULT, while SetSize and a
+//!   write past the cached end are E_OUTOFMEMORY, failing in
+//!   GlobalReAlloc before any memory is touched. A read at the end and
+//!   the zero-size calls touch nothing and are S_OK. Measured on
+//!   Windows 11 (`ole32_test`).
 //!
 //! Like Windows' stream, it is not serialized: callers that share one
 //! between threads lock it themselves.
@@ -54,6 +59,11 @@ const IID_ISEQUENTIALSTREAM: Guid = [
 const STG_E_INVALIDFUNCTION: HResult = 0x8003_0001u32 as i32;
 const STG_E_INVALIDPOINTER: HResult = 0x8003_0009u32 as i32;
 const STG_E_SEEKERROR: HResult = 0x8003_0019u32 as i32;
+/// The block is gone from under the stream and the memory cannot be
+/// read; Windows's own answer for it.
+const STG_E_READFAULT: HResult = 0x8003_001Eu32 as i32;
+/// As STG_E_READFAULT, for a write.
+const STG_E_WRITEFAULT: HResult = 0x8003_001Du32 as i32;
 
 /// The memory block clones share.
 #[repr(C)]
@@ -173,6 +183,14 @@ extern "system" fn release(this: *mut Stream) -> u32 {
 extern "system" fn read(this: *mut Stream, buf: *mut u8, size: u32, done: *mut u32) -> HResult {
     // SAFETY: our object.
     let s = unsafe { &mut *this };
+    if !done.is_null() {
+        // Nothing read yet: a read that fails leaves a count of 0 and not
+        // the caller's own value, as Windows leaves after a fault on a
+        // block freed under the stream. (Its answer to a NULL buffer
+        // cannot be compared: Windows reads through it and faults, where
+        // gala refuses with STG_E_INVALIDPOINTER.)
+        put(done, 0);
+    }
     if buf.is_null() && size > 0 {
         return STG_E_INVALIDPOINTER;
     }
@@ -185,7 +203,11 @@ extern "system" fn read(this: *mut Stream, buf: *mut u8, size: u32, done: *mut u
         let copied = s.block().with_memory(|p| unsafe {
             core::ptr::copy_nonoverlapping(p.add(position as usize), buf, n as usize)
         });
-        if copied.is_some() { n } else { 0 }
+        match copied {
+            Some(()) => n,
+            // The block was freed or discarded under the stream.
+            None => return STG_E_READFAULT,
+        }
     };
     s.position += n;
     if !done.is_null() {
@@ -220,7 +242,9 @@ extern "system" fn write(this: *mut Stream, buf: *const u8, size: u32, done: *mu
         core::ptr::copy_nonoverlapping(buf, p.add(position as usize), size as usize)
     });
     if copied.is_none() {
-        return E_OUTOFMEMORY;
+        // The block was freed or discarded under the stream; a write
+        // that had to grow it has already failed in `resize` above.
+        return STG_E_WRITEFAULT;
     }
     s.position = end;
     if !done.is_null() {

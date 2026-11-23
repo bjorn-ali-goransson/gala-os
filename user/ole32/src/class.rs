@@ -7,6 +7,9 @@
 //! cross-apartment calls, so every object is used directly. Local and
 //! remote servers (CLSCTX_LOCAL_SERVER, ..._REMOTE_SERVER) are not
 //! supported (recorded); an unregistered class gives REGDB_E_CLASSNOTREG.
+//! The process's activation filter (CoRegisterActivationFilter) has its
+//! say on every activation before anything is looked up: it may refuse
+//! the class or replace it.
 //! A server process's reference count and suspension
 //! (CoAddRefServerProcess, CoReleaseServerProcess, CoSuspendClassObjects,
 //! CoResumeClassObjects) are kept as documented; with no local servers
@@ -14,10 +17,17 @@
 
 use core::ffi::c_void;
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use super::{
     E_INVALIDARG, E_POINTER, GetProcAddress, Guid, HResult, LoadLibraryW, apartment, com_call,
-    guid_text, missing, ole_iid, put, release,
+    guid_text, missing, ole_iid, put, reached, release,
 };
+
+const CO_E_NOT_SUPPORTED: HResult = 0x8000_4021u32 as i32;
+const E_ACCESSDENIED: HResult = 0x8007_0005u32 as i32;
+/// The CLSID a filter leaves in place of a replacement: no replacement.
+const GUID_NULL: Guid = [0; 16];
 
 #[repr(C)]
 struct UnicodeString {
@@ -237,7 +247,15 @@ pub extern "system" fn CoGetClassObject(
     }
     put(out, core::ptr::null_mut());
     // SAFETY: the caller's CLSID.
-    let clsid_value = unsafe { *clsid };
+    let asked = unsafe { *clsid };
+    // The process's activation filter, if it registered one, speaks
+    // first: before the context is looked at and before the registry is
+    // read, as on Windows, where a filter is consulted even for the
+    // contexts gala does not support.
+    let clsid_value = match filtered(asked) {
+        Ok(c) => c,
+        Err(hr) => return hr,
+    };
     let detail = u64::from(u32::from_le_bytes([
         clsid_value[0],
         clsid_value[1],
@@ -271,7 +289,115 @@ pub extern "system" fn CoGetClassObject(
     }
     // SAFETY: DllGetClassObject's documented signature.
     let get: GetClassObject = unsafe { core::mem::transmute(f) };
-    get(clsid, iid, out)
+    get(&clsid_value, iid, out)
+}
+
+// ---- Activation filters ----
+
+/// CoRegisterActivationFilter's filter: one per process, kept as the raw
+/// pointer the caller gave (Windows asks it for no interface and holds
+/// no reference on it). 0 until one is registered; never cleared.
+static ACTIVATION_FILTER: AtomicUsize = AtomicUsize::new(0);
+
+/// How many times a filter may replace the class before gala stops. On
+/// Windows the chain has no bound and a filter that keeps naming a new
+/// class loops for ever; gala stops and records the row instead.
+const REPLACEMENTS: usize = 8;
+
+/// CoRegisterActivationFilter(pActivationFilter): the process's
+/// IActivationFilter, consulted on every activation.
+///
+/// Measured on Windows 11 (`ole32_test`), where little of this is
+/// documented: it needs no apartment (S_OK before CoInitializeEx) and
+/// outlives CoUninitialize, because the filter belongs to the process
+/// and not to an apartment; the filter is kept as the bare pointer, with
+/// no QueryInterface and no AddRef; the first one wins, so the same
+/// pointer again is S_OK any number of times while a different one is
+/// CO_E_NOT_SUPPORTED; and a NULL filter is E_INVALIDARG and does not
+/// remove the registration -- nothing does.
+///
+/// Office's shared code registers one early in every program (Word's
+/// MSO.DLL delay-loads this function), which is the reason gala has it.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoRegisterActivationFilter(filter: *mut c_void) -> HResult {
+    // Every answer leaves a row: a program that registers a filter and
+    // then sees its classes refused is one row away from being
+    // explained, and the rows are bounded -- one per answer, counted.
+    if filter.is_null() {
+        reached(b"ole32.dll!CoRegisterActivationFilter(no filter)", 0);
+        return E_INVALIDARG;
+    }
+    let want = filter as usize;
+    match ACTIVATION_FILTER.compare_exchange(0, want, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {
+            reached(b"ole32.dll!CoRegisterActivationFilter(registered)", 0);
+            super::S_OK
+        }
+        Err(have) if have == want => {
+            reached(b"ole32.dll!CoRegisterActivationFilter(the same filter again)", 0);
+            super::S_OK
+        }
+        Err(_) => {
+            reached(b"ole32.dll!CoRegisterActivationFilter(another filter is registered)", 0);
+            CO_E_NOT_SUPPORTED
+        }
+    }
+}
+
+/// The class to activate once the process's activation filter has had
+/// its say, or the error the activation fails with.
+///
+/// Measured on Windows 11 (`ole32_test`): HandleActivation is given the
+/// activation type 0, the CLSID asked for, and a replacement CLSID that
+/// is GUID_NULL on entry. A filter that leaves it alone (or writes the
+/// class it was asked about) lets that class be activated; a filter that
+/// writes another class is asked about that one too, until it stops
+/// replacing. A filter that fails turns the activation into
+/// E_ACCESSDENIED, whatever it returned.
+fn filtered(asked: Guid) -> Result<Guid, HResult> {
+    let filter = ACTIVATION_FILTER.load(Ordering::Acquire) as *mut c_void;
+    if filter.is_null() {
+        return Ok(asked);
+    }
+    let mut clsid = asked;
+    for _ in 0..REPLACEMENTS {
+        let mut replacement = GUID_NULL;
+        let hr = com_call!(
+            filter,
+            3,
+            fn(u32, *const Guid, *mut Guid) -> HResult,
+            0u32,
+            &clsid,
+            &mut replacement
+        );
+        if hr < 0 {
+            reached(b"ole32.dll!CoGetClassObject(the activation filter refused the class)", {
+                #[allow(clippy::cast_sign_loss)]
+                let detail = hr as u32;
+                u64::from(detail)
+            });
+            return Err(E_ACCESSDENIED);
+        }
+        if replacement == GUID_NULL || replacement == clsid {
+            return Ok(clsid);
+        }
+        reached(
+            b"ole32.dll!CoGetClassObject(the activation filter replaced the class)",
+            u64::from(u32::from_le_bytes([
+                replacement[0],
+                replacement[1],
+                replacement[2],
+                replacement[3],
+            ])),
+        );
+        clsid = replacement;
+    }
+    // gala's bound, not Windows's: there a filter may replace for ever.
+    missing(
+        b"ole32.dll!CoGetClassObject(the activation filter kept replacing the class)",
+        REPLACEMENTS as u64,
+    );
+    Err(E_ACCESSDENIED)
 }
 
 /// CoCreateInstance: the class object's IClassFactory::CreateInstance.

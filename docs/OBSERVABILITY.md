@@ -551,6 +551,24 @@ that row is in the dump only when the filter freed the slot it took.
   `appxdeploymentclient.dll!<method>(<name asked>)`, "other", for each
   PackageManager query answered with no packages (what a program looked
   for: `FindPackagesByNamePublisher(Microsoft.O...` in office_install).
+  Activation filters (ole32): every answer CoRegisterActivationFilter
+  gives leaves a row -- `ole32.dll!CoRegisterActivationFilter
+  (registered)`, `(the same filter again)`, `(another filter is
+  registered)` and `(no filter)` -- all "reached", so a run says whether
+  the process has a filter at all, before any activation is read, and
+  the rows are bounded: one per answer, counted. Office's shared code
+  registers one early (Word's MSO.DLL delay-loads the export), and what
+  a filter then does to an activation is two rows more:
+  `ole32.dll!CoGetClassObject(the activation filter refused the class)`,
+  "reached", with the HRESULT the filter returned as the detail -- the
+  activation itself is E_ACCESSDENIED whatever the filter said, so the
+  filter's own answer is recorded nowhere else -- and `(the activation
+  filter replaced the class)`, with the replacement CLSID's first four
+  bytes as the detail. A filter that keeps naming new classes is stopped
+  after eight replacements, gala's limit and not Windows's, which leaves
+  `ole32.dll!CoGetClassObject(the activation filter kept replacing the
+  class)`, "unsupported", with that limit as its detail. Scenario
+  `ole32_test`.
   A message box: `user32.dll!MessageBoxW(<the text>)`, "unsupported",
   with the kind (MB_*) as the detail, because **a program that gives up
   says so in a box and leaves nothing else behind**: Word's startup ends

@@ -5576,7 +5576,15 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   GlobalReAlloc, so a fixed block moves and the stream's handle changes;
   clones share the block and its size with positions of their own; the
   block is freed with the last stream when asked; positions are 32-bit,
-  Seek past them STG_E_SEEKERROR), CoFileTimeNow, CoGetCurrentProcess (a
+  Seek past them STG_E_SEEKERROR; a block freed under the stream keeps
+  the handle and size the stream cached, and every call that touches the
+  memory faults -- STG_E_READFAULT and STG_E_WRITEFAULT, where SetSize
+  and a write past the cached end are E_OUTOFMEMORY, failing in
+  GlobalReAlloc before any memory is touched -- and a read that fails
+  leaves a count of 0 behind), CoFileTimeNow (the system time truncated
+  to whole milliseconds, a SYSTEMTIME's resolution, so it can be a
+  millisecond behind a GetSystemTimeAsFileTime taken just before it),
+  CoGetCurrentProcess (a
   per-thread number from a count, never reused), a server process's
   reference count (CoAddRefServerProcess/CoReleaseServerProcess: the
   new count; at 0 the class objects are suspended, as
@@ -5587,6 +5595,23 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   registered under HKCR\CLSID are created from their DLLs ("UI
   Automation"); ProgIDs and out-of-process servers fail as unregistered
   (recorded).
+- **Activation filters** (`class.rs`): the process's IActivationFilter,
+  which Office's shared code registers early (Word's MSO.DLL delay-loads
+  CoRegisterActivationFilter), has its say on every activation before
+  anything is looked up -- CoGetClassObject as well as CoCreateInstance,
+  and before the context is read, as on Windows, where a filter is
+  consulted even for the contexts gala does not support. It may refuse
+  the class (the activation is then E_ACCESSDENIED whatever the filter
+  returned, recorded) or name another, which is activated instead and
+  put to the filter in turn until it leaves the replacement at GUID_NULL
+  or names the class it was asked about. The filter belongs to the
+  process, not to an apartment: it registers before any CoInitializeEx
+  and outlives CoUninitialize, nothing asks it for an interface or holds
+  a reference on it, the first one registered wins (the same pointer
+  again S_OK, a different one CO_E_NOT_SUPPORTED) and a NULL filter is
+  E_INVALIDARG and unregisters nothing. Limit, gala's and not Windows's,
+  where the chain is unbounded: a filter that keeps naming new classes
+  is stopped after eight replacements and the row recorded.
 - **Marshaling** (`marshal.rs`): gala has no proxies, so marshaling is
   within the process: the data for MSHCTX_INPROC/CROSSCTX is gala's own
   record (a magic, the MSHLFLAGS, the interface pointer, its IID), and

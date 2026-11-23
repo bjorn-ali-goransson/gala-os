@@ -9454,6 +9454,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("ole32_test", "kernel32.dll", "Windows/System32"),
     ("ole32_test", "msvcrt.dll", "Windows/System32"),
     ("ole32_test", "ole32.dll", "Windows/System32"),
+    // combase.dll: the test checks that its CoRegisterActivationFilter
+    // and ole32's are one function, so it loads it by name.
+    ("ole32_test", "combase.dll", "Windows/System32"),
     ("ole32_test", "oleaut32.dll", "Windows/System32"),
     ("ole32_test", "advapi32.dll", "Windows/System32"),
     ("ole32_test", "bcryptprimitives.dll", "Windows/System32"),

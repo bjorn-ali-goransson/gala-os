@@ -8,7 +8,11 @@
 //!   name is not supported (recorded).
 //! - CreateBindCtx: a bind context holding bound objects (AddRef'd until
 //!   revoked or ReleaseBoundObjects), named object parameters and
-//!   BIND_OPTS (defaults: grfMode STGM_READWRITE, the rest 0). There is
+//!   BIND_OPTS (defaults: grfMode STGM_READWRITE, the rest 0). Its
+//!   reserved argument may be 0 or 1, as on Windows, and a refused one
+//!   leaves the caller's pointer alone.
+//!   Revoking a parameter that is not there is E_FAIL, as on Windows,
+//!   and not the documented S_FALSE. There is
 //!   no running object table (GetRunningObjectTable, and
 //!   EnumObjectParam, are recorded and fail).
 //! - CoImpersonateClient / CoRevertToSelf: gala has no cross-process COM
@@ -20,7 +24,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::{
     E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_IUNKNOWN,
-    S_FALSE, S_OK, VTable, add_ref, alloc_zeroed, com_call, free, missing, ole_iid, put, release,
+    S_OK, VTable, add_ref, alloc_zeroed, com_call, free, missing, ole_iid, put, release,
 };
 
 const CO_S_NOTALLINTERFACES: HResult = 0x0008_0012;
@@ -313,8 +317,15 @@ extern "system" fn enum_params(_: *mut BindCtx, out: *mut *mut c_void) -> HResul
     E_NOTIMPL
 }
 
+/// IBindCtx::RevokeObjectParam: the parameter's reference dropped and
+/// S_OK, or E_FAIL for a name that is not registered -- not the
+/// documented S_FALSE. Measured on Windows 11 (`ole32_test`): an unknown
+/// name and L"" are both E_FAIL, and so is a NULL name while nothing is
+/// registered. With a parameter registered, Windows reads a NULL name
+/// without checking it and faults; gala answers E_FAIL there too rather
+/// than imitating the fault.
 extern "system" fn revoke_param(this: *mut BindCtx, name: *const u16) -> HResult {
-    let Some(k) = key(name) else { return S_FALSE };
+    let Some(k) = key(name) else { return E_FAIL };
     match ctx(this).params.iter_mut().find(|p| !p.1.is_null() && p.0 == k) {
         Some(p) => {
             let o = p.1;
@@ -322,7 +333,7 @@ extern "system" fn revoke_param(this: *mut BindCtx, name: *const u16) -> HResult
             release(o);
             S_OK
         }
-        None => S_FALSE,
+        None => E_FAIL,
     }
 }
 
@@ -344,16 +355,16 @@ static VTABLE: VTable<13> = VTable([
 
 const STGM_READWRITE: u32 = 2;
 
-/// CreateBindCtx: a new bind context (`reserved` must be 0).
+/// CreateBindCtx: a new bind context. `reserved` is documented as
+/// having to be 0, and measured on Windows 11 (`ole32_test`) 1 is taken
+/// as well; 2 and above are E_INVALIDARG, and a refused call leaves the
+/// caller's pointer untouched rather than clearing it.
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateBindCtx(reserved: u32, out: *mut *mut c_void) -> HResult {
-    if out.is_null() {
+    if out.is_null() || reserved > 1 {
         return E_INVALIDARG;
     }
     put(out, core::ptr::null_mut());
-    if reserved != 0 {
-        return E_INVALIDARG;
-    }
     let p = alloc_zeroed(core::mem::size_of::<BindCtx>()).cast::<BindCtx>();
     if p.is_null() {
         return E_OUTOFMEMORY;
