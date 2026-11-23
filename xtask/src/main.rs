@@ -1429,6 +1429,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("inkscape_batch", "user/lx/inkscape/gui.sh", "lx/inkscape"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
+    ("lx_statedump", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_httpd", "user/lx/busybox/httpd.sh", "lx"),
     // ROADMAP CT step 2: gala's wsl.exe in System32 as Windows has it,
@@ -6661,6 +6662,7 @@ const ARM64_TWINS: &[&str] = &[
     "lx_auxv",
     "lx_epoll",
     "lx_thread",
+    "lx_statedump",
     "session_test",
 ];
 
@@ -7394,6 +7396,27 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "(value there 0x6a1a); queued for it: (waiters, releasers, all entries) Some((1, 0, 1))",
             "statedump: end",
             "the guest's state dump (NMI) took",
+        ],
+    },
+    Scenario {
+        // A Linux thread's line in the state dump names the Linux call it
+        // is in, its arguments and for how long (nt/thread.rs `dump`,
+        // OBSERVABILITY "State dump"): `sleep 999 | cat` parks three
+        // processes in three calls -- the shell in wait4, sleep in
+        // nanosleep, cat in a read of the empty pipe -- until the
+        // timeout's dump. Without it every one of them read `in a system
+        // call false`, as if idle in user code, which is how arm_lx_gimp's
+        // blocked read was misread twice.
+        name: "lx_statedump",
+        cmdline: "qemu_exit lxrun=/lx/busybox lxargs=busybox%20sh%20-c%20%22busybox%20sleep%20999%20%7C%20busybox%20cat%22 lxenv=PATH=/lx",
+        exit_status: XTASK_DUMPS,
+        expect: &[
+            "personality linux",
+            "statedump: threads",
+            "thread:   linux wait4(",
+            "thread:   linux read(0x0, ",
+            "nanosleep(",
+            "statedump: end",
         ],
     },
     Scenario {

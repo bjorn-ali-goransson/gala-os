@@ -8508,7 +8508,9 @@ Each entry: what, why it matters, the structural fix, the owning item.
   cost two wrong turns, both of them the instruments': the log's
   addresses were symbolized against the x86-64 kernel (fixed,
   OBSERVABILITY "Symbolized backtraces") and a Linux thread's dump
-  names no system call (below).
+  naming no system call (fixed: the dump names the Linux call, its
+  arguments and how long the thread has been in it, OBSERVABILITY
+  "State dump").
 - **Input waits behind a commit's composition** (open; `arm_lx_gimp`'s
   step 8): the Wayland server takes a client's input after the round's
   requests are dispatched (`Connection::pump`), and a commit composes
@@ -8535,18 +8537,6 @@ Each entry: what, why it matters, the structural fix, the owning item.
   told how much host time it was given -- KVM's steal-time page, which
   gala does not read -- and then the report could fail a run like the
   thread's (OBSERVABILITY "Hang watchdog", `xtask::WATCHDOG_REPORT`).
-- **A Linux thread's state dump names no system call** (open): the NT
-  thread lines say `in a system call false`, with no call name, no
-  arguments, no wait object and no handle detail, for every Linux
-  thread, because `lx/dispatch.rs` never calls
-  `nt::thread::set_in_syscall` and the detail those lines print is the
-  NT path's (`syscalls::service_name`, the handle tables, the keyed
-  events). A thread in the middle of a `read` therefore reads as a
-  thread doing nothing, which is how `arm_lx_gimp` above was misread
-  twice. The fix is to record the Linux call number and name it from
-  `lx`'s own table while skipping the NT-only detail; the scheduler's
-  `prepare_wait` caller is the only clue until then (OBSERVABILITY
-  "State dump").
 - **A lock can be marked held by a thread that is not running**
   (`sync::lockdep`): a held-lock slot belongs to the CPU and carries the
   thread that took it, and `none_held_at_switch` panics if a thread

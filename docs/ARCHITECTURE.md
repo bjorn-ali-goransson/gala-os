@@ -14490,7 +14490,10 @@ The running parts (milestone 1; `lxrun=`):
   event per clone (pid, tid, flags) after the core's `thread create`; a
   failed clone logs why. The state dump (OBSERVABILITY "State dump")
   lists every Linux thread (Linux and core tid, mask, pending, blocked
-  or running), every epoll set's entries and every futex waiter (pid,
+  or running; its NT thread line the Linux call it is in, with four
+  arguments and how long, `nt::thread::LxCall`, set and cleared by
+  `lx::dispatch` apart from the NT `in_syscall` that handover and hot
+  swap restart), every epoll set's entries and every futex waiter (pid,
   address, bitset, thread), so a hang shows who waits where. Ledger:
   `linux clone flags missing` (and vfork's CLONE_VM, unsupported thread
   flag sets), `linux signal action missing`
