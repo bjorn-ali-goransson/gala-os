@@ -312,9 +312,11 @@ faults, its exit).
   an epilogue only what had not (its scope, or the one the header packs);
   the pc is lr afterwards unless a machine-frame or CONTEXT code restored
   it; the establisher frame is the sp the unwind ends with, and a handler
-  is reported from a body only. KiUserExceptionDispatcher's unwind data
-  is MSFT_OP_CONTEXT (`.seh_context`), so a walk continues into the
-  faulting function; RtlUnwindEx resumes the target with x0 the return
+  is reported from a body only. KiUserExceptionDispatcher's and
+  KiUserApcDispatcher's unwind data is MSFT_OP_CONTEXT (`.seh_context`,
+  one code for "a whole CONTEXT is at sp", so ARM64 needs no machine
+  frame), so a walk continues into the faulting function, and out of an
+  APC into the frames the APC interrupted (`arm_apc_test`); RtlUnwindEx resumes the target with x0 the return
   value, after a consolidation callback run in a frame described the same
   way (`arm_seh_test`). Function tables (an image's and those registered at
   run time: RtlAddFunctionTable, the growable ones, callbacks) are one
@@ -1427,7 +1429,14 @@ holds the user's registers.
   components at their standard offset less 512), rsp 64-byte aligned;
   when the frame does not fit (a stack overflow's last page: 3.6 KiB with
   AVX-512) the frame goes without the XSTATE part. APC delivery: CONTEXT,
-  CONTEXT_EX, XSTATE at 0x500.
+  CONTEXT_EX, the machine frame at 0x500 and the XSTATE area at 0x540.
+  An APC's machine frame holds the rip, cs, rflags, rsp and ss of the code
+  the APC interrupted (`context::machine_frame`, built from the CONTEXT
+  itself), which KiUserApcDispatcher's unwind data reads
+  (UWOP_PUSH_MACHFRAME), so a walk out of an APC continues into the frames
+  the APC interrupted instead of ending at the dispatcher (`apc_test`).
+  The CONTEXT alone cannot serve: the frame is aligned down, so the
+  interrupted rsp is at no fixed distance from it.
 - **Context services**: NtContinue and NtSetContextThread apply FltSave
   (CONTEXT_FLOATING_POINT, MxCsr winning) and, with CONTEXT_XSTATE and a
   CONTEXT_EX that describes one, the XSTATE area: features in its Mask
@@ -1513,10 +1522,18 @@ Microsoft's "x64 exception handling" documentation; `seh_test`,
 - kernel32's RaiseException sets EXCEPTION_SOFTWARE_ORIGINATE (0x80) in
   the record's flags, as Windows does (whether RtlRaiseException itself
   does is not measured: testntdll's does not).
-- RtlCaptureContext, RtlRaiseException, RtlUnwindEx and
-  KiUserExceptionDispatcher are assembly with their own unwind data, so
-  walks pass through them like any frame; they are exported through
-  `/EXPORT` (testntdll's build.rs).
+- RtlCaptureContext, RtlRaiseException, RtlUnwindEx,
+  KiUserExceptionDispatcher and KiUserApcDispatcher are assembly with
+  their own unwind data, so walks pass through them like any frame. A
+  `naked` Rust function gets none -- it has no prologue for the compiler
+  to describe, so LLVM emits no `.pdata` entry -- and a walk that reaches
+  such a frame ends there, which is why the entry points the kernel
+  resumes a thread at are written in assembly with their directives by
+  hand (`testntdll/src/seh.rs`, `seh_arm64.rs`). They are exported
+  through `/EXPORT` (testntdll's build.rs), which is the only thing that
+  exports an asm-defined function: a name missing from that list is in
+  the DLL but not in its export directory, and the kernel, which
+  resolves these by name, silently finds nothing.
 - RtlAddFunctionTable registers unwind data for code outside images (JIT
   compilers); RtlInstallFunctionTableCallback registers a callback that
   RtlLookupFunctionEntry asks for addresses in its range (CoreCLR's code
@@ -2275,7 +2292,14 @@ Invariants:
   stack, P1Home..P4Home = NormalContext, SystemArgument1,
   SystemArgument2, NormalRoutine (to be checked against the pinned
   ntdll). The dispatcher calls the routine and NtContinues with
-  TestAlert, which delivers the next APC first. I/O completion routines
+  TestAlert, which delivers the next APC first. An exception raised in an
+  APC routine that takes no handler of its own is dispatched into the
+  frames the APC interrupted: the dispatcher's frame has unwind data of
+  its own (x64: the machine frame the kernel writes above the CONTEXT;
+  ARM64: MSFT_OP_CONTEXT over the CONTEXT at sp), so the walk passes it
+  and reaches the handler of the frame below the alertable wait that ran
+  the APC, which is what Office's startup depends on (`apc_test`,
+  ROADMAP OF). I/O completion routines
   use the same queue: a read or write with an ApcRoutine queues
   ApcRoutine(ApcContext, IoStatusBlock, 0) to the caller when it
   completes successfully, on a synchronous handle too (the I/O completes

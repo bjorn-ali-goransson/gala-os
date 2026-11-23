@@ -2023,7 +2023,19 @@ kernel32 through `raw-dylib`), run under gala and under Windows
    scenarios need not list it. `exports.txt` is regenerated with
    `python3 -I tools/kernelbase_exports.py <dir of Wine's .spec files>
    <commit>` (record the commit in THIRD_PARTY.md).
-7. kernel32's Unicode normalization tables (FoldStringW) are generated,
+7. A function written in assembly (`global_asm!`, not a `#[no_mangle]`
+   Rust item) is exported only by being listed in
+   `user/testntdll/build.rs` -- one `/EXPORT:<name>` per architecture.
+   Moving an existing function into assembly and forgetting the list
+   leaves it in the DLL with no export: the kernel resolves these by
+   name, finds nothing and stops using it with no error anywhere
+   (KiUserApcDispatcher: APC delivery would have stopped altogether).
+   Check with `llvm-readobj --coff-exports target/.../testntdll.dll`.
+   The same goes the other way: a function the kernel resumes a thread
+   at needs unwind data, which a `naked` Rust function never gets, so it
+   belongs in assembly in `seh.rs` / `seh_arm64.rs` with its directives
+   (`llvm-readobj --unwind` shows whether it has a `.pdata` entry).
+8. kernel32's Unicode normalization tables (FoldStringW) are generated,
    not edited: `python3 -I tools/nls_tables.py >
    user/kernel32/src/nls/tables.rs`. The Unicode version is that of the
    host's Python (written into the file's header); a new one goes into

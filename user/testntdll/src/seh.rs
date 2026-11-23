@@ -860,6 +860,10 @@ unsafe extern "system" {
 /// leaves above the record: gala's dispatcher frame (`nt::process`).
 const RECORD_OFFSET: usize = 0x4f0;
 const MACHINE_FRAME_OFFSET: usize = 0x590;
+/// Where gala's APC frame has its machine frame above the CONTEXT at rsp
+/// (the kernel's `APC_MACHINE_FRAME_AT`), and where it holds the APC's
+/// routine and arguments (the CONTEXT's home area).
+const APC_MACHINE_FRAME_OFFSET: usize = 0x500;
 
 // RtlCaptureContext(ContextRecord): the caller's registers, Rip = its
 // return address, Rsp = its rsp after the return.
@@ -1008,6 +1012,53 @@ global_asm!(
     "int3",
     ".seh_endproc",
     "",
+    // KiUserApcDispatcher: the kernel resumes a thread here to run a user
+    // APC, with rsp pointing at the CONTEXT to return to, whose
+    // P1Home..P4Home hold NormalContext, SystemArgument1, SystemArgument2
+    // and NormalRoutine, and a machine frame above it. Its unwind data
+    // restores the nonvolatile registers from that CONTEXT and the rip and
+    // rsp from that machine frame, so an exception an APC raises and has no
+    // handler for is dispatched into the frames the APC interrupted
+    // (`apc_test`); with none, the walk ends at this frame and no handler
+    // is asked at all. The routine runs with the CONTEXT's home area as
+    // its shadow space; NtContinue with TestAlert then delivers the next
+    // APC or resumes the CONTEXT.
+    ".globl KiUserApcDispatcher",
+    ".def KiUserApcDispatcher; .scl 2; .type 32; .endef",
+    "KiUserApcDispatcher:",
+    ".seh_proc KiUserApcDispatcher",
+    ".seh_pushframe",
+    ".seh_stackalloc {apc_machine_frame}",
+    ".seh_savereg rbx, 0x90",
+    ".seh_savereg rbp, 0xa0",
+    ".seh_savereg rsi, 0xa8",
+    ".seh_savereg rdi, 0xb0",
+    ".seh_savereg r12, 0xd8",
+    ".seh_savereg r13, 0xe0",
+    ".seh_savereg r14, 0xe8",
+    ".seh_savereg r15, 0xf0",
+    ".seh_savexmm xmm6, 0x200",
+    ".seh_savexmm xmm7, 0x210",
+    ".seh_savexmm xmm8, 0x220",
+    ".seh_savexmm xmm9, 0x230",
+    ".seh_savexmm xmm10, 0x240",
+    ".seh_savexmm xmm11, 0x250",
+    ".seh_savexmm xmm12, 0x260",
+    ".seh_savexmm xmm13, 0x270",
+    ".seh_savexmm xmm14, 0x280",
+    ".seh_savexmm xmm15, 0x290",
+    ".seh_endprologue",
+    "mov rcx, [rsp]",
+    "mov rdx, [rsp + 8]",
+    "mov r8, [rsp + 0x10]",
+    "mov rax, [rsp + 0x18]",
+    "call rax",
+    "mov rcx, rsp",
+    "mov edx, 1",
+    "call {nt_continue}",
+    "int3",
+    ".seh_endproc",
+    "",
     // gala_consolidate(block, callback, record): rsp = the block, then the
     // consolidation frame, described like KiUserExceptionDispatcher's (the
     // CONTEXT at rsp, the machine frame above it).
@@ -1056,4 +1107,5 @@ global_asm!(
     dispatch = sym crate::dispatch::dispatch_exception,
     record = const RECORD_OFFSET,
     machine_frame = const MACHINE_FRAME_OFFSET,
+    apc_machine_frame = const APC_MACHINE_FRAME_OFFSET,
 );

@@ -74,6 +74,28 @@ pub fn seg_cs(ctx: &[u8]) -> u16 {
     u16::from_le_bytes([ctx[SEG_CS], ctx[SEG_CS + 1]])
 }
 
+/// Bytes of a MACHINE_FRAME: rip, cs, rflags, rsp, ss.
+pub const MACHINE_FRAME_SIZE: usize = 40;
+
+/// The machine frame for the code `ctx` resumes: its rip, cs, rflags, rsp
+/// and ss, as a dispatcher's unwind data reads them above the CONTEXT it
+/// is entered with (UWOP_PUSH_MACHFRAME), so unwinding the dispatcher's
+/// frame continues into the code it interrupted.
+pub fn machine_frame(ctx: &[u8]) -> [u8; MACHINE_FRAME_SIZE] {
+    let mut m = [0u8; MACHINE_FRAME_SIZE];
+    let values = [
+        u64_at(ctx, RIP),
+        u64::from(seg_cs(ctx)),
+        u64::from(u32_at(ctx, EFLAGS)),
+        u64_at(ctx, GPR + 8 * RSP_INDEX),
+        u64::from(u16::from_le_bytes([ctx[SEG_SS], ctx[SEG_SS + 1]])),
+    ];
+    for (chunk, v) in m.chunks_exact_mut(8).zip(values) {
+        chunk.copy_from_slice(&v.to_le_bytes());
+    }
+    m
+}
+
 /// A CONTEXT's ContextFlags.
 pub fn flags(ctx: &[u8]) -> u32 {
     u32_at(ctx, CONTEXT_FLAGS)
