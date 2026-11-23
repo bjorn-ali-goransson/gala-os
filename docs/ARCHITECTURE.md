@@ -4011,6 +4011,15 @@ reads like a gap in the DLL and not a gap in the list.
 - **Data files**: LoadLibraryExW's AS_DATAFILE/AS_IMAGE_RESOURCE map the
   file as an image without loading it (handles tagged 1/2 in their low
   bits; FreeLibrary unmaps them).
+- **A signed target**: LoadLibraryExW's REQUIRE_SIGNED_TARGET is taken
+  beside the search flags and the DLL loads, as a signed image does on
+  Windows (measured: an unsigned one is refused there with
+  ERROR_INVALID_IMAGE_HASH). gala's loader verifies no signature, so an
+  unsigned image loads here too, and the load leaves a row naming the
+  library whose signature nothing checked -- a requirement taken without
+  being met, to be met by the Authenticode path wintrust already has
+  (`kernel32_sys_test`, ROADMAP OF). Every row a load leaves names the
+  library it was asked for, which is what a program stopped by one needs.
 - **GetProcAddress** with a null module searches the executable; an
   export resolving into a `.gstub` section counts as absent ("Gaps are
   never silent").

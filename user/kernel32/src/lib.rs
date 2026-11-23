@@ -392,6 +392,44 @@ fn unsupported(function: &[u8], detail: u64) {
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, detail) };
 }
 
+/// A load's ledger row with the library's own file name appended, as
+/// `(name)`: the ledger folds rows by their text, and a row that says
+/// only which flags were refused does not say which library was asked
+/// for, which is what a program that stops here needs. The file name
+/// and not the path, since a row holds 96 bytes of printable ASCII and
+/// carries no backslash. Recorded as unsupported, like the other
+/// requirements gala takes without meeting them.
+fn record_load(what: &[u8], name: *const u16, detail: u64) {
+    let mut line = [0u8; 96];
+    let mut n = 0;
+    let mut push = |b: u8| {
+        if n < line.len() - 1 {
+            line[n] = b;
+            n += 1;
+        }
+    };
+    for &b in what {
+        push(b);
+    }
+    if !name.is_null() {
+        let len = wide_len(name);
+        // SAFETY: a NUL-terminated string of `len` characters.
+        let units = unsafe { core::slice::from_raw_parts(name, len) };
+        let from = units
+            .iter()
+            .rposition(|&u| u == BACKSLASH || u == u16::from(b'/'))
+            .map_or(0, |i| i + 1);
+        push(b'(');
+        for &u in &units[from..] {
+            let b = u8::try_from(u).unwrap_or(b'?');
+            push(if (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\' { b } else { b'?' });
+        }
+        push(b')');
+    }
+    // SAFETY: a valid buffer of n bytes; the service only reads it.
+    unsafe { GalaRecordMissing(line.as_ptr(), n, 2, detail) };
+}
+
 /// Records something worth knowing that is not a gap (a refused input, a
 /// fallback taken) in the ledger as "other".
 fn note(what: &[u8], detail: u64) {
@@ -710,7 +748,9 @@ pub extern "system" fn LoadLibraryW(name: *const u16) -> Handle {
 }
 
 /// LoadLibraryExW: the LOAD_LIBRARY_SEARCH_* flags choose where to look;
-/// data files and image resources are mapped, not loaded.
+/// data files and image resources are mapped, not loaded, and
+/// LOAD_LIBRARY_REQUIRE_SIGNED_TARGET is taken without a signature being
+/// verified.
 #[unsafe(no_mangle)]
 pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle {
     const SEARCH_FLAGS: u32 = 0x0000_1f00; // LOAD_LIBRARY_SEARCH_* (0x100..0x1000)
@@ -725,10 +765,22 @@ pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32
     // executable's directory, gala looks there after).
     const ALTERED: u32 = 0x8;
     const DLL_LOAD_DIR: u32 = 0x100;
-    if !file.is_null() || flags & !(SEARCH_FLAGS | DATA_FLAGS | ALTERED) != 0 {
-        unsupported(b"kernel32.dll!LoadLibraryExW(flags)", u64::from(flags));
+    // LOAD_LIBRARY_REQUIRE_SIGNED_TARGET (0x80): Windows takes it beside
+    // the search flags and loads a signed DLL, and refuses an unsigned
+    // one with ERROR_INVALID_IMAGE_HASH (measured on Windows 11,
+    // `kernel32_sys_test`). gala's loader verifies no signature, so the
+    // load goes ahead and the row says whose signature nothing checked
+    // -- a requirement taken without being met, named in ROADMAP OF.
+    // Office loads its own DLLs with this flag and the whole search set.
+    const REQUIRE_SIGNED: u32 = 0x80;
+    if !file.is_null() || flags & !(SEARCH_FLAGS | DATA_FLAGS | ALTERED | REQUIRE_SIGNED) != 0 {
+        record_load(b"kernel32.dll!LoadLibraryExW(flags)", name, u64::from(flags));
         return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
     }
+    if flags & REQUIRE_SIGNED != 0 {
+        record_load(b"kernel32.dll!LoadLibraryExW(signature not checked)", name, u64::from(flags));
+    }
+    let flags = flags & !REQUIRE_SIGNED;
     if flags & DATA_FLAGS != 0 {
         return match mapping::map_image_file(name) {
             Ok(base) => (base | if flags & 0x20 != 0 { 2 } else { 1 }) as Handle,
