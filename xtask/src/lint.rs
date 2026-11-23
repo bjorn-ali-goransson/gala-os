@@ -65,6 +65,9 @@ const WAIT_SITES: &[(&str, &str)] = &[
     // change wakes it) and looks at their readiness again after
     // prepare_wait.
     ("wayland/mod.rs", "serve"),
+    // The selftest of preemption between prepare_wait and wait: its
+    // waiter waits for nothing (it takes the wait back itself).
+    ("selftest.rs", "waiter"),
     // The wrappers themselves and the scheduler.
     ("nt/platform.rs", "prepare_wait"),
     ("platform.rs", "prepare_wait"),

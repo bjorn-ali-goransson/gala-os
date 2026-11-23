@@ -124,6 +124,11 @@ struct Thread {
     /// Where the last `prepare_wait` was called from (printed beside
     /// `Waiting` in the state dump: which wait a stuck thread is in).
     wait_site: Option<&'static Location<'static>>,
+    /// The `Waiting` state the timer preempted it in, between
+    /// `prepare_wait` and `wait`: it is queued to run on as a ready
+    /// thread, and is `Waiting` again when it does (`schedule`), unless a
+    /// `wake` came meanwhile (`None` again).
+    preempted_wait: Option<State>,
     /// Some CPU is running on this thread's stack (see the module docs).
     on_cpu: bool,
     /// CPUs this thread may run on.
@@ -343,6 +348,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, S
         user: None,
         wake_reason: WakeReason::Woken,
         wait_site: None,
+        preempted_wait: None,
         on_cpu: true,
         affinity,
         is_idle,
@@ -459,6 +465,7 @@ fn spawn_inner(
         user,
         wake_reason: WakeReason::Woken,
         wait_site: None,
+        preempted_wait: None,
         on_cpu: false,
         affinity: ALL_CPUS,
         is_idle: false,
@@ -739,6 +746,16 @@ fn lockdep_holder(id: ThreadId) -> u64 {
 /// Picks the next thread and switches to it. The current thread is
 /// re-queued if it is still running.
 fn schedule() {
+    switch_away(false);
+}
+
+/// `schedule` for the timer's preemption (`preempt`): a thread taken off
+/// the CPU between `prepare_wait` and `wait` is queued, not blocked. Its
+/// code up to `wait` is still to run, and may be what makes it wakeable
+/// (the Linux personality records the thread as its signals' sleeper
+/// after `prepare`, `lx::wait::block`): blocked there it would wait for a
+/// wake nothing knows to send.
+fn switch_away(preempt: bool) {
     let restore = cpu::disable_interrupts();
     // Nothing may be held here: the held locks belong to the CPU, not to
     // the thread (ARCHITECTURE "Lock-order checking", the invariant).
@@ -749,8 +766,12 @@ fn schedule() {
         let here = me();
         let cur = s.cpus[here].current;
         s.account(here, time::raw_monotonic_ns());
-        if s.thread(cur).state == State::Running {
+        let state = s.thread(cur).state;
+        if state == State::Running {
             s.make_ready(cur);
+        } else if preempt && matches!(state, State::Waiting { .. }) {
+            s.make_ready(cur);
+            s.thread(cur).preempted_wait = Some(state);
         } else {
             // It blocks (waits, sleeps, ends): the watchdog counts afresh
             // when it runs again.
@@ -809,9 +830,30 @@ fn schedule() {
         switch::switch(from, target);
         finish_switch();
     }
+    if preempt {
+        resume_wait();
+    }
     if restore {
         cpu::enable_interrupts();
     }
+}
+
+/// A thread preempted while `Waiting` runs again: it is `Waiting` again
+/// (it has not called `wait` yet), unless it was woken meanwhile or its
+/// deadline has passed. Interrupts are off (`switch_away`).
+fn resume_wait() {
+    with(|s| {
+        let id = s.current();
+        let t = s.thread(id);
+        let Some(state) = t.preempted_wait.take() else { return };
+        t.state = state;
+        if let State::Waiting { until_tick: Some(d) } = state
+            && d <= time::ticks()
+        {
+            t.wake_reason = WakeReason::TimedOut;
+            s.make_ready(id);
+        }
+    });
 }
 
 /// Gives up the CPU to another ready thread, if any.
@@ -960,13 +1002,16 @@ pub fn wait() -> WakeReason {
     })
 }
 
-/// Makes a waiting thread runnable. No effect on threads in other states.
+/// Makes a waiting thread runnable. No effect on threads in other states,
+/// but one preempted while waiting (queued, `preempted_wait`) is waiting
+/// no more: its `wait` returns at once.
 pub fn wake(id: ThreadId) {
     with(|s| {
-        if let Some(t) = s.threads.get(id)
-            && matches!(t.state, State::Waiting { .. })
-        {
+        let Some(t) = s.threads.get_mut(id) else { return };
+        if matches!(t.state, State::Waiting { .. }) {
             s.make_ready(id);
+        } else {
+            t.preempted_wait = None;
         }
     });
 }
@@ -1026,7 +1071,7 @@ pub(crate) fn on_tick_here() {
         cpu.need_resched && (has_work || must_move)
     };
     if preempt {
-        schedule();
+        switch_away(true);
     }
 }
 
