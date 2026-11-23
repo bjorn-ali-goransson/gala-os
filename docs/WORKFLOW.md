@@ -4136,15 +4136,20 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   before the guest made room is never seen. Input paced by time is lost
   that way whenever the guest is busy for a second (the full suite's
   load). So the kernel counts the bytes its input thread reads from each device
-  and logs where (`input: bytes read at <address>`); xtask reads them
-  with the monitor's `x` and sends each command only when the guest has
+  and logs where (`input: bytes read at <address> (physical <address>;
+  ...)`); xtask reads them with the monitor's `pmemsave` at the
+  physical address and sends each command only when the guest has
   read every byte QEMU queued before it (`ps2_bytes` knows what each
   command queues: packets of at most 127 per axis, one per change of
   the buttons, a byte per key press and release, two with E0). A guest
   that does not read within 120 s fails the step with the counts ("the
   guest read N of the M mouse bytes sent"); a command `ps2_bytes` does
   not know, or one that would not fit an empty queue, is refused by the
-  host test `every_screen_step_input_is_paced`. An aarch64 twin's input
+  host test `every_screen_step_input_is_paced`. Never read guest memory
+  with `x` or `xp` while a VM runs: both synchronize CPU 0's state
+  (`run_on_cpu` from the main loop), and a vCPU inside a virtio-gpu
+  reset waits on that main loop, so QEMU deadlocks (virtio_gpu_reset
+  hung at step 5 under KVM that way); `pmemsave` needs no vCPU. An aarch64 twin's input
   goes to virtio-input (no PS/2 on `virt`): the guest counts the events
   it reads (`input: virtio events read at <address>`) and
   `virtio_events` knows what QEMU queues for each command (measured
