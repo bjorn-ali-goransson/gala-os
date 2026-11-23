@@ -322,6 +322,12 @@ its debugger, because Windows Error Reporting's event 1000 is never
 written for these -- the runner sets `SEM_NOGPFAULTERRORBOX`, and a
 process with that error mode does not report its fault to WER at all.
 Map the offset to a function with the build's PDB of that module. A
+test program's exit 0xc0000409 with no `fault` is usually a Rust panic
+in the program itself (an index out of range, an `unwrap` on `None`):
+ntrt's handler prints `<program>: panic at <file>:<line>:<col>:
+<message>` just before, so the line is in that program's output
+(windows-output.txt in CI's windows-report artifact; scenario
+`crash_panic` keeps it). A
 program whose non-zero exit is the result rather than a failure (`crash`,
 `go_exit`, `busybox`, and gala's own `cmd`, `conhost`, `gala` and `wsl`, which
 real Windows cannot load) carries an `expected` field beside `exit`. `cargo xtask
@@ -1291,7 +1297,7 @@ it with `qemu-system-aarch64 -machine virt` (`qemu_aarch64`): the pinned
 QEMU's own `edk2-aarch64-code.fd` (or Ubuntu's AAVMF, `qemu-efi-aarch64`,
 or `AAVMF_CODE`/`AAVMF_VARS`), the image on a virtio-scsi CD, semihosting
 on for the kernel's exit. Software emulation only (KVM would need an
-ARM64 host); about 8 s to the kernel, most of it the firmware.
+ARM64 host); about 4 s to the kernel, most of it the firmware.
 
 - The serial log and verdicts are as x86-64's. There is no event stream
   and no firmware or phase log (no ISA debug consoles on `virt`).
@@ -1303,6 +1309,18 @@ ARM64 host); about 8 s to the kernel, most of it the firmware.
   PATH. Binutils' x86-64 build cannot read an aarch64 ELF.
 - While a phase is unported, its scenario ends the boot just before it
   (`stop_after=<phase>`); porting the next phase moves that on.
+- The firmware connects only the CD: the `scsi-cd` device carries
+  `bootindex=0` (`add_aarch64_cd`), and with a boot order in fw_cfg
+  ArmVirtQemu's boot manager connects just the devices it names. Without
+  one it connects every device, and its own network stack drives a
+  scenario's virtio-net card before the kernel (DHCP, IPv6 duplicate
+  address checks, router solicitations), where a send once crashed the
+  firmware's VirtioNetDxe (data abort at address 8, the serial log ends
+  in its `Synchronous Exception` dump, no boot phases). To see what the
+  firmware sends on the card, boot the firmware alone with
+  `-netdev user,id=n0 -device virtio-net-pci,netdev=n0 -object
+  filter-dump,id=f0,netdev=n0,file=fw.pcap`: with the boot order the
+  capture holds no packet (24 bytes, the header).
 
 ### QEMU
 
@@ -2945,6 +2963,20 @@ A root is what its workload opened on real 26.04, traced:
   env -i HOME=<home> PATH=/usr/bin:/bin BB= DIR=<a copy of user/lx/gimp>
   sh <that copy>/batch.sh`, stdout, then `-- stderr:` and stderr, then
   `-- exit status 0`. Run it twice: the transcripts must be the same.
+- **GIMP's own race**: GIMP 3.2 closes a plug-in's pipes as soon as the
+  plug-in's procedure returns (`gimp_plug_in_handle_proc_return`), while
+  the plug-in still detaches its shared memory and then writes GP_QUIT.
+  When the close comes first, the write fails with EPIPE and the plug-in
+  warns `(file-png:<pid>): LibGimp-WARNING **: <time>: file-png:
+  gimp_flush(): error: Broken pipe`, after a blank line of its own. It
+  exits 0 all the same. Ubuntu's GIMP 3.2.2 printed it in 1 of 11 runs.
+  The transcript is recorded without it, and `lx_expect::check_boot`
+  accepts it: `RACY_LINES` lists such lines with their evidence, takes
+  each out of the log together with its process's blank line before it,
+  and prints `xtask: <scenario>: accepted a line real Linux prints in
+  some runs only`. A line goes in `RACY_LINES` only when the race has
+  been read in the program's source and seen on Linux. A gala bug that
+  ended a pipe early shows as some other difference.
 - **The saved file is compared byte for byte**, so it carries nothing
   that changes between runs: the gimprc turns off exporting the colour
   profile, Exif, XMP and IPTC (their dates and document ids), and
@@ -4204,15 +4236,20 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   before the guest made room is never seen. Input paced by time is lost
   that way whenever the guest is busy for a second (the full suite's
   load). So the kernel counts the bytes its input thread reads from each device
-  and logs where (`input: bytes read at <address>`); xtask reads them
-  with the monitor's `x` and sends each command only when the guest has
+  and logs where (`input: bytes read at <address> (physical <address>;
+  ...)`); xtask reads them with the monitor's `pmemsave` at the
+  physical address and sends each command only when the guest has
   read every byte QEMU queued before it (`ps2_bytes` knows what each
   command queues: packets of at most 127 per axis, one per change of
   the buttons, a byte per key press and release, two with E0). A guest
   that does not read within 120 s fails the step with the counts ("the
   guest read N of the M mouse bytes sent"); a command `ps2_bytes` does
   not know, or one that would not fit an empty queue, is refused by the
-  host test `every_screen_step_input_is_paced`. An aarch64 twin's input
+  host test `every_screen_step_input_is_paced`. Never read guest memory
+  with `x` or `xp` while a VM runs: both synchronize CPU 0's state
+  (`run_on_cpu` from the main loop), and a vCPU inside a virtio-gpu
+  reset waits on that main loop, so QEMU deadlocks (virtio_gpu_reset
+  hung at step 5 under KVM that way); `pmemsave` needs no vCPU. An aarch64 twin's input
   goes to virtio-input (no PS/2 on `virt`): the guest counts the events
   it reads (`input: virtio events read at <address>`) and
   `virtio_events` knows what QEMU queues for each command (measured

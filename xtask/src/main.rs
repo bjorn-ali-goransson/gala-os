@@ -8463,6 +8463,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("crash_continued", "ntdll.dll", "Windows/System32"),
     ("crash_continued_other", "ntdll.dll", "Windows/System32"),
     ("crash_unhandled_both", "ntdll.dll", "Windows/System32"),
+    ("crash_delay", "ntdll.dll", "Windows/System32"),
     ("crash_raise", "ntdll.dll", "Windows/System32"),
     ("crash_apc", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -10993,6 +10994,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("etwarm_test", "ntdll.dll", "Windows/System32"),
     ("etwarm_test", "kernel32.dll", "Windows/System32"),
     ("etwarm_test", "advapi32.dll", "Windows/System32"),
+    ("etwlock_test", "ntdll.dll", "Windows/System32"),
+    ("etwlock_test", "kernel32.dll", "Windows/System32"),
+    ("etwlock_test", "advapi32.dll", "Windows/System32"),
     ("etwfields_test", "ntdll.dll", "Windows/System32"),
     ("etwfields_test", "kernel32.dll", "Windows/System32"),
     ("etwfields_test", "advapi32.dll", "Windows/System32"),
@@ -11421,6 +11425,7 @@ const USER_PROGRAMS: &[&str] = &[
     "caps_test",
     "etw_test",
     "etwarm_test",
+    "etwlock_test",
     "etwfields_test",
     "etwraw_test",
     "tray_test",
@@ -12127,6 +12132,9 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "setup"]))?;
     // The XML reader galapkg and msxml6.dll share.
     run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
+    // The lock gala's DLLs change their own tables under: what it does
+    // on each failed try, and the row it writes when it waits.
+    run_cmd(cargo().args(["test", "--package", "gala_lock"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
     run_cmd(cargo().args(["test", "--package", "schannel_tls"]))?;
     // The update feed's TUF metadata and the client's refusals (R8).
@@ -13402,10 +13410,7 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
         copy(&vars, &copy_path)?;
         cmd.arg("-drive").arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
     }
-    cmd.args(["-device", "virtio-scsi-pci,id=scsi0"])
-        .arg("-drive")
-        .arg(format!("if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={}", iso.display()))
-        .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0"]);
+    add_aarch64_cd(&mut cmd, iso);
     // The keyboard and mouse (`virt` has no PS/2 controller): what the
     // monitor's sendkey, mouse_move and mouse_button reach
     // (kernel/src/input/virtio.rs; `VirtioPace`).
@@ -13415,6 +13420,41 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     }
     cmd.args(extra.split_whitespace());
     Ok(cmd)
+}
+
+/// The image on a virtio-scsi CD, and the only device the firmware
+/// connects. `bootindex` puts a `bootorder` file in fw_cfg, and with one
+/// ArmVirtQemu's boot manager connects just the devices it names
+/// (QemuBootOrderLib's ConnectDevicesFromQemu) instead of every device
+/// (EfiBootManagerConnectAll). Without it, the firmware's own network
+/// stack drives a scenario's virtio-net card before the kernel does:
+/// DHCP, IPv6 duplicate-address checks and router solicitations, from
+/// timer events. One such send crashed the firmware's VirtioNetDxe
+/// (a data abort at address 8) in the middle of reading the CD, before
+/// the boot loader ran. With the boot order, the firmware sends nothing
+/// on the card (WORKFLOW "The aarch64 kernel's scenarios" says how to
+/// see that).
+fn add_aarch64_cd(cmd: &mut Command, iso: &Path) {
+    cmd.args(["-device", "virtio-scsi-pci,id=scsi0"])
+        .arg("-drive")
+        .arg(format!("if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={}", iso.display()))
+        .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0"]);
+}
+
+#[cfg(test)]
+mod aarch64_cd_tests {
+    use super::*;
+
+    /// The CD is the boot order's only entry, so the firmware connects
+    /// nothing else (no network card): see add_aarch64_cd.
+    #[test]
+    fn the_cd_is_the_boot_order() {
+        let mut cmd = Command::new("qemu-system-aarch64");
+        add_aarch64_cd(&mut cmd, Path::new("gala.iso"));
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let with_index: Vec<&String> = args.iter().filter(|a| a.contains("bootindex=")).collect();
+        assert_eq!(with_index, ["scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0"]);
+    }
 }
 
 fn find_ovmf() -> Result<Firmware> {
@@ -14166,6 +14206,7 @@ const ARM64_TWINS: &[&str] = &[
     "crash_continued",
     "crash_continued_other",
     "crash_unhandled_both",
+    "crash_delay",
     "crash_raise",
     "crash_apc",
     "seh_test",
@@ -14236,6 +14277,7 @@ const ARM64_TWINS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "etwlock_test",
     "stack_at_test",
     "iocp_test",
     "symlink_test",
@@ -16952,6 +16994,58 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "etwarm_test: Gala.Test.Quiet: 0/0x0=00 1/0x0=00 4/0x0=00 5/0x0=00 6/0x0=00 255/0x0=00 4/0x10=00 4/0x4000000000000000=00",
             "etwarm_test: wrote 4",
             "etwarm_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // A thread suspended in the middle of writing an event while
+        // another thread writes: what real Windows costs the writers
+        // for it, which is nothing (user/etwlock_test's header has the
+        // three measured runs). Office suspends its own threads to
+        // walk their stacks while it traces, so nothing on gala's
+        // provider side that a writer waits for may be held by a
+        // thread that is stopped -- and the lock the lists had was
+        // such a thing, which is where Word's main thread sat
+        // (ROADMAP OF).
+        name: "etwlock_test",
+        cmdline: "qemu_exit run=etwlock_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "advapi32.dll!StartTraceW(gala-etwlock-test)",
+            "etwlock_test: wrote 4000 events while the other thread was suspended, in 200 \
+             rounds taking ",
+            "advapi32.dll!ControlTraceW(stopped)",
+            "etwlock_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same suspensions with the whole write path armed
+        // (`etw=*`): every event is a system call now, so the window a
+        // suspension can land in is a call into the kernel rather than
+        // a few instructions, and the budget running out makes a write
+        // tell every provider the session is over. Nothing of that may
+        // be behind a lock either.
+        name: "etwlock_armed",
+        cmdline: "qemu_exit run=etwlock_test.exe etw=*",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etw: a session for every provider, level 5 and every keyword, 256 events at most \
+             (etw=)",
+            "advapi32.dll!EventRegister(a session is asking)",
+            "etw: etwlock_test.exe 2b8e5c91-4d07-4f3a-91c6-5e0d8a7b4f12 level 4 keyword 0x1, \
+             4 bytes (no field metadata: a manifest provider's event), no string in \
+             its bytes",
+            "etwlock_test: wrote 4000 events while the other thread was suspended, in 200 \
+             rounds taking ",
+            "etwlock_test: ok",
+            // The budget goes first, which a write says and the session
+            // is ended by: the telling of every provider that it is over
+            // happens inside an `EventWrite`, and holds nothing while it
+            // does.
+            "advapi32.dll!EventWrite(the session etw= asked for is full)",
+            "etw: 256 events written to the session, from 1 provider (etw=); the budget is \
+             spent, so the session ends here, not the program",
             "exited with status 0x00000000",
         ],
     },
@@ -20762,9 +20856,9 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash: writing to a read-only page",
             "crash: the top-level filter continues execution",
             "exception continued: crash.exe (pid 4) thread",
-            "its top-level filter continued past an unhandled 0xc0000005 (access violation) at ",
+            "its top-level filter continued past an unhandled 0xc0000005 (access violation: \
+             writing address 0x",
             "(crash.exe+0x",
-            ", writing address 0x",
             "an exception the top-level filter continued past",
             "crash: the write that faulted went through; ok",
             "process crash.exe (pid 4) exited with status 0x00000000",
@@ -20789,8 +20883,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash: the swallower writes to a read-only page",
             "crash: the raiser's filter has reported its exception",
             "crash: the swallower's filter continues execution",
-            "its top-level filter continued past an unhandled 0xc0000005 (access violation) at ",
-            ", writing address 0x",
+            "its top-level filter continued past an unhandled 0xc0000005 (access violation: \
+             writing address 0x",
             "crash: the swallower carried on; the raiser may die now",
             "crash: the raiser's filter lets the process end",
             "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
@@ -20817,13 +20911,53 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash: the second thread raises 0xe0000045, which nothing handles either",
             "crash: the second thread's filter has reported its exception",
             "crash: the first thread's filter lets the process end",
-            // The note the report is not written from, said out loud.
+            // The note the report is not written from, said out loud,
+            // with where it happened: this exception names no parameters
+            // for a clause to describe (`crash_delay` has those).
             "exception note: crash.exe (pid 4) thread",
-            "took an unhandled 0xe0000045 (exception) too",
+            "took an unhandled 0xe0000045 (exception) at 0x",
+            "(crash.exe+0x",
+            "too, and the crash report is not written from it: the process ends \
+             with 0xe0000044 (exception), which thread",
             // And the report, from the note of the exception that ended it.
             "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
              (exception) in thread",
             "process crash.exe (pid 4) exited with status 0xe0000044",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // Two threads, each taking a delay-load failure no handler takes
+        // (the codes delayimp's helper raises, each with its
+        // DelayLoadInfo): the first looks for a function by name and is
+        // what ends the process, the second looks for a DLL by ordinal
+        // and no report is written from its note. The report must name
+        // the first's DLL and function, and the line about the second's
+        // note must name its DLL and ordinal -- two of Word's threads die
+        // of 0xc06d007f on the way to its window (ROADMAP OF) and one
+        // report is written, so a line with the code and not the name
+        // leaves the other looking for nothing in particular.
+        name: "crash_delay",
+        cmdline: "qemu_exit run=crash.exe args=delay",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the first thread raises 0xc06d007f for gala_absent.dll!GalaAbsentFunction",
+            "crash: the first thread's filter has reported its 0xc06d007f",
+            "crash: the second thread raises 0xc06d007e for gala_missing.dll ordinal 4660",
+            "crash: the second thread's filter has reported its 0xc06d007e",
+            "crash: the first thread's filter lets the process end",
+            // The note no report is written from: what it was looking
+            // for, and where it happened.
+            "exception note: crash.exe (pid 4) thread",
+            "took an unhandled 0xc06d007e (delay-loaded DLL not found: gala_missing.dll ordinal \
+             4660) at ",
+            "(crash.exe+0x",
+            // And the report, from the note of the exception that ended
+            // the process.
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc06d007f \
+             (delay-loaded function not found) in thread",
+            "crash report:   delay load of gala_absent.dll!GalaAbsentFunction",
+            "process crash.exe (pid 4) exited with status 0xc06d007f",
             BOOT_OK_MARKER,
         ],
     },
@@ -20895,6 +21029,22 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "last calls, oldest first: ",
             "NtClose=0xc0000008, NtQueueApcThread=0x00000000",
             "process crash.exe (pid 4) exited with status 0xe0000043",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // A Rust panic in a test program (an index past an array's end):
+        // ntrt's handler prints where and why before it ends the process
+        // with 0xC0000409, so a program that panics now and then on real
+        // Windows names its line in the run's output.
+        name: "crash_panic",
+        cmdline: "qemu_exit run=crash.exe args=panic",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: indexing past the end of an array",
+            "crash: panic at user/crash/src/main.rs:",
+            ": index out of bounds: the len is 3 but the index is 3",
+            "process crash.exe (pid 4) exited with status 0xc0000409",
             BOOT_OK_MARKER,
         ],
     },
@@ -22044,6 +22194,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("etwfields_armed", "etwfields_test"),
     ("etwraw_armed", "etwraw_test"),
     ("etw_armed_all", "etwarm_test"),
+    ("etwlock_armed", "etwlock_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),
@@ -27954,9 +28105,12 @@ fn monitor_closed(monitor: &std::os::unix::net::UnixStream) -> bool {
 /// each command is `virtio_events`.
 #[derive(Default)]
 struct InputPace {
-    /// The guest's counters' address and the devices they count, once
-    /// found in the serial log.
+    /// The guest's counters' physical address and the devices they
+    /// count, once found in the serial log.
     guest: Option<(u64, Counted)>,
+    /// Where `pmemsave` writes the counters (`guest_ps2_read`): next to
+    /// the serial log.
+    file: PathBuf,
     /// The counters when this check began (a resumed snapshot's are not
     /// 0), plus what this check has sent since.
     want: (u64, u64),
@@ -27989,7 +28143,7 @@ impl InputPace {
     ) -> Result {
         let (at, _) = self.find(monitor, log, clock)?;
         let began = ScreenWait::start(clock);
-        let mut read = guest_ps2_read(monitor, at)?;
+        let mut read = guest_ps2_read(monitor, at, &self.file)?;
         while read.0 < self.want.0 || read.1 < self.want.1 {
             if let Some(why) = began.over(clock, PS2_TAKEN_WAIT) {
                 return Err(format!(
@@ -28003,7 +28157,7 @@ impl InputPace {
                 ));
             }
             thread::sleep(Duration::from_millis(20));
-            read = guest_ps2_read(monitor, at)?;
+            read = guest_ps2_read(monitor, at, &self.file)?;
         }
         if read.0 > self.want.0 || read.1 > self.want.1 {
             return Err(format!(
@@ -28028,8 +28182,8 @@ impl InputPace {
         }
     }
 
-    /// The guest's counters' address and what they count; the first
-    /// time, also where they stand.
+    /// The guest's counters' physical address and what they count; the
+    /// first time, also where they stand.
     fn find(
         &mut self,
         monitor: &mut std::os::unix::net::UnixStream,
@@ -28059,10 +28213,11 @@ impl InputPace {
             thread::sleep(Duration::from_millis(100));
         };
         let at = rest
-            .split_whitespace()
-            .next()
-            .and_then(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok())
-            .ok_or_else(|| format!("unreadable input counters line `{rest}`"))?;
+            .split_once("(physical ")
+            .and_then(|(_, r)| r.split(';').next())
+            .and_then(|a| u64::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok())
+            .filter(|&a| a != 0)
+            .ok_or_else(|| format!("no physical address in the input counters line `{rest}`"))?;
         let counted = if virtio {
             Counted::VirtioEvents
         } else {
@@ -28073,7 +28228,9 @@ impl InputPace {
             )
         };
         self.guest = Some((at, counted));
-        self.want = guest_ps2_read(monitor, at)?;
+        self.file = std::path::absolute(log.with_extension("input-counters"))
+            .map_err(|e| format!("{}: {e}", log.display()))?;
+        self.want = guest_ps2_read(monitor, at, &self.file)?;
         Ok((at, counted))
     }
 
@@ -28200,14 +28357,28 @@ fn ps2_bytes(command: &str, packet: u64, buttons: &mut u8) -> Result<(u64, u64)>
     Ok((keyboard, mouse))
 }
 
-/// The guest's PS/2 counters at `at` (`input: bytes read at`): (keyboard
-/// bytes, mouse bytes) read, through the monitor's `x`.
-fn guest_ps2_read(monitor: &mut std::os::unix::net::UnixStream, at: u64) -> Result<(u64, u64)> {
+/// The guest's input counters at physical address `at` (`input: bytes
+/// read at <virtual> (physical <at>; ...)`): (keyboard, mouse) read,
+/// through the monitor's `pmemsave` into `file`. Not `x` or `xp`: both
+/// synchronize CPU 0's state first (`run_on_cpu`, from the main loop the
+/// monitor runs in), and while CPU 0 is in a virtio-gpu reset (the
+/// guest's write to the device's status) QEMU waits on the main loop
+/// for the reset's bottom half: each waits for the other and the VM
+/// hangs (QEMU 11.1, `virtio_gpu_reset` and `cpu_memory_rw_debug`; seen
+/// as virtio_gpu_reset stopping at step 5 under KVM). `pmemsave` reads
+/// guest RAM with no vCPU.
+fn guest_ps2_read(
+    monitor: &mut std::os::unix::net::UnixStream,
+    at: u64,
+    file: &Path,
+) -> Result<(u64, u64)> {
     use std::io::{Read, Write};
-    writeln!(monitor, "x /2gx {at:#x}").map_err(|e| e.to_string())?;
-    // The reply: "<address>: 0x<keyboard> 0x<mouse>", after the echo of
-    // whatever was sent before.
-    let _ = monitor.set_read_timeout(Some(Duration::from_millis(100)));
+    let _ = fs::remove_file(file);
+    writeln!(monitor, "pmemsave {at:#x} 16 \"{}\"", file.display()).map_err(|e| e.to_string())?;
+    // QEMU writes the 16 bytes at once when it closes the file; what the
+    // monitor says (the echo, the prompt) is drained so its socket never
+    // fills, and kept for the message if the file never comes.
+    let _ = monitor.set_read_timeout(Some(Duration::from_millis(20)));
     let mut said = Vec::new();
     let mut buf = [0u8; 4096];
     let start = Instant::now();
@@ -28215,24 +28386,24 @@ fn guest_ps2_read(monitor: &mut std::os::unix::net::UnixStream, at: u64) -> Resu
         if let Ok(n) = monitor.read(&mut buf) {
             said.extend_from_slice(&buf[..n]);
         }
-        let text = String::from_utf8_lossy(&said);
-        let reply = text.lines().find_map(|l| {
-            let (address, values) = l.trim().split_once(": ")?;
-            if u64::from_str_radix(address, 16).ok()? != at {
-                return None;
-            }
-            let mut v = values
-                .split_whitespace()
-                .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
-            Some((v.next()??, v.next()??))
-        });
-        if reply.is_some() || start.elapsed() > Duration::from_secs(10) {
-            break reply;
+        if let Ok(bytes) = fs::read(file)
+            && bytes.len() == 16
+        {
+            let word =
+                |i: usize| u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap_or_default());
+            break Some((word(0), word(8)));
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            break None;
         }
     };
     let _ = monitor.set_read_timeout(None);
     found.ok_or_else(|| {
-        format!("the monitor did not answer `x /2gx {at:#x}`: {:?}", String::from_utf8_lossy(&said))
+        format!(
+            "the monitor's `pmemsave {at:#x} 16` wrote no 16 bytes to {} in 10 s: {:?}",
+            file.display(),
+            String::from_utf8_lossy(&said)
+        )
     })
 }
 
@@ -32898,7 +33069,7 @@ fn iso(release: bool, args: &[String]) -> Result {
             "xtask: QEMU: qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 1G -smp 2 \
              -bios <AAVMF/edk2-aarch64 code> -device virtio-gpu-pci -device virtio-keyboard-pci \
              -device virtio-mouse-pci -device virtio-scsi-pci -drive \
-             if=none,id=cd,media=cdrom,file={} -device scsi-cd,drive=cd",
+             if=none,id=cd,media=cdrom,file={} -device scsi-cd,drive=cd,bootindex=0",
             path.display()
         );
         return Ok(());

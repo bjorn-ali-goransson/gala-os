@@ -59,6 +59,18 @@
 //! over the first and the report describes an exception that ended
 //! nothing, with a code that is not the exit status.
 //!
+//! With the argument `delay` (and ntdll, scenario `crash_delay`) two
+//! threads each take a delay-load failure no handler takes, raised as
+//! the delay-load helper raises one: the code and one parameter, the
+//! DelayLoadInfo it was working from. The first looks for a function by
+//! name and is the thread the process ends of, so the crash report is
+//! written from its note; the second looks for a DLL by ordinal and its
+//! note is left where it is, so only its own line can say what it was
+//! looking for. Two of Word's threads die of 0xc06d007f on the way to
+//! its window (ROADMAP OF) and one report is written, so a line that
+//! gives the code and not the name leaves the other looking for nothing
+//! in particular.
+//!
 //! With the argument `continued` (and ntdll, scenario
 //! `crash_continued`) nothing dies: a top-level filter returns
 //! EXCEPTION_CONTINUE_EXECUTION, the faulting instruction is retried and
@@ -73,6 +85,11 @@
 //! continuing: the retried store then succeeds, which is what proves
 //! execution really was continued rather than the process merely
 //! surviving.
+//!
+//! With the argument `panic` (scenario `crash_panic`) it indexes past the
+//! end of an array: Rust panics, and ntrt's handler must print where and
+//! why (`crash: panic at <file>:<line>:<column>: <message>`) and end the
+//! process with 0xC0000409.
 
 #![no_std]
 #![no_main]
@@ -122,6 +139,26 @@ const RAISED_BY_OTHER: u32 = 0xe000_0044;
 /// ends nothing, so a run tells the note the report must be written from
 /// (0xe0000044) from the note it must not be.
 const RAISED_SECOND: u32 = 0xe000_0045;
+
+/// The codes the delay-load helper raises when a delay-loaded call needs
+/// something it cannot find (delayimp.h's VcppException of
+/// ERROR_MOD_NOT_FOUND and ERROR_PROC_NOT_FOUND), each with the one
+/// parameter: the DelayLoadInfo it was working from.
+const DELAY_DLL_MISSING: u32 = 0xc06d_007e;
+const DELAY_PROC_MISSING: u32 = 0xc06d_007f;
+
+/// What `delay`'s threads say they could not find: a DLL and a function
+/// by name for the thread the process ends of, a DLL and an ordinal for
+/// the thread whose note no report is written from. Nothing is called
+/// either of these, so a run that shows the names read them out of this
+/// program's own structure.
+static ABSENT_DLL: &[u8] = b"gala_absent.dll\0";
+static ABSENT_FUNCTION: &[u8] = b"GalaAbsentFunction\0";
+static MISSING_DLL: &[u8] = b"gala_missing.dll\0";
+
+/// The ordinal `delay`'s second thread looked for; a report says it in
+/// decimal (4660).
+const MISSING_ORDINAL: u64 = 0x1234;
 
 /// How long one thread of `continued_other` waits for the other before
 /// giving up and saying so: a wait that cannot end is a test that says
@@ -415,6 +452,124 @@ fn until(flag: &AtomicU32, what: &str) -> bool {
     true
 }
 
+/// `delay`: two threads, each taking a delay-load failure no handler
+/// takes. The first looks for a function by name and is the thread the
+/// process ends of, so the crash report is written from its note; the
+/// second looks for a DLL by ordinal and its note stays where it is, so
+/// its own line is the only account of what it was looking for.
+///
+/// One top-level filter serves both and tells them apart by the code, as
+/// `unhandled_both`'s does: the first holds in it until the second has
+/// reported, the second until the process ends under it, so the thread
+/// that ends the process is the first one and the order is not a race.
+fn delay_load() -> u32 {
+    let set = find_ntdll().and_then(|n| find_export(n, b"RtlSetUnhandledExceptionFilter"));
+    let Some(set) = set else {
+        ntrt::print("crash: no RtlSetUnhandledExceptionFilter\r\n");
+        return 2;
+    };
+    // SAFETY: the documented signature.
+    let set: extern "system" fn(usize) = unsafe { core::mem::transmute(set) };
+    set(delaying as *const () as usize);
+    let (status, _, _) = ntrt::create_thread(delay_second, 0, false);
+    if status != 0 {
+        ntrt::print("crash: no second thread\r\n");
+        return 2;
+    }
+    ntrt::print(
+        "crash: the first thread raises 0xc06d007f for gala_absent.dll!GalaAbsentFunction\r\n",
+    );
+    raise_delay(DELAY_PROC_MISSING, ABSENT_DLL, Some(ABSENT_FUNCTION));
+    ntrt::print("crash: the first thread's raise returned?!\r\n");
+    1
+}
+
+/// `delay`'s second thread: it raises once the first thread's note is
+/// reported, so both notes exist before either ends anything -- and its
+/// own is the one no crash report is written from.
+extern "C" fn delay_second(_arg: usize) -> ! {
+    if !until(&FIRST_REPORTED, "the first thread to report its exception") {
+        ntrt::exit(3)
+    }
+    ntrt::print("crash: the second thread raises 0xc06d007e for gala_missing.dll ordinal 4660\r\n");
+    raise_delay(DELAY_DLL_MISSING, MISSING_DLL, None);
+    ntrt::print("crash: the second thread's raise returned?!\r\n");
+    ntrt::exit(1)
+}
+
+/// The one top-level filter of `delay`, which both threads reach. ntdll
+/// reports the exception before it calls this, so each thread's note
+/// exists by the time its filter runs.
+extern "system" fn delaying(pointers: *mut u8) -> i32 {
+    // SAFETY: EXCEPTION_POINTERS: the record's address first, and the
+    // record starts with its ExceptionCode.
+    let code = unsafe { *(*(pointers as *const *const u32)) };
+    if code == DELAY_DLL_MISSING {
+        // This thread must not be the one that ends the process: it
+        // holds here until the first thread's exception does. Bounded,
+        // because a wait that cannot end is a test that says nothing.
+        ntrt::print("crash: the second thread's filter has reported its 0xc06d007e\r\n");
+        SECOND_REPORTED.store(1, Ordering::SeqCst);
+        let deadline = ntrt::now_ms() + WAIT_MS;
+        while ntrt::now_ms() < deadline {
+            ntrt::delay(PAUSE);
+        }
+        ntrt::print("crash: the first thread did not end the process?!\r\n");
+        ntrt::exit(1)
+    }
+    ntrt::print("crash: the first thread's filter has reported its 0xc06d007f\r\n");
+    FIRST_REPORTED.store(1, Ordering::SeqCst);
+    if !until(&SECOND_REPORTED, "the second thread to report its exception") {
+        ntrt::exit(3)
+    }
+    // Both notes exist now, and this is the exception the process ends
+    // of: the report must be written from this thread's note.
+    ntrt::print("crash: the first thread's filter lets the process end\r\n");
+    EXCEPTION_CONTINUE_SEARCH
+}
+
+/// Raises `code` with the one parameter the delay-load helper raises it
+/// with: a DelayLoadInfo (delayimp.h) describing what was looked for.
+/// Each of its fields takes a pointer's room here -- `cb` and
+/// `fImportByName` are DWORDs, each followed by the padding the pointer
+/// after it asks for -- so they are cb, pidd, ppfn, szDll, then
+/// DelayLoadProc's fImportByName and either the name or the ordinal.
+/// Nothing takes these codes, so this does not return.
+fn raise_delay(code: u32, dll: &[u8], name: Option<&[u8]>) {
+    let found = find_ntdll().and_then(|n| find_export(n, b"RtlRaiseException"));
+    let Some(raise) = found else {
+        ntrt::print("crash: no RtlRaiseException\r\n");
+        return;
+    };
+    // SAFETY: the documented signature.
+    let raise: unsafe extern "system" fn(*mut u8) = unsafe { core::mem::transmute(raise) };
+    let mut info = [0u64; 8];
+    // cb: the structure's own size, which is what a 64-bit build of the
+    // helper fills in. The names are in this image, so they are readable
+    // for as long as the process is.
+    info[0] = 64;
+    info[3] = dll.as_ptr() as u64;
+    match name {
+        Some(n) => {
+            info[4] = 1;
+            info[5] = n.as_ptr() as u64;
+        }
+        None => info[5] = MISSING_ORDINAL,
+    }
+    // EXCEPTION_RECORD, as in `raise`: the code, flags 0, no nested
+    // record, the address RtlRaiseException fills in, and the one
+    // parameter. `info` stays on this frame, below which the dispatcher
+    // builds its own, so the kernel reads the structure while this
+    // thread is still in the raise.
+    let mut record = [0u64; 7];
+    record[0] = u64::from(code);
+    record[3] = 1;
+    record[4] = info.as_ptr() as u64;
+    // SAFETY: a well-formed EXCEPTION_RECORD whose one parameter points
+    // to a well-formed DelayLoadInfo.
+    unsafe { raise(record.as_mut_ptr().cast()) };
+}
+
 /// Whether the command line's last word is `word`.
 fn arg_is<const N: usize>(word: [u8; N]) -> bool {
     // SAFETY: PEB+0x20 holds ProcessParameters; CommandLine is a
@@ -467,6 +622,15 @@ fn raise() -> u32 {
     unsafe { raise(record.as_mut_ptr().cast()) };
     ntrt::print("crash: the raise returned?!\r\n");
     1
+}
+
+/// Indexes past the end of an array, with an index the compiler cannot
+/// see: Rust's bounds check panics, and ntrt's panic handler must print
+/// the line and the message before ending the process with 0xC0000409.
+fn index_past_end() -> u32 {
+    ntrt::print("crash: indexing past the end of an array\r\n");
+    let three = [1u32, 2, 3];
+    three[core::hint::black_box(three.len())]
 }
 
 /// Raises `code` with no parameters at all, as Office's 0xE0000002 is
@@ -548,8 +712,14 @@ fn apc() -> u32 {
 }
 
 fn main() -> u32 {
+    if arg_is(*b"panic") {
+        return index_past_end();
+    }
     if arg_is(*b"unhandled_both") {
         return unhandled_both();
+    }
+    if arg_is(*b"delay") {
+        return delay_load();
     }
     if arg_is(*b"continued_other") {
         return continued_other();

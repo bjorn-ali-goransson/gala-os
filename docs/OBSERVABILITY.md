@@ -126,7 +126,10 @@ port. Lines that tools and agents rely on:
   and a C runtime call with an invalid argument in a program without an
   invalid-parameter handler ends the process with 0xc0000409 after
   `ucrtbase: invalid parameter passed to a C runtime function, ending the
-  process (0xc0000409)` on its stderr;
+  process (0xc0000409)` on its stderr; a Rust panic in a test program
+  built on ntrt prints `<program>: panic at <file>:<line>:<col>:
+  <message>` before the process ends with 0xc0000409 (gala and real
+  Windows alike);
   `wow64: ... cannot free an exited
   thread's 64-bit stack|TEB32` if a WOW64 thread's exit leaks them; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
@@ -532,7 +535,14 @@ that row is in the dump only when the filter freed the slot it took.
   `reached` (not a gap at all: the first call that reached a method gala
   answers, so that a program stopping in the middle of a path leaves the
   path it took; it is told from a call answered S_OK, which `other`
-  records with the HRESULT as its detail) and `other`. Both
+  records with the HRESULT as its detail), `waited` (not a gap either:
+  a lock inside one of gala's own DLLs that a thread has been waiting
+  a second for, named `<dll>!<what the lock protects>` with a suffix
+  saying whether the thread waited for it, found another thread
+  holding it, or re-entered it -- `user/gala_lock`, what a DLL writes
+  down instead of spinning silently, and the row that would have
+  named the holder of the trace lock Word's main thread hung in) and
+  `other`. Both
   `stub` and `not implemented` are also logged as they happen, because a
   run cut short by a snapshot never dumps the ledger; only `stub`'s line
   says the process ended. The Windows Runtime's:
@@ -1108,7 +1118,7 @@ continues execution withdraws it, and the withdrawal is said out loud as
 it happens:
 
 ```
-exception continued: crash.exe (pid 4) thread 8: its top-level filter continued past an unhandled 0xc0000005 (access violation) at 0x140001579 (crash.exe+0x1579), writing address 0x20000
+exception continued: crash.exe (pid 4) thread 8: its top-level filter continued past an unhandled 0xc0000005 (access violation: writing address 0x20000) at 0x140001c5c (crash.exe+0x1c5c)
 ```
 
 That line, and a ledger row beside it (`GalaUnhandledException`, "an
@@ -1146,14 +1156,27 @@ written once the process's last thread has exited and no thread is left
 to ask. A withdrawal reaches only the withdrawing thread's own note.
 
 Another thread's unhandled exception, still on its way to ending the
-process, stays where it is and gets a line of its own:
+process, stays where it is and gets a line of its own, with what its
+parameters describe and where it happened:
 
 ```
-exception note: crash.exe (pid 4) thread 12 took an unhandled 0xe0000045 (exception) too, and the crash report is not written from it: the process ends with 0xe0000044 (exception), which thread 8 took
+exception note: crash.exe (pid 4) thread 12 took an unhandled 0xc06d007e (delay-loaded DLL not found: gala_missing.dll ordinal 4660) at 0x140001174 (crash.exe+0x1174) too, and the crash report is not written from it: the process ends with 0xc06d007f (delay-loaded function not found), which thread 8 took
 ```
 
 so an exception that happened and ended nothing is still named
-somewhere. The kernel's fault notes are not named that way: one is kept
+somewhere, by the name it would carry in a crash report. The clause
+after the code is one piece of text (`About`) shared by the three lines
+that describe an exception outside a report -- this one, the withdrawal
+above and the warning that a thread had no room for notes of its own:
+the verb and address of an access violation, the type a C++ throw
+carried, the DLL and the function or ordinal a delay load wanted. What
+the parameters mean is decoded in one place for both ABIs
+(`nt::crashreport::decode_params`), so a note made on ARM64 says as
+much as one made on x64. A line that gives the code and its name and
+nothing else is not enough: two of Word's threads die of 0xc06d007f on
+the way to its window (ROADMAP OF) and one report is written, so the
+other thread's line would otherwise leave a reader looking for nothing
+in particular. The kernel's fault notes are not named that way: one is kept
 for every fault, including the faults a handler goes on to take, so a
 fault note left behind says nothing by itself.
 
@@ -1164,8 +1187,9 @@ slot serves every thread of the process and the next exception there
 does write over this one. That is also the only case left where a
 withdrawal can meet a note which is not its own, and it leaves it, for
 the crash report. Scenarios `crash`, `crash_dispatched`,
-`crash_filtered`, `crash_continued`, `crash_continued_other` and
-`crash_unhandled_both`, each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
+`crash_filtered`, `crash_continued`, `crash_continued_other`,
+`crash_unhandled_both` and `crash_delay` (two threads, a delay-loaded
+function and a delay-loaded DLL), each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
 eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`
