@@ -157,7 +157,7 @@ jobs:
           path: |
             target/prebuilt
             !target/prebuilt/chromium-syms
-          key: gala-prebuilt-linux-${{ hashFiles('xtask/src/main.rs') }}
+          key: gala-prebuilt-linux-${{ hashFiles('xtask/src/pins/**') }}
           restore-keys: gala-prebuilt-linux-
       - name: Install Go (for user/go_hello; pinned in xtask GO_TOOLCHAIN)
         uses: actions/setup-go@v5
@@ -258,7 +258,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/prebuilt/debs
-          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
+          key: gala-debs-${{ hashFiles('xtask/src/pins/debs.rs') }}
           restore-keys: gala-debs-
       - name: Fetch what the pins name and the cache lacks
         # Through the mirror the runner's own apt uses: archive.ubuntu.com
@@ -357,14 +357,14 @@ jobs:
             target/prebuilt
             !target/prebuilt/chromium-syms
             !target/prebuilt/debs
-          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
+          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/pins/**') }}
           restore-keys: gala-prebuilt-${{ matrix.shard }}-
       - name: Restore the Linux roots' packages (the debs job's)
         id: debs
         uses: actions/cache/restore@v4
         with:
           path: target/prebuilt/debs
-          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
+          key: gala-debs-${{ hashFiles('xtask/src/pins/debs.rs') }}
           restore-keys: gala-debs-
       - name: Fetch the packages that cache did not hold
         # A cache is an optimisation and never a dependency: the shard
@@ -393,7 +393,7 @@ jobs:
             target/prebuilt
             !target/prebuilt/chromium-syms
             !target/prebuilt/debs
-          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
+          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/pins/**') }}
       # Saved from main's pushes only (pull requests read it), by one shard
       # (all six build the same).
       - name: Save the build cache (main, shard 1)
