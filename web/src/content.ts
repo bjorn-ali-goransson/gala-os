@@ -950,3 +950,81 @@ export const images: Image[] = [
 /** What a downloaded image does when it boots (xtask DEMO_CMDLINE*). */
 export const imageDemo =
   "Each image is a developer build of main's latest commit that passed every test, rebuilt nightly. It boots the kernel, assembles C:, and runs a few demonstration programs: a minimal Windows program on both machines, and on x86_64 also a Go program and one that starts a thousand goroutines across both processors. Their output and the kernel's log go to the serial console, which the command's serial option shows in your terminal: expect lines such as “Hello from user mode!” and “gala: boot ok”. Then QEMU's window shows gala's desktop: the taskbar, the clock, and the start menu, which the Windows key or a click on the start button opens. Close QEMU's window, or press Ctrl+C in the terminal, to stop it.";
+
+// ---------------------------------------------------------------------------
+// Booting a PC from a USB stick (README "Booting a PC from a USB stick").
+// The image boots as a USB stick under BIOS and UEFI in QEMU (a raw disk
+// under SeaBIOS and OVMF, and a USB mass-storage device behind xHCI); no
+// physical PC is in the tests yet, which `limits` says.
+
+export type UsbWay = {
+  /** The system the stick is written from. */
+  name: string;
+  how: string;
+  /** Commands, in order; `<device>` stands for the stick. */
+  cmds?: string[];
+};
+
+export type UsbStep = { title: string; body: string; ways?: UsbWay[] };
+
+export const usb: {
+  intro: string;
+  needs: string[];
+  steps: UsbStep[];
+  limits: string[];
+} = {
+  intro:
+    "The x86_64 image boots a PC directly, by BIOS or UEFI. Written to a USB stick, it runs entirely from memory: nothing is installed, and gala has no driver yet for the computer's own disks, so they are left as they were.",
+  needs: [
+    "A USB stick of 1 GB or more whose contents you can lose: writing the image erases it.",
+    "A 64-bit Intel or AMD PC with 512 MB of memory or more (Intel from 2012 or AMD from 2015 onwards, for its random-number instruction).",
+    "gala-x86_64.iso from the download above, its SHA-256 checked.",
+  ],
+  steps: [
+    {
+      title: "Write the image to the stick",
+      body: "The image is written byte for byte to the whole stick, not copied onto it as a file. Check the stick's name twice: the wrong one erases another disk.",
+      ways: [
+        {
+          name: "Windows",
+          how: "With Rufus: choose the stick under Device, choose the image with SELECT, then START. When Rufus asks how to write it, choose DD Image mode. balenaEtcher works too: Flash from file, Select target, Flash.",
+        },
+        {
+          name: "macOS",
+          how: "Find the stick in the list (say /dev/disk4), unmount it, write the image to its raw device (rdisk), then eject it. Or use balenaEtcher.",
+          cmds: [
+            "diskutil list",
+            "diskutil unmountDisk /dev/disk4",
+            "sudo dd if=gala-x86_64.iso of=/dev/rdisk4 bs=4m",
+            "diskutil eject /dev/disk4",
+          ],
+        },
+        {
+          name: "Linux",
+          how: "Find the stick in the list (say /dev/sdb: the whole device, not a partition such as /dev/sdb1), then write the image to it.",
+          cmds: [
+            "lsblk",
+            "sudo dd if=gala-x86_64.iso of=/dev/sdb bs=4M conv=fsync status=progress",
+          ],
+        },
+      ],
+    },
+    {
+      title: "Turn Secure Boot off",
+      body: "On a UEFI PC, open the firmware's settings (a key at power-on, often F2, Del or F10), find Secure Boot under Security or Boot and disable it: the bootloader on the image is not signed yet. If Windows on that PC uses BitLocker, have its recovery key at hand, as changing Secure Boot can make Windows ask for it. Turn Secure Boot back on when you are done.",
+    },
+    {
+      title: "Start the PC from the stick",
+      body: "Plug the stick in, power the PC on and press its boot menu key (often F12, F11, F10, F9 or Esc), then choose the USB stick; where it is listed twice, the UEFI entry. On an Intel Mac, hold the Option key at power-on. Macs with Apple silicon cannot start it.",
+    },
+    {
+      title: "What you will see",
+      body: "gala's boot screen, then its log scrolling as it starts, and then its desktop with the taskbar and the start menu. To leave, hold the power button until the PC turns off and take the stick out: the PC then starts its usual system.",
+    },
+  ],
+  limits: [
+    "It is tested in virtual machines, booted from a USB stick under BIOS and UEFI, but not yet on physical PCs: expect some not to start it. What the screen shows when one stops is worth reporting.",
+    "The keyboard and mouse work where they reach gala as PS/2 devices: a laptop's built-in keyboard often does, and many PCs present USB ones that way while their firmware's USB legacy support is on. gala's own USB driver is planned.",
+    "There is no network on a physical PC yet, and no sound.",
+  ],
+};
