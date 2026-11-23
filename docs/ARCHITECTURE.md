@@ -11618,9 +11618,9 @@ stations and desktops a program creates are refused until stage 3).
   element by local name and namespace, `found` FALSE with S_OK when it
   is not there and WS_E_INVALID_FORMAT when the caller passed no
   `found`), WsReadStartElement, WsReadEndElement, and WsReadType for
-  WS_WSZ_TYPE (a string onto the heap) and WS_UINT32_TYPE (a number;
-  WS_E_NUMERIC_OVERFLOW for one that does not fit) under both element
-  mappings. The reader reads ahead: a read that consumes a node leaves
+  WS_WSZ_TYPE (a string onto the heap), WS_UINT32_TYPE (a number;
+  WS_E_NUMERIC_OVERFLOW for one that does not fit) and WS_STRUCT_TYPE
+  (an element into a C struct, below) under both element mappings. The reader reads ahead: a read that consumes a node leaves
   it on the node after that one, which is what Windows' reader does
   (its ROW and COLUMN stand there, measured) and the reason a document
   with two root elements fails at the first root's end tag and not at
@@ -11636,6 +11636,47 @@ stations and desktops a program creates are refused until stage 3).
   read of a value the document does not hold -- a number that is not
   one, a number too big for its type, an element where a value was
   expected -- faults the reader, as a malformed document does.
+  A WS_STRUCT_TYPE read fills a C struct from its
+  WS_STRUCT_DESCRIPTION: the fields in the order the description names
+  them, each written at its own offset, and nothing zeroed up front, so
+  a read that fails partway leaves the fields it got to written and the
+  rest as the caller had them -- which is what Windows leaves behind
+  (measured). WS_READ_REQUIRED_VALUE writes into the caller's struct and
+  requires the value size to be the description's own size;
+  WS_READ_REQUIRED_POINTER puts the struct on the heap and writes the
+  pointer to it. The field mappings read are WS_ATTRIBUTE_FIELD_MAPPING
+  (from the start tag's attributes), WS_ELEMENT_FIELD_MAPPING (the child
+  element of that name and namespace, a scalar or a described struct of
+  its own), WS_REPEATING_ELEMENT_FIELD_MAPPING (the items inside the
+  wrapper element the field names, as a heap array with its count at
+  `countOffset`) and WS_TEXT_FIELD_MAPPING (the element's own text, read
+  as the content mapping reads it). Attribute fields come before every
+  other field, and Windows answers for that order before it touches the
+  document -- an attribute field after an element field is
+  WS_E_INVALID_FORMAT with nothing written (measured) -- which is why
+  gala validates every field first: its mapping, its names, its option
+  bits, its value size, and that `offset` plus that size is inside the
+  struct. So are the other mistakes in a description, all answered
+  before the document is read: a field past the end of the struct, a
+  field whose namespace is NULL rather than the empty string,
+  WS_FIELD_POINTER on a field that does not repeat, and a repeating
+  field that names no wrapper element, no item name or a `countOffset`
+  the struct has no room for are E_INVALIDARG; two fields at one offset
+  are allowed (measured). WS_FIELD_OPTIONAL zeroes the field's
+  slot when the element is not there and reads on, where a missing
+  element is otherwise WS_E_INVALID_FORMAT. Content after the last field
+  and an attribute no field names are both WS_E_INVALID_FORMAT unless
+  the struct carries WS_STRUCT_IGNORE_TRAILING_ELEMENT_CONTENT or
+  WS_STRUCT_IGNORE_UNHANDLED_ATTRIBUTES; a namespace declaration
+  (`xmlns`, `xmlns:p`) is never an attribute a field has to name, which
+  is why the reader keeps a start tag's attributes rather than dropping
+  them with the tag. A repeating field writes the array, the pointer and
+  the count it reached before it refuses content inside the wrapper that
+  is no item, because that is what Windows leaves behind (measured); an
+  empty wrapper is a count of none with a pointer that is not null. The
+  whole contract is measured before gala reads one struct:
+  `webservices_test`'s 31 struct cases are the answers this machine's
+  Windows gives, in both widths.
   WsGetReaderProperty answers for the settings and the position, in
   Windows' own order of refusals (measured): a reader with no input
   refuses every id with WS_E_INVALID_OPERATION and a faulted one with
@@ -11660,7 +11701,14 @@ stations and desktops a program creates are refused until stage 3).
   encoding only; every other WS_TYPE, type mapping, read option and
   encoding is recorded in the missing-features ledger with the number
   it was handed and answered WS_E_NOT_SUPPORTED, so a program that
-  needs more says which. MAX_ATTRIBUTES, MAX_NAMESPACES,
+  needs more says which. A described struct names its own gaps the same
+  way, each with the number it was handed: a struct with a `parentType`
+  or `subTypes`, a struct option gala does not know, a read option that
+  is neither of the two above, a field mapping or field option bit it
+  does not read, a field value type it cannot write, and a struct field
+  under a mapping that is not the element one. Items that are pointers
+  to their values are recorded too, but answered WS_E_INVALID_FORMAT,
+  which is the code Windows gives them (measured). MAX_ATTRIBUTES, MAX_NAMESPACES,
   READ_DECLARATION and the stream and trim sizes are taken, kept and
   recorded as "other" instead of refused: the reader is created and the
   ledger names what a program asked for, where a refusal that ends the
