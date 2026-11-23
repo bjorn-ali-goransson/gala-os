@@ -17060,6 +17060,13 @@ New code follows them; old code is brought in line (ROADMAP R1).
   - each CPU (each host thread in tests and gala-um) keeps the classes
     it holds (16 slots; interrupts are off while an IrqMutex is held, so
     the CPU does not change), and for each slot the thread that took it.
+    The held slots are packed first (a depth per CPU; a release moves
+    the last into the gap), so a take, a release and the checks read
+    only the locks held, and an order already recorded is only read
+    (`add_edge` claims a slot of the order table only for a new one):
+    lockdep runs at every lock taken, and scanning every slot each
+    time put it in 72% of the kernel's samples in lx_gimp in the debug
+    build (opt-level 1).
     The scheduler names that thread on every switch
     (`lockdep::running`), because lockdep cannot ask it: the scheduler's
     own state is behind one of these locks;
