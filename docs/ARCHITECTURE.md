@@ -8942,6 +8942,15 @@ registry ("Plan: windows across processes").
 - Composition runs under the desktop's `IrqMutex` with interrupts off
   (a full-screen redraw is ~1M pixels; drags redraw the old and new
   bounds).
+- A point is composed from the topmost window that covers it whole
+  (coverage 255), never from the layers under it (`Desktop::compose`):
+  blending at 255 is that window's colour whatever lies below, so the
+  result is the same, and a commit pays for the layers that show. The
+  wallpaper's two square roots a point and each lower window's shape
+  and shadow were most of a whole window's composition (a 904 x 720
+  window: 105 ms in a host debug build, 20 ms composed from the window);
+  `composing_from_the_topmost_opaque_window_changes_no_point` holds the
+  two ways equal at every point.
 - The desktop's keyboard focus is the active top-level window; focus
   among child windows is user32's.
 - Where nothing can show a desktop (no screen and no `presenter=`, or
