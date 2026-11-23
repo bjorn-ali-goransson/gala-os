@@ -2267,8 +2267,12 @@ numbers, 0x7f.., fail there).
   `-D__USE_MINGW_ANSI_STDIO=0` for msvcrt's stdio); its scenario ships
   `x86/msvcrt.dll` to SysWOW64 too. mingw's i686 headers define
   `_USE_32BIT_TIME_T` (time_t is 32 bits and `time()` imports msvcrt's
-  `time`), make `setjmp` `_setjmp3(buf, NULL)`, reach stdin/stdout
-  through the `_iob` data import, and link mingw's own `_fpreset`
+  `time`), make `setjmp` `_setjmp3(buf, NULL)`, reach stdin/stdout,
+  MB_CUR_MAX and the environment through msvcrt's accessor functions
+  (`__p__iob`, `__p___mb_cur_max`, `__p___initenv`, beside `__p__fmode`
+  and `__p__commode`) where its x64 headers take the data exports
+  (`_iob` is still exported for a program built against an older
+  runtime), and link mingw's own `_fpreset`
   (fninit: the x87 at 64-bit precision, `_controlfp(0, 0)` 0x8001f, not
   msvcrt's 0x9001f): a test of msvcrt's `_fpreset` calls it through
   GetProcAddress.

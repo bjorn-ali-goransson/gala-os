@@ -26,11 +26,20 @@
  *    handle's status and body as in 2.
  * 8. A redirect (/redirect-rel: 302 to "/") is followed: 200 and the
  *    start page; with INTERNET_FLAG_NO_AUTO_REDIRECT the 302 itself.
- * 9. The ANSI functions (ODT's setup.exe mixes them with the W ones):
+ * 9. The ANSI functions (ODT's setup.exe mixes them with the W ones;
+ *    Office's shared runtime looks InternetOpenA up before the W one):
  *    InternetCrackUrlA as in 1 (pointers into the caller's URL);
+ *    InternetOpenA, whose agent arrives through the ANSI code page (the
+ *    W query reads it back) and whose session serves requests like any
+ *    other, a NULL agent being an empty agent and not an error;
  *    InternetConnectA, HttpOpenRequestA, HttpAddRequestHeadersA and
  *    HttpQueryInfoA, whose text answers are ANSI: the length without the
  *    NUL, or ERROR_INSUFFICIENT_BUFFER with the bytes needed with it.
+ *    The access type is validated as Windows validates it:
+ *    INTERNET_OPEN_TYPE_PROXY wants a proxy name and is
+ *    ERROR_INVALID_PARAMETER without one, as is a number that is no
+ *    access type at all, while the types that are not PROXY ignore a
+ *    proxy string they are given.
  * 10. InternetQueryOptionW (Wine's http.c test_user_pass_auth and
  *    internet.c test_InternetQueryOptionA, run on Windows): a string
  *    option too big for the buffer is ERROR_INSUFFICIENT_BUFFER with the
@@ -53,6 +62,13 @@
  * which need the test CA trusted, run last (after 11, before 12) and print
  * the status and error they got, so a machine that cannot trust the CA
  * still runs the rest.
+ *
+ * Two answers of Windows' are deliberately not asserted, because gala
+ * cannot give them and says so instead (a ledger row and
+ * ERROR_NOT_SUPPORTED): a session opened INTERNET_OPEN_TYPE_PROXY with a
+ * proxy name, which gala has nothing to route through, and
+ * INTERNET_FLAG_ASYNC, which gala refuses rather than hand out a session
+ * whose operations never report completion.
  */
 #include <windows.h>
 #include <wininet.h>
@@ -261,6 +277,45 @@ int main(void) {
     va.dwHostNameLength = sizeof hosta;
     CHECK(InternetCrackUrlA("http://127.0.0.1/", 0, 0, &va));
     CHECK(va.nScheme == INTERNET_SCHEME_HTTP && va.dwHostNameLength == 9 && strcmp(hosta, "127.0.0.1") == 0);
+    /* The agent arrives through the ANSI code page, and the session an
+     * A call opens serves requests like any other. */
+    HINTERNET sa = InternetOpenA("gala wininet_test", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    CHECK(sa != NULL);
+    wchar_t agenta[64];
+    DWORD sizea = sizeof agenta;
+    CHECK(InternetQueryOptionW(sa, INTERNET_OPTION_USER_AGENT, agenta, &sizea));
+    CHECK(wcscmp(agenta, L"gala wininet_test") == 0 && sizea == 17);
+    status = get(sa, L"127.0.0.1", 8080, L"/", 0, body, sizeof body, &error);
+    CHECK(error == 0 && status == 200 && strstr(body, "Welcome to nginx!") != NULL);
+    CHECK(InternetCloseHandle(sa));
+    /* A NULL agent is an empty agent, not an error. */
+    sa = InternetOpenA(NULL, INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    CHECK(sa != NULL);
+    sizea = sizeof agenta;
+    CHECK(InternetQueryOptionW(sa, INTERNET_OPTION_USER_AGENT, agenta, &sizea));
+    CHECK(agenta[0] == 0 && sizea == 0);
+    CHECK(InternetCloseHandle(sa));
+    /* The types that are not INTERNET_OPEN_TYPE_PROXY ignore a proxy
+     * string they are given. */
+    sa = InternetOpenA("gala wininet_test", INTERNET_OPEN_TYPE_PRECONFIG_WITH_NO_AUTOPROXY, NULL, NULL, 0);
+    CHECK(sa != NULL);
+    CHECK(InternetCloseHandle(sa));
+    sa = InternetOpenA("gala wininet_test", INTERNET_OPEN_TYPE_DIRECT, "proxy:8080", NULL, 0);
+    CHECK(sa != NULL);
+    CHECK(InternetCloseHandle(sa));
+    /* INTERNET_OPEN_TYPE_PROXY wants a proxy name; a number that is no
+     * access type is refused the same way, through either function. */
+    CHECK(InternetOpenA("gala wininet_test", INTERNET_OPEN_TYPE_PROXY, NULL, NULL, 0) == NULL);
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(InternetOpenA("gala wininet_test", INTERNET_OPEN_TYPE_PROXY, "", NULL, 0) == NULL);
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(InternetOpenA("gala wininet_test", 99, NULL, NULL, 0) == NULL);
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(InternetOpenW(L"gala wininet_test", INTERNET_OPEN_TYPE_PROXY, NULL, NULL, 0) == NULL);
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(InternetOpenW(L"gala wininet_test", 99, NULL, NULL, 0) == NULL);
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+
     HINTERNET c = InternetConnectA(s, "127.0.0.1", 8080, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
     CHECK(c != NULL);
     r = HttpOpenRequestA(c, "GET", "/nope", NULL, NULL, NULL, INTERNET_FLAG_RELOAD, 0);

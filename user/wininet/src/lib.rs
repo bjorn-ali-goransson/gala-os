@@ -102,6 +102,7 @@ const ERROR_INTERNET_SEC_CERT_REVOKED: u32 = 12170;
 
 const INTERNET_OPEN_TYPE_PRECONFIG: u32 = 0;
 const INTERNET_OPEN_TYPE_DIRECT: u32 = 1;
+const INTERNET_OPEN_TYPE_PROXY: u32 = 3;
 const INTERNET_OPEN_TYPE_PRECONFIG_WITH_NO_AUTOPROXY: u32 = 4;
 const INTERNET_SERVICE_HTTP: u32 = 3;
 
@@ -275,11 +276,29 @@ fn headers_text(p: *const u16, len: u32) -> Result<Vec<u16>, u32> {
     wide(p, if len == u32::MAX { None } else { Some(len as usize) })
 }
 
+/// InternetOpenW(lpszAgent, dwAccessType, lpszProxy, lpszProxyBypass,
+/// dwFlags): the session every other handle hangs from, holding the user
+/// agent requests are sent with.
+///
+/// The access type is validated as Windows validates it (measured on
+/// 26100): INTERNET_OPEN_TYPE_PRECONFIG, _DIRECT and
+/// _PRECONFIG_WITH_NO_AUTOPROXY open a session and ignore a proxy string
+/// they are given, INTERNET_OPEN_TYPE_PROXY wants a proxy name and is
+/// ERROR_INVALID_PARAMETER without one, and a number that is no access
+/// type is ERROR_INVALID_PARAMETER too. A NULL agent is an empty agent.
+///
+/// What gala cannot give it says instead of guessing: a proxy to route
+/// through (INTERNET_OPEN_TYPE_PROXY with a name), and asynchronous
+/// operation. INTERNET_FLAG_ASYNC is refused rather than answered with a
+/// session whose operations complete before returning and so never
+/// report completion to a status callback waiting for it -- a program
+/// that asked for async and is handed a handle has no way to find that
+/// out, while a refused session it sees at once.
 #[unsafe(no_mangle)]
 pub extern "system" fn InternetOpenW(
     agent: *const u16,
     access: u32,
-    _proxy: *const u16,
+    proxy: *const u16,
     _bypass: *const u16,
     flags: u32,
 ) -> usize {
@@ -294,14 +313,23 @@ pub extern "system" fn InternetOpenW(
         }
         match access {
             // No proxy is configured on gala: the preconfigured settings
-            // are direct connections.
+            // are direct connections, and these types ignore a proxy
+            // string they are given.
             INTERNET_OPEN_TYPE_PRECONFIG
             | INTERNET_OPEN_TYPE_DIRECT
             | INTERNET_OPEN_TYPE_PRECONFIG_WITH_NO_AUTOPROXY => {}
-            _ => {
+            INTERNET_OPEN_TYPE_PROXY => {
+                // SAFETY: the caller's string, read as far as its first
+                // character to tell a name from none.
+                if proxy.is_null() || unsafe { *proxy } == 0 {
+                    // Windows wants a name for this type.
+                    return Err(ERROR_INVALID_PARAMETER);
+                }
                 missing(b"InternetOpenW(proxy)", access.into());
                 return Err(ERROR_NOT_SUPPORTED);
             }
+            // No access type at all.
+            _ => return Err(ERROR_INVALID_PARAMETER),
         }
         let agent = narrow(DLL, &wide(agent, None)?)?;
         Ok(Kind::Session(Settings {

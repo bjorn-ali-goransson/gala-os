@@ -6780,7 +6780,11 @@ HTTP on 127.0.0.1:8080.
   accepts and ignores them, QueryOption fails with
   ERROR_WINHTTP_INVALID_OPTION).
 - **WinINet's functions** (`user/wininet`): InternetOpenW (DIRECT and
-  the PRECONFIG types: direct, no proxy is configured on gala),
+  the PRECONFIG types: direct, no proxy is configured on gala; the
+  access type is validated as Windows validates it, so
+  INTERNET_OPEN_TYPE_PROXY without a proxy name and a number that is no
+  access type at all are ERROR_INVALID_PARAMETER, while a proxy string
+  the other types are given is ignored; a NULL agent is an empty agent),
   InternetConnectW (INTERNET_SERVICE_HTTP; credentials recorded, not
   sent), HttpOpenRequestW (INTERNET_FLAG_SECURE, the IGNORE_CERT flags,
   NO_AUTO_REDIRECT; the cache flags have nothing to act on),
@@ -6802,7 +6806,8 @@ HTTP on 127.0.0.1:8080.
   option is ERROR_INTERNET_INCORRECT_HANDLE_TYPE; others are recorded
   and ERROR_INTERNET_INVALID_OPTION), InternetCloseHandle and
   InternetAttemptConnect (ERROR_SUCCESS: no dial-up). The A functions
-  ODT's setup.exe imports (`ansi.rs`): InternetConnectA,
+  ODT's setup.exe imports (`ansi.rs`): InternetOpenA (which Office's
+  shared runtime looks up before the W one), InternetConnectA,
   HttpOpenRequestA and HttpAddRequestHeadersA through the ANSI code page
   into the W ones; InternetCrackUrlA on the caller's bytes (the
   delimiters are ASCII, so a URL widened byte by byte has its
@@ -6970,7 +6975,8 @@ HTTP on 127.0.0.1:8080.
   (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED);
   WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW
   (`gala_stubs` stubs); named
-  proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
+  proxies (WinHttpOpen fails, and so does InternetOpenW given a proxy
+  name to route through) and WinHttpGetProxyForUrl;
   WinINet's FTP and Gopher, its cache and cookie store, and the A
   functions setup.exe does not import;
   WINHTTP_OPTION_DISABLE_FEATURE's WINHTTP_DISABLE_REDIRECTS (recorded
@@ -12776,10 +12782,27 @@ same program as SYSTEM).
   STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
   OpenInputDesktop (the process's station's Default, a new handle each
   time; STATUS_INVALID_DEVICE_REQUEST from a station that cannot receive
-  input), GetUserObjectInformationW/A (UOI_FLAGS, UOI_NAME, UOI_TYPE,
-  UOI_IO; the size with the NUL, also when short; the A form reports
-  the UTF-16 size when short and the ANSI bytes on success, as Windows
-  does), EnumWindowStationsW (the caller's session's), EnumDesktopsW.
+  input), GetUserObjectInformationW/A (UOI_FLAGS, UOI_NAME, UOI_TYPE and
+  UOI_IO, which is a desktop's alone -- a window station answers
+  ERROR_INVALID_FUNCTION, as Windows does; the size with the NUL, also
+  when short; the A form reports the UTF-16 size when short and the ANSI
+  bytes on success, as Windows does),
+  SetUserObjectInformationW/A, whose two routes the handle tells apart
+  (measured on 26100): a window station or desktop handle takes
+  UOI_FLAGS and nothing else, over a buffer that holds a whole
+  USEROBJECTFLAGS (a shorter one is ERROR_INVALID_DATA), and since what
+  a station is follows the session and not a write through one of its
+  handles, a write of what the getter already answers succeeds as on
+  Windows while one that would change something succeeds with a ledger
+  row saying it did not; the current process's pseudo handle is the
+  other route, taking UOI_TIMERPROC_EXCEPTION_SUPPRESSION and nothing
+  else (ERROR_INVALID_FUNCTION) as a BOOL of exactly four bytes, where a
+  real handle to the same process is ERROR_INVALID_PARAMETER and the
+  value cannot be read back -- gala calls a TIMERPROC with no handler
+  around it, which is what FALSE asks for, so TRUE leaves a row and
+  succeeds. Office's shared runtime delay-loads this function, which is
+  why its absence ended Word's startup. EnumWindowStationsW (the
+  caller's session's), EnumDesktopsW.
 - **Limits**: no DACLs on stations and desktops (any process of the
   session may open them); CreateWindowStation and CreateDesktop are
   unsupported (ledger; BR stage 3, Chromium's sandbox); SwitchDesktop

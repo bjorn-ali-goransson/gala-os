@@ -215,6 +215,14 @@ pub extern "C" fn __p__commode() -> *mut i32 {
     &raw mut _commode
 }
 
+/// __p___initenv: the address of `__initenv`. mingw-w64's i686 startup
+/// code reaches it through this accessor and not through the data export
+/// (msvcrt has both, and its x64 startup code takes the export).
+#[unsafe(no_mangle)]
+pub extern "C" fn __p___initenv() -> *mut *mut *mut u8 {
+    &raw mut __initenv
+}
+
 /// _acmdln: the command line, narrowed (set when the DLL loads; MinGW's
 /// startup code for GUI programs reads it).
 #[unsafe(no_mangle)]
