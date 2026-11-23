@@ -30,6 +30,7 @@ const TESTS: &[Test] = &[
     Test { name: "sleep_waits_long_enough", run: sleep_waits_long_enough },
     Test { name: "thread_stacks_are_reaped", run: thread_stacks_are_reaped },
     Test { name: "event_wakes_blocked_waiter", run: event_wakes_blocked_waiter },
+    Test { name: "preempted_waiter_runs_on_to_wait", run: preempted_waiter_runs_on_to_wait },
 ];
 
 pub fn run_all() {
@@ -246,4 +247,58 @@ fn event_wakes_blocked_waiter() {
     assert_eq!(RESULT.load(Ordering::SeqCst), u64::from(NtStatus::SUCCESS.0));
     assert_eq!(ev.dispatcher().unwrap().signal_state(), 0, "auto-reset consumed by the waiter");
     *EVENT.lock() = None;
+}
+
+/// A thread the timer preempts between `prepare_wait` and `wait` runs on
+/// to its `wait` when its turn comes again: what it does there may be
+/// what makes it wakeable (the Linux personality records its signals'
+/// sleeper after `prepare`), so preemption must not block it as `wait`
+/// would. The waiter and this thread share the boot CPU, so the waiter's
+/// spin of three quanta is preempted; it must end in time all the same.
+fn preempted_waiter_runs_on_to_wait() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    static PREEMPTED: AtomicU64 = AtomicU64::new(0);
+    fn waiter(_: usize) {
+        let me = sched::current();
+        sched::set_affinity(me, 1);
+        sched::yield_now();
+        sched::prepare_wait(None);
+        let before = sched::context_switches(me);
+        let until = time::ticks() + 30;
+        while time::ticks() < until {
+            core::hint::spin_loop();
+        }
+        PREEMPTED
+            .store(u64::from(sched::context_switches(me).wrapping_sub(before)), Ordering::SeqCst);
+        DONE.store(true, Ordering::SeqCst);
+        // No wait after all.
+        sched::wake(me);
+        sched::wait();
+    }
+    DONE.store(false, Ordering::SeqCst);
+    let me = sched::current();
+    sched::set_affinity(me, 1);
+    sched::yield_now();
+    let t = sched::spawn("waiter", waiter, 0).expect("spawn");
+    // Busy, never blocking: the waiter gets the CPU only between this
+    // thread's quanta, and loses it to this thread at the end of its own.
+    let until = time::ticks() + 1000;
+    while !DONE.load(Ordering::SeqCst) && time::ticks() < until {
+        core::hint::spin_loop();
+    }
+    let done = DONE.load(Ordering::SeqCst);
+    if !done {
+        // Blocked by its preemption: only a wake lets it end.
+        sched::wake(t);
+    }
+    sched::join(t).expect("join");
+    sched::set_affinity(me, u64::MAX);
+    assert!(
+        done,
+        "the waiter, preempted after prepare_wait, did not run again (blocked as if in wait)"
+    );
+    assert!(
+        PREEMPTED.load(Ordering::SeqCst) > 0,
+        "the waiter was never preempted: the test proves nothing"
+    );
 }
