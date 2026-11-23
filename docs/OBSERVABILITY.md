@@ -1036,7 +1036,12 @@ a new line, since QEMU's end can cut the guest's last one off):
    queued for it: (waiters, releasers, all entries) Some((1, 0, 1))`, so a
    release waiting with no waiter, or a waiter whose value changed, shows;
    for a thread that is suspended or parked, who stopped it and the rip it
-   is parked at, "Suspensions" above),
+   is parked at, "Suspensions" above; for a Linux thread the Linux call it
+   is in, `lx::dispatch` recording it in the thread's `lx_call`: `linux
+   read(0x0, 0x7ffffe7d0000, 0x10000, 0x0) from rip 0x4d3682 for 19863
+   ms`, the name from the architecture's own table, its first four
+   arguments, its return address and how long it has been in it, the
+   test `lx_statedump` and its twin),
    every
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB, R reservations, G regions; paged U/L (peak P) nonpaged
@@ -1045,12 +1050,8 @@ a new line, since QEMU's end can cut the guest's last one off):
    among them) in S slots`; a waiting one with where its wait began:
    `sched: thread N (x) Waiting { until_tick: None } at
    kernel/src/lx/futex.rs:304`, the caller of `prepare_wait` through
-   `#[track_caller]` wrappers; the only clue for a Linux thread, which
-   has no NT system-call record -- `lx/dispatch.rs` never calls
-   `thread::set_in_syscall`, so the NT lines say `in a system call
-   false` and name no call, no arguments and no wait object for every
-   Linux thread, which reads as a thread doing nothing; ROADMAP
-   "Defects known, not yet fixed"), the ledger, every registry change
+   `#[track_caller]` wrappers: for a Linux thread, the wait object the
+   NT lines do not name), the ledger, every registry change
    notification armed (`statedump: registry watch pid P key K
    subordinate S filter F tree T waiting N (B thread-bound) change kept
    C`: who waits on which key), C:'s write-back (`statedump: persist:

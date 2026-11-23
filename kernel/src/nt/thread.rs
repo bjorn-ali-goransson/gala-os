@@ -103,6 +103,10 @@ pub struct NtThread {
     /// `syscall` (the context Windows reports for a thread suspended while
     /// blocked in one).
     in_syscall: IrqMutex<Option<(u32, UserRegs)>>,
+    /// While it is inside a Linux system call (`lx::dispatch`): the call,
+    /// for the state dump only. Kept apart from `in_syscall`, which
+    /// handover and hot swap read as an NT call to make again.
+    lx_call: IrqMutex<Option<LxCall>>,
     /// The impersonation token it acts with (nt::token), if any.
     pub impersonation: IrqMutex<Option<ObjectRef>>,
     /// Its number in its process, in creation order (0: the first): the
@@ -857,6 +861,7 @@ fn create_inner(
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
         in_syscall: IrqMutex::new(None),
+        lx_call: IrqMutex::new(None),
         impersonation: IrqMutex::new(None),
         ordinal,
         start_bases: resume.as_ref().map(|r| r.1),
@@ -1609,6 +1614,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
         in_syscall: IrqMutex::new(None),
+        lx_call: IrqMutex::new(None),
         impersonation: IrqMutex::new(None),
         ordinal: a.ordinal,
         resume: IrqMutex::new(a.resume),
@@ -1669,6 +1675,24 @@ pub fn set_in_syscall(object: &ObjectRef, regs: Option<(u32, UserRegs)>) {
         crate::flight::progress(id.as_usize());
     }
     *t.in_syscall.lock() = regs;
+}
+
+/// A Linux system call a thread is in: its number (the architecture's
+/// Linux table, `lx::syscalls`), its first four arguments, the user
+/// address it returns to and when it began.
+#[derive(Clone, Copy)]
+pub struct LxCall {
+    pub number: u64,
+    pub args: [u64; 4],
+    pub ip: u64,
+    pub since_ns: u64,
+}
+
+/// Records the Linux system call thread `object` is in (None: it
+/// returned), for the state dump: a thread blocked in a `read` is
+/// otherwise indistinguishable from one idle in user code.
+pub fn set_in_linux_call(object: &ObjectRef, call: Option<LxCall>) {
+    *as_thread(object).lx_call.lock() = call;
 }
 
 /// The user state of a suspended thread: parked on its way to user mode,
@@ -1744,6 +1768,7 @@ pub fn dump() {
     for object in threads.iter() {
         let t = as_thread(object);
         let in_syscall = *t.in_syscall.lock();
+        let lx_call = *t.lx_call.lock();
         // One lock at a time (format arguments' guards would live to the
         // end of the statement: sched_id held while taking suspend_count,
         // the inverse of `resume`'s order).
@@ -1764,7 +1789,7 @@ pub fn dump() {
                 NameField(&name),
                 suspended,
                 t.has_exited(),
-                in_syscall.is_some(),
+                in_syscall.is_some() || lx_call.is_some(),
                 t.process.session,
                 t.process.personality,
                 t.process.name_now()
@@ -1800,6 +1825,16 @@ pub fn dump() {
                     super::crashreport::At::of(&t.process, ip)
                 );
             }
+        }
+        if let Some(c) = lx_call {
+            let [a0, a1, a2, a3] = c.args;
+            info!(
+                "thread:   linux {}({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x}) from rip {:#x} for {} ms",
+                crate::lx::syscalls::name(c.number).unwrap_or("?"),
+                c.ip,
+                platform::monotonic_ns().saturating_sub(c.since_ns) / 1_000_000
+            );
+            continue;
         }
         let Some((number, regs)) = in_syscall else {
             // Running user code: where a tick last caught it.
