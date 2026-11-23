@@ -19976,7 +19976,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // OT3b: what the trace costs a call, and the three budgets at
         // a scale the three-call programs above cannot reach. This is
         // the loop with nothing armed, which is also the baseline the
-        // cost is measured against: the same 20000 calls run under
+        // cost is measured against: the same 5000 calls run under
         // each configuration of the trace, and what it costs is the
         // difference between their in-kernel seconds (WORKFLOW "What
         // the import trace costs").
@@ -19990,7 +19990,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // -- every call recorded, the arguments quoted, the stream on
         // -- which is where the budgets' arithmetic is checked at
         // scale: one slot armed, the first call recorded free of the
-        // repeat budget, 19999 later calls, and two quotes a call
+        // repeat budget, 4999 later calls, and two quotes a call
         // (the narrow string and the wide one; the number is answered
         // without a read and the blob is read and thrown away).
         name: "import_cost",
@@ -20002,8 +20002,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "import_cost_test: ok",
             "exited with status 0x00000000",
             "imports: first calls recorded: 1 of 1 slots armed (imports=)",
-            "imports: 19999 later calls recorded of 1048576 (imports_repeat=)",
-            "imports: 40000 quotes of 1048576, carried by 20000 calls \
+            "imports: 4999 later calls recorded of 1048576 (imports_repeat=)",
+            "imports: 10000 quotes of 1048576, carried by 5000 calls \
              (imports_strings=)",
         ],
     },

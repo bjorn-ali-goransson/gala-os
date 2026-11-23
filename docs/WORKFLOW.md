@@ -534,7 +534,12 @@ xtask that change how a scenario boots:
   the kernel, pagefile_fail 298 s, pagefile_test 282 s. Raising
   `XTASK_TIMEOUT` is how to tell a slow scenario from a stuck one
   before believing either -- a timeout alone does not say which, and a
-  scenario that is only slow says nothing about the code.
+  scenario that is only slow says nothing about the code. A scenario
+  whose length is a count times what the host charges for each unit
+  (`import_cost`: its events times what a KVM exit costs) is sized for
+  the slowest host that runs it, CI's runners, not the laptop it was
+  measured on: a passing run's `in kernel` seconds in CI's log within
+  a factor of two of the limit is a timeout waiting to happen.
 - **A scenario that runs many processes** (a database, a runtime) can
   pass alone and time out under the full suite (2-3x slower); its client
   then reports a dropped connection, not a timeout. Look for "timed out
