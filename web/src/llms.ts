@@ -17,6 +17,7 @@ import {
   repoTools,
   statusLabel,
   toolGroups,
+  usb,
   windowsPrograms,
   type Program,
 } from "./content";
@@ -127,6 +128,33 @@ export function llmsText(): string {
     out.push("  ```");
     out.push("");
   }
+
+  out.push("## Run it from a USB stick");
+  out.push("");
+  out.push(usb.intro);
+  out.push("");
+  out.push("You need:");
+  for (const n of usb.needs) out.push(`- ${n}`);
+  out.push("");
+  usb.steps.forEach((step, i) => {
+    out.push(`### ${i + 1}. ${step.title}`);
+    out.push("");
+    out.push(step.body);
+    out.push("");
+    for (const w of step.ways ?? []) {
+      out.push(`- **${w.name}**: ${w.how}`);
+      if (w.cmds) {
+        out.push("");
+        out.push("  ```sh");
+        for (const c of w.cmds) out.push(`  ${c}`);
+        out.push("  ```");
+      }
+      out.push("");
+    }
+  });
+  out.push("Limits for now:");
+  for (const l of usb.limits) out.push(`- ${l}`);
+  out.push("");
 
   out.push("## Principles");
   out.push("");

@@ -1685,8 +1685,8 @@ where the site learns it.
 
 - `cd web && npm install` once, then `npm run dev` for the dev server,
   `npm run build` to build (client bundle, server bundle, then
-  `prerender.mjs` renders the page into `dist/index.html` and deletes the
-  server bundle), `npm run preview` to serve `dist/`, `npm run typecheck`
+  `prerender.mjs` renders the page into `dist/index.html` and
+  `dist/ar/index.html` and deletes the server bundle), `npm run preview` to serve `dist/`, `npm run typecheck`
   for `tsc --noEmit`.
 - `web/public/` is copied verbatim into `dist/`. Two files there matter to
   Pages: `CNAME` (the custom domain; without it Pages serves the site at
@@ -1694,11 +1694,26 @@ where the site learns it.
   otherwise runs the output through Jekyll, which drops files beginning
   with an underscore). The Website workflow asserts both survive a build.
 - Screenshots live in `web/public/shots/` and are listed in `content.ts` (`shots`).
-- `prerender.mjs` writes three files, not one: `index.html` (the markup),
-  `sitemap.xml` (one URL, `lastmod` taken from the build date rather than
+- **Two languages.** The page is English at `/` and Arabic at `/ar/`
+  (`dir="rtl"`), each linking to the other and carrying `hreflang`
+  alternates. English is the source: every text is written in English in
+  `content.ts`, `App.tsx`, `Diagrams.tsx` and `head.ts`, and the Arabic
+  page looks each one up in `web/src/ar.ts`, a dictionary keyed by the
+  English text (`src/i18n.tsx`: `t()` for a text, `localize()` for the
+  prose fields of `content.ts`, `<Both en ar>` for rich JSX). **Changing
+  an English text fails the build** until `ar.ts` has the new text:
+  `prerender.mjs` lists every English text the Arabic page looked up and
+  did not find. Names of programs, APIs and code stay in Latin script
+  inside the Arabic. Layout is right to left through logical CSS
+  properties (`margin-inline`, `inset-inline-start`); a new rule that
+  uses `left`/`right` breaks the Arabic page, and code (`pre`, `code`)
+  stays left to right in both.
+- `prerender.mjs` writes four files, not one: `index.html` and
+  `ar/index.html` (the markup), `sitemap.xml` (one URL per language, each
+  naming the other, `lastmod` taken from the build date rather than
   written by hand, where it would be wrong the moment the page changed)
   and `llms.txt` (a plain-text brief of the whole site, generated from
-  `content.ts` by `src/llms.ts`). None of the three is a second copy of
+  `content.ts` by `src/llms.ts`, in English). None of them is a second copy of
   the facts: all come from `content.ts`.
 - Page counts come from Ali Web Services: a `defer` script in
   `web/index.html` carrying the site's public id (THIRD_PARTY "The
@@ -1712,7 +1727,7 @@ where the site learns it.
   publishes it to GitHub Pages (`actions/deploy-pages`; the repository's
   Pages source is "GitHub Actions"). The build asserts what a silent
   regression would cost: the domain files, real markup rather than an
-  empty shell, the crawler files agreeing with each other, and the
+  empty shell, the Arabic page present and right to left, the crawler files agreeing with each other, and the
   analytics script still carrying its site id.
 
 ### Being found
