@@ -862,12 +862,19 @@ impl Socket {
             }
             Phase::Connected { conn, side } => {
                 let c = conn.state.lock();
+                let peer = 1 - side;
                 write!(
                     out,
-                    ", connected (side {side}: {} queued, shutdown {}, peer {})",
+                    ", connected (side {side}: {} queued ({} bytes), {} arrivals, shutdown {}; \
+                     peer {}: {} queued ({} bytes), {} arrivals)",
                     c.queue[*side].len(),
+                    c.queued[*side],
+                    c.arrivals[*side],
                     c.shutdown[*side],
-                    if c.open[1 - side] { "open" } else { "gone" }
+                    if c.open[peer] { "open" } else { "gone" },
+                    c.queue[peer].len(),
+                    c.queued[peer],
+                    c.arrivals[peer],
                 )
             }
         }?;
@@ -993,6 +1000,26 @@ mod tests {
         assert!(text.contains("by pid 7"), "{text}");
         assert!(text.contains("connected (side"), "{text}");
         assert!(!text.contains("(cut)"), "{text}");
+    }
+
+    #[test]
+    fn a_description_shows_both_directions_queues_and_arrivals() {
+        let (a, b) = Socket::pair(Kind::Stream, ME).unwrap();
+        assert_eq!(a.send(b"ping", &mut Vec::new(), None).unwrap(), 4);
+        let size = 4 + RECORD_OVERHEAD;
+        // What b has to read, and what it sent that a has not read yet:
+        // a lost wakeup shows as bytes queued with a reader waiting.
+        let theirs = alloc::format!("{}", described(&b));
+        assert!(
+            theirs.contains(&alloc::format!("side 1: 1 queued ({size} bytes), 1 arrivals")),
+            "{theirs}"
+        );
+        assert!(theirs.contains("peer open: 0 queued (0 bytes), 0 arrivals"), "{theirs}");
+        let mine = alloc::format!("{}", described(&a));
+        assert!(
+            mine.contains(&alloc::format!("peer open: 1 queued ({size} bytes), 1 arrivals")),
+            "{mine}"
+        );
     }
 
     #[test]
