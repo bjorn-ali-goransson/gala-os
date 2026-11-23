@@ -1403,7 +1403,12 @@ Run a program directly:
   host has), whose timeout(1) kills the program at the deadline instead
   of sending the chosen signal first and waiting, which left every hung
   run without the dump it is read from. A host tool's flavour must not
-  decide whether a hang explains itself.
+  decide whether a hang explains itself -- nor how the gate was
+  launched: a shell that starts a job in the background ignores SIGQUIT
+  (`grep SigIgn /proc/self/status` says so), a program cannot trap a
+  signal that was ignored when it started, and so every run under
+  `cargo xtask test &` inherited an unanswerable dump request until
+  `plain_dump_signal` gave each run the plain disposition.
 - A failure that reproduces in gala-um is in the NT layer or the
   user-mode DLLs; one that does not points at the kernel's machine code
   (paging, switches, interrupts) or at the emulator.
