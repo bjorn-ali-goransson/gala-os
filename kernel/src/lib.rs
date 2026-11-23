@@ -64,6 +64,7 @@ pub mod sync;
 pub mod time;
 pub mod trust;
 pub mod unix;
+pub mod virtio_console;
 pub mod wayland;
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -189,6 +190,10 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // PCI configuration space (aarch64: the MCFG's ECAM mapped), before
     // the drivers enumerate.
     arch::pci_config::init(&info);
+    // The event stream by DMA when the machine has a virtio console (x86:
+    // its port costs an exit a byte; aarch64 writes a file by semihosting).
+    #[cfg(target_arch = "x86_64")]
+    virtio_console::init();
     disk::init();
     // `display=virtio`: the screen is virtio-gpu (default `fb`: the
     // bootloader's framebuffer); `gputrace` logs every command and
@@ -674,8 +679,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if events::written() > 0 {
         use core::sync::atomic::Ordering::Relaxed;
         info!(
-            "events: {} written to the debug console in {} writes of the device (a line a write, which is what one costs: OBSERVABILITY \"What it costs\"); profiler samples: {} asked of another CPU, {} not asked (the last NMI not yet taken), {} in user mode, {} in the kernel, {} lost (interrupts off too long), {} of the writing of samples (not kept)",
+            "events: {} written: {} through the virtio console, {} writes of the debug console's port (OBSERVABILITY \"What the stream costs\"); profiler samples: {} asked of another CPU, {} not asked (the last NMI not yet taken), {} in user mode, {} in the kernel, {} lost (interrupts off too long), {} of the writing of samples (not kept)",
             events::written(),
+            virtio_console::lines(),
             arch::debugcon::writes(),
             time::SAMPLES_ASKED.load(Relaxed),
             time::SAMPLES_UNTAKEN.load(Relaxed),

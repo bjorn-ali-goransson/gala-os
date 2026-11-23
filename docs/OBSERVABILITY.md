@@ -261,8 +261,13 @@ there.
 
 #### What the stream costs
 
-Its bytes, and nothing else: about 12 us for each one that leaves the
-guest. `user/import_cost_test` makes calls through one traced import
+Through port 0xe9 it was its bytes, and nothing else: about 12 us for
+each one that left the guest. So on x86-64 the stream now leaves by DMA
+through a virtio console when the machine has one, which every boot
+scenario's machine does (ARCHITECTURE "The event stream's transport"):
+a line is copied into a buffer the device reads, and costs one notify.
+The measurements below are the port's, which is what a machine without
+the device still pays. `user/import_cost_test` makes calls through one traced import
 (5 000; the table was measured with 20 000 on a laptop under KVM),
 and four runs of it differ only in what is written, so the difference
 between their in-kernel seconds is the stream itself (scenarios
@@ -309,11 +314,16 @@ samples say where a program's time goes, and what keeps the cost near
 the question is writing less: `events=syscall` rather than `all`,
 `events_pid=`, `events_match=`, a narrowed `imports=`, and
 `events_from=` for a failure late in a long run. What a run paid is in
-its own log, the summary saying both numbers -- `events: N written to
-the debug console in M writes of the device` -- and the way out is to
-stop crossing a byte at a time at all: the stream by DMA over
-virtio-serial, which is ROADMAP OT2's per-CPU rings (one exit a line,
-or a batch of them, instead of one an event's every byte).
+its own log, the summary saying which way the lines went -- `events: N
+written: V through the virtio console, P writes of the debug console's
+port` -- and the stream crossing a line at a time instead of a byte at
+a time is the virtio console. A run where V is not N wrote the rest to
+the port: the lines before the device started (none in a boot
+scenario: it starts right after PCI configuration space, before any
+program), or after a warning that the device was given up on. xtask
+counts the lines of the host's file against N for every run that
+started from boot (`stream_complete`), so a transport that loses lines
+fails the scenario that lost them and names how many.
 
 | Category | Events |
 |---|---|
