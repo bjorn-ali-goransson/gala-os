@@ -1408,6 +1408,81 @@ stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
   scan is bounded (512 words at the most, `stack_words=`) because it
   runs on a kernel stack, so an arbitrarily deep stack is not reached.
 
+### Hooks (`hook=`)
+
+`hook=<event>[/<text>][:<n>]=<action>[+<secs>]` says what the kernel does
+when something happens on the screen. There is one event, `window` (a
+top-level window became visible), and one action, `shot` (a screendump of
+the whole desktop), so the short form of it is `hook=window=shot`
+(`kernel/src/nt/hooks.rs`, scenarios `hook_test` and `hook_match_test`).
+
+It answers what a picture of a run leaves open: what the screen looked
+like when the program put its window up. The host can take a picture at a
+second of the run (`XTASK_SHOTS`, "Screen" and WORKFLOW "Screenshots"),
+but a second guessed from the outside is missed as often as it is caught,
+and it can wait for a line of the serial log -- which only works when the
+line is known in advance. The first window of a run is; the ones after it
+are not, and Word's splash goes up with an empty title. The kernel is the
+one that knows, so the kernel is the one that asks.
+
+The two halves meet through a line. The kernel writes the request as the
+window goes up:
+
+```
+hook: armed: window shown -> screendump, 4 shots, 0.000 s after each (hook=)
+hook: shot +0.000 hook-test-exe-w4: window 'hook_test three again' shown by hook_test.exe (pid 4)
+```
+
+and xtask, which polls the log every 50 ms for the screendumps it was
+asked for itself, reads the new lines, waits the `+<secs>` and takes the
+picture through the same monitor socket as screen checks, into
+`target/screenshots/<scenario>-hook-<name>.png` -- `<name>` being the
+program's name in lower case with every run of anything but a letter or a
+digit as one `-`, then `-w` and the window's id, so two windows of one
+program are two files and a window shown twice does not write over its
+own earlier picture (`-2`, `-3`). The file written is named in the run's
+own log (`xtask: wrote ...`), which is what a scenario's expectations are
+checked against. The kernel cannot encode a PNG and the host cannot know
+when to take one: this is the whole of why it is split.
+
+A delay is what the picture is usually worth taking after. `+0` is the
+instant the window became visible, which is before the program has
+painted it -- `hook_test`'s fourth window is white in its own picture and
+the three before it are not. `hook=window=shot+1` catches a window the
+program has drawn.
+
+Which windows, and how many:
+
+- **The match** (`hook=window/<text>=shot`) takes only the windows whose
+  program or title holds the text, either case. A desktop with a taskbar
+  and a start menu on it shows windows nobody asked about.
+- **The count** (`:<n>`, 4 by default, 64 at most) is how many pictures
+  the hook has to give. When it runs out with windows still matching, one
+  line says so and carries the number of windows the match passed over:
+
+```
+hook: window: no shots left of the 1 asked for (2 windows passed over by the match)
+```
+
+  which is what tells a count that was too small from a match that was
+  too narrow. (A scenario's expectation is a line that must appear, never
+  one that must not, so this count is also the only thing that can prove
+  the match excluded anything: `hook_match_test`.)
+
+- **Cost and bounds**: an unarmed hook is one relaxed atomic load on the
+  path of every window that goes up. Four hooks at most are armed in a
+  boot (`hook=` may be written more than once), each at most 64 pictures,
+  each picture about 3 MB of `target/screenshots`; the host takes 64 of
+  them in a run whatever the guest asks for. The kernel writes a request
+  and never a file, and the name in it is reduced to letters, digits and
+  dashes twice, once by the kernel and once by the host, because the text
+  came from a guest.
+- **Limits**: the event is a window becoming visible (`winstate::show`),
+  so a window that is moved, retitled or redrawn is not one, and neither
+  is a window shown again that was already shown. The action is a picture
+  of the whole screen, not of the window. gala-um has no screen to take a
+  picture of, so the scenarios are x86 UEFI boots.
+
 ### Call tracing (`trace_from=`)
 
 `trace_from=<dll>!<Interface>::<Method>[:<n>]` records every call a
@@ -2304,7 +2379,8 @@ always on and cheap:
 The kernel's screen console mirrors the serial log on the framebuffer;
 `cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel
 cmdline...]` saves PNGs at chosen times in `target/screenshots/`
-(WORKFLOW "Screenshots").
+(WORKFLOW "Screenshots"). A picture of a moment nobody can name in
+advance is the kernel's to ask for instead ("Hooks").
 
 ### Benchmarks
 

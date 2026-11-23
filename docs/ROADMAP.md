@@ -270,7 +270,7 @@ has a section under "Open items".
 | R7 | Live mocking: clock control, record/replay, device faults | in progress | clock control, record/replay of time and randomness, disk latency done |
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
-| OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree; next OT6's one query path for every session (`xtask observe`, `xtask query`) |
+| OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree; the kernel's own hooks take a screendump of each window as it goes up (`hook=window=shot`); next OT6's one query path for every session (`xtask observe`, `xtask query`) |
 | GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
@@ -7553,6 +7553,20 @@ among the slowest hand-offs.
    trace armed. Its gaps: a scan, not an unwind, so dead words of
    earlier frames come with the call path, and a 32-bit program's
    frames are above the WOW64 thunk the capture is taken at.
+
+   The screen's half of it is a hook: `hook=window=shot` takes a
+   screendump of the desktop as each top-level window becomes visible,
+   a second or two later if asked (`+<secs>`), of the windows whose
+   program or title holds a text if asked (`/text`), four times by
+   default. The kernel writes the request to the log as the window goes
+   up and xtask takes the picture -- the kernel knows the moment and
+   cannot encode a PNG, the host can and cannot know the moment, and a
+   serial-log line only works as a trigger when the line is known in
+   advance, which the first window of a run is and the splash that
+   follows it is not (`kernel/src/nt/hooks.rs`, scenarios `hook_test`
+   and `hook_match_test`, OBSERVABILITY "Hooks"). What is left of it:
+   one event (a window becoming visible) and one action (a picture of
+   the whole screen).
 
    What this is for: every program whose compatibility is worked on
    next runs into the same wall Word did, and the answer should not be
