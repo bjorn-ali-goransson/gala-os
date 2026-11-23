@@ -1108,7 +1108,7 @@ continues execution withdraws it, and the withdrawal is said out loud as
 it happens:
 
 ```
-exception continued: crash.exe (pid 4) thread 8: its top-level filter continued past an unhandled 0xc0000005 (access violation) at 0x140001579 (crash.exe+0x1579), writing address 0x20000
+exception continued: crash.exe (pid 4) thread 8: its top-level filter continued past an unhandled 0xc0000005 (access violation: writing address 0x20000) at 0x140001c5c (crash.exe+0x1c5c)
 ```
 
 That line, and a ledger row beside it (`GalaUnhandledException`, "an
@@ -1146,14 +1146,27 @@ written once the process's last thread has exited and no thread is left
 to ask. A withdrawal reaches only the withdrawing thread's own note.
 
 Another thread's unhandled exception, still on its way to ending the
-process, stays where it is and gets a line of its own:
+process, stays where it is and gets a line of its own, with what its
+parameters describe and where it happened:
 
 ```
-exception note: crash.exe (pid 4) thread 12 took an unhandled 0xe0000045 (exception) too, and the crash report is not written from it: the process ends with 0xe0000044 (exception), which thread 8 took
+exception note: crash.exe (pid 4) thread 12 took an unhandled 0xc06d007e (delay-loaded DLL not found: gala_missing.dll ordinal 4660) at 0x140001174 (crash.exe+0x1174) too, and the crash report is not written from it: the process ends with 0xc06d007f (delay-loaded function not found), which thread 8 took
 ```
 
 so an exception that happened and ended nothing is still named
-somewhere. The kernel's fault notes are not named that way: one is kept
+somewhere, by the name it would carry in a crash report. The clause
+after the code is one piece of text (`About`) shared by the three lines
+that describe an exception outside a report -- this one, the withdrawal
+above and the warning that a thread had no room for notes of its own:
+the verb and address of an access violation, the type a C++ throw
+carried, the DLL and the function or ordinal a delay load wanted. What
+the parameters mean is decoded in one place for both ABIs
+(`nt::crashreport::decode_params`), so a note made on ARM64 says as
+much as one made on x64. A line that gives the code and its name and
+nothing else is not enough: two of Word's threads die of 0xc06d007f on
+the way to its window (ROADMAP OF) and one report is written, so the
+other thread's line would otherwise leave a reader looking for nothing
+in particular. The kernel's fault notes are not named that way: one is kept
 for every fault, including the faults a handler goes on to take, so a
 fault note left behind says nothing by itself.
 
@@ -1164,8 +1177,9 @@ slot serves every thread of the process and the next exception there
 does write over this one. That is also the only case left where a
 withdrawal can meet a note which is not its own, and it leaves it, for
 the crash report. Scenarios `crash`, `crash_dispatched`,
-`crash_filtered`, `crash_continued`, `crash_continued_other` and
-`crash_unhandled_both`, each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
+`crash_filtered`, `crash_continued`, `crash_continued_other`,
+`crash_unhandled_both` and `crash_delay` (two threads, a delay-loaded
+function and a delay-loaded DLL), each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
 eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`

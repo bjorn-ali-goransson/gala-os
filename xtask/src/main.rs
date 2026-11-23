@@ -8463,6 +8463,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("crash_continued", "ntdll.dll", "Windows/System32"),
     ("crash_continued_other", "ntdll.dll", "Windows/System32"),
     ("crash_unhandled_both", "ntdll.dll", "Windows/System32"),
+    ("crash_delay", "ntdll.dll", "Windows/System32"),
     ("crash_raise", "ntdll.dll", "Windows/System32"),
     ("crash_apc", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -14166,6 +14167,7 @@ const ARM64_TWINS: &[&str] = &[
     "crash_continued",
     "crash_continued_other",
     "crash_unhandled_both",
+    "crash_delay",
     "crash_raise",
     "crash_apc",
     "seh_test",
@@ -20762,9 +20764,9 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash: writing to a read-only page",
             "crash: the top-level filter continues execution",
             "exception continued: crash.exe (pid 4) thread",
-            "its top-level filter continued past an unhandled 0xc0000005 (access violation) at ",
+            "its top-level filter continued past an unhandled 0xc0000005 (access violation: \
+             writing address 0x",
             "(crash.exe+0x",
-            ", writing address 0x",
             "an exception the top-level filter continued past",
             "crash: the write that faulted went through; ok",
             "process crash.exe (pid 4) exited with status 0x00000000",
@@ -20789,8 +20791,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash: the swallower writes to a read-only page",
             "crash: the raiser's filter has reported its exception",
             "crash: the swallower's filter continues execution",
-            "its top-level filter continued past an unhandled 0xc0000005 (access violation) at ",
-            ", writing address 0x",
+            "its top-level filter continued past an unhandled 0xc0000005 (access violation: \
+             writing address 0x",
             "crash: the swallower carried on; the raiser may die now",
             "crash: the raiser's filter lets the process end",
             "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
@@ -20817,13 +20819,53 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash: the second thread raises 0xe0000045, which nothing handles either",
             "crash: the second thread's filter has reported its exception",
             "crash: the first thread's filter lets the process end",
-            // The note the report is not written from, said out loud.
+            // The note the report is not written from, said out loud,
+            // with where it happened: this exception names no parameters
+            // for a clause to describe (`crash_delay` has those).
             "exception note: crash.exe (pid 4) thread",
-            "took an unhandled 0xe0000045 (exception) too",
+            "took an unhandled 0xe0000045 (exception) at 0x",
+            "(crash.exe+0x",
+            "too, and the crash report is not written from it: the process ends \
+             with 0xe0000044 (exception), which thread",
             // And the report, from the note of the exception that ended it.
             "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
              (exception) in thread",
             "process crash.exe (pid 4) exited with status 0xe0000044",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // Two threads, each taking a delay-load failure no handler takes
+        // (the codes delayimp's helper raises, each with its
+        // DelayLoadInfo): the first looks for a function by name and is
+        // what ends the process, the second looks for a DLL by ordinal
+        // and no report is written from its note. The report must name
+        // the first's DLL and function, and the line about the second's
+        // note must name its DLL and ordinal -- two of Word's threads die
+        // of 0xc06d007f on the way to its window (ROADMAP OF) and one
+        // report is written, so a line with the code and not the name
+        // leaves the other looking for nothing in particular.
+        name: "crash_delay",
+        cmdline: "qemu_exit run=crash.exe args=delay",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the first thread raises 0xc06d007f for gala_absent.dll!GalaAbsentFunction",
+            "crash: the first thread's filter has reported its 0xc06d007f",
+            "crash: the second thread raises 0xc06d007e for gala_missing.dll ordinal 4660",
+            "crash: the second thread's filter has reported its 0xc06d007e",
+            "crash: the first thread's filter lets the process end",
+            // The note no report is written from: what it was looking
+            // for, and where it happened.
+            "exception note: crash.exe (pid 4) thread",
+            "took an unhandled 0xc06d007e (delay-loaded DLL not found: gala_missing.dll ordinal \
+             4660) at ",
+            "(crash.exe+0x",
+            // And the report, from the note of the exception that ended
+            // the process.
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc06d007f \
+             (delay-loaded function not found) in thread",
+            "crash report:   delay load of gala_absent.dll!GalaAbsentFunction",
+            "process crash.exe (pid 4) exited with status 0xc06d007f",
             BOOT_OK_MARKER,
         ],
     },

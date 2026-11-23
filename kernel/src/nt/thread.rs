@@ -1265,15 +1265,14 @@ pub fn take_notes(object: &ObjectRef) -> Option<(Option<Note>, Option<Note>)> {
 }
 
 /// The report ntdll made for thread `object` and nobody withdrew,
-/// without taking it: the thread and the exception no handler took.
-/// What a line about a note no crash report is written from says. The
+/// without taking it: the whole note, because the line written about a
+/// note no crash report is written from is all the run keeps of that
+/// exception and says what the report would have said of it. The
 /// kernel's fault notes are not asked for: one is kept for every fault,
 /// including those a handler goes on to take, so a fault note left
 /// behind says nothing.
-pub fn unhandled_left(object: &ObjectRef) -> Option<(u64, NtStatus)> {
-    let notes = notes_of(object)?.lock();
-    let note = notes.as_ref()?.unhandled?;
-    Some((note.tid, note.status))
+pub fn unhandled_left(object: &ObjectRef) -> Option<Note> {
+    notes_of(object)?.lock().as_ref()?.unhandled
 }
 
 /// The last user APC the current thread was given, with who queued it:
