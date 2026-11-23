@@ -38,6 +38,7 @@ rather than free text.
 | Hang watchdog | `kernel/src/flight.rs` | `watchdog:` lines |
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
+| Suspensions (who stopped a thread) | `kernel/src/nt/thread.rs` | `suspend:` lines; `thread:   suspended by ...` and `parked at rip ...` in every thread dump; `thread suspend`, `thread resume` and `thread suspend refused` events (`events=thread`) |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/trace_common.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
 | Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_bytes=<n>` for the bytes at the places that read as none, `imports_except=<text>[,<text>...]` for the imports to leave unarmed, `imports_in=<image>` for the one image whose slots are armed) with `events=call`; `import` and `ret` events, each with `from`, the image whose import slot the call went through; `imports:` lines |
@@ -1005,7 +1006,9 @@ a new line, since QEMU's end can cut the guest's last one off):
    SRW locks, condition variables and WaitOnAddress sleep on, the key, the
    value there and who is queued for it: `key 0x... (value there 0x...);
    queued for it: (waiters, releasers, all entries) Some((1, 0, 1))`, so a
-   release waiting with no waiter, or a waiter whose value changed, shows),
+   release waiting with no waiter, or a waiter whose value changed, shows;
+   for a thread that is suspended or parked, who stopped it and the rip it
+   is parked at, "Suspensions" above),
    every
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB, R reservations, G regions; paged U/L (peak P) nonpaged
@@ -1167,6 +1170,74 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 - A delay-load failure (0xc06d007e, 0xc06d007f: the delay-load
   helper's DLL or function not found): `delay load of DLL!function` (or
   `ordinal N`), from the DelayLoadInfo its first parameter points to.
+
+### Suspensions (who stopped a thread)
+
+A suspended thread is in no wait, holds no handle and is queued for
+nothing: it simply does not run. Its suspend count was all a dump
+showed, and a count says nothing about the cause -- which is what Word's
+parked main thread showed for a whole 900 s run (ROADMAP OF). Every
+raise and every drop of the count now keeps a mark on the thread and
+logs a line (`kernel/src/nt/thread.rs`):
+
+```
+suspend: pid 4 tid 12 (suspend_test.exe) suspended by pid 4 tid 8, called from 0x1400010e1 (suspend_test.exe+0x10e1): count 1
+suspend: pid 4 tid 12 (suspend_test.exe) resumed by pid 4 tid 8, called from 0x140001281 (suspend_test.exe+0x1281): count 0
+suspend: no suspension on handle 0x14 for pid 4 tid 8: 0xc0000024
+```
+
+- Who asked is the calling thread, with the return address above its
+  system-call stub and the image that address is in -- the same address a
+  thread dump names a wait's caller by -- so the line names the DLL that
+  stopped the thread, not only the program. `the kernel` is gala's own
+  code (a service's first thread, a Linux fork's child).
+- `created suspended by` is CREATE_SUSPENDED, a thread that has never
+  run. `resumed while not suspended by` is a resume that found a count of
+  0 and changed nothing: a program that has lost count of its own
+  suspensions, or whose suspension gala refused.
+- **A thread's own creation is counted, not printed.** Every
+  CreateThread starts its thread suspended and resumes it once the
+  handle is the caller's, so that pair is all a log of suspensions would
+  hold: OfficeClickToRun spent the whole budget below on 25 threads of
+  its own before Word had started. The pair is still counted (the dump's
+  tally says how many) and still kept as the thread's mark, so a thread
+  created suspended and **never** resumed has its cause in every dump;
+  `thread create` is where a thread being made is said.
+- A refusal is recorded with the status the caller is answered with:
+  `suspend: pid P tid T (x.exe): no suspension for pid Q tid U:
+  0xc000004b`, or `suspend: no suspension on handle 0x1234 for pid Q tid
+  U: 0xc0000008` when the handle named no thread of this process.
+  kernel32's SuspendThread turns every failure into `(DWORD)-1` and a
+  program may take that as fatal with nothing of its own left behind, so
+  the record is the only place the reason is kept.
+- The first 64 lines of a boot are printed and the rest counted: a
+  debugger stepping or a profiler sampling suspends in a loop and must
+  not bury the log. The line that says the budget is spent is printed
+  once, and each thread's own mark is kept whatever the budget.
+
+Every thread dump -- the one-minute hang report, the state dump,
+`statedump: threads` -- counts the boot's suspensions, resumes and
+refusals, and prints that mark beside a thread that is suspended or
+parked, with the rip it is parked at:
+
+```
+thread: 12 suspensions, resumes and refusals so far, 4 of them a thread's own creation (not printed)
+thread: pid 4 tid 12 (sched Some(ThreadId(6))) start 0x1400015a0 suspend 1 exited false in a system call false session 1 personality nt (suspend_test.exe)
+thread:   suspended by pid 4 tid 8, called from 0x14000153c (suspend_test.exe+0x153c) at 2136 ms; count 1 (3 suspensions so far)
+thread:   parked at rip 0x1400015aa (suspend_test.exe+0x15aa) rsp 0x2ffd8
+```
+
+A thread parked with a suspend count of 0 is a resume that was lost. A
+thread suspended across a kernel handover carries its count but not its
+mark and says so (`stopped with no record of who asked`). Only the
+caller's own process can place the address a mark kept, so a suspension
+from another process shows the address alone.
+
+The events `thread suspend` and `thread resume` (`events=thread`) carry
+`pid`, `tid`, `by_pid`, `by_tid`, `from`, `count` and `why`; a refusal is
+`thread suspend refused` with `handle`, `what` and `status`.
+
+Scenario `suspend_test`.
 
 ### Stack captures (`stack_at=`, `stack_from=`, `stack_words=`)
 

@@ -1373,7 +1373,13 @@ current process, -2 = current thread.
   when the wait ends. NtGetContextThread of a thread suspended inside a
   system call returns the registers the dispatcher recorded at entry,
   with the default floating-point state, as Windows does. The caller's
-  own context comes from its system call frame.
+  own context comes from its system call frame. Every raise and every
+  drop of the count, and every one gala refuses, leaves a mark on the
+  thread -- who asked, the return address above that thread's
+  system-call stub, the count left behind, the uptime -- because a
+  suspended thread is in no wait and in no queue, so the count alone
+  says nothing about the cause; thread dumps print it (OBSERVABILITY
+  "Suspensions", `suspend_test`).
 - **A thread's exit against calls on it**: `exit_current` marks the
   thread exited under the dispatcher lock and its suspend count, the
   locks NtQueueApcThread and NtSuspendThread check it under, so a call
@@ -6408,7 +6414,9 @@ The kernel's side of OBSERVABILITY.md's dumps; crash reports are under
 - **Hang dump**: when a `run=` program has not finished after a minute,
   the kernel logs every NT thread (`thread::dump`: process, suspend
   count, the system call it is in with the waited object, its signal
-  state, a timer's due tick and the timeout) and every scheduler thread
+  state, a timer's due tick and the timeout; for a thread that is
+  suspended or parked, who suspended it and the rip it is parked at)
+  and every scheduler thread
   (`sched::dump`: state, deadline, affinity). The dispatcher records the
   service number with the caller's registers for this.
 - **State dump on NMI** (`kernel/src/statedump.rs`; `statedump_test`):

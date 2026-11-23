@@ -3507,7 +3507,18 @@ pub(in crate::nt) fn caller_regs(call: &Call<'_>) -> UserRegs {
 
 /// NtSuspendThread(ThreadHandle, *PreviousSuspendCount)
 fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
-    let object = tri!(thread_object(call, arg!(call, 0), THREAD_SUSPEND_RESUME));
+    let h = arg!(call, 0);
+    // kernel32's SuspendThread answers (DWORD)-1 whatever the reason and
+    // a program may take that as fatal, leaving nothing of its own
+    // behind: the refusal is recorded here, the ones `thread::suspend`
+    // makes itself in there (nt/thread.rs).
+    let object = match thread_object(call, h, THREAD_SUSPEND_RESUME) {
+        Ok(object) => object,
+        Err(status) => {
+            thread::refused("suspension", None, h, status);
+            return status;
+        }
+    };
     let previous = tri!(thread::suspend(&object));
     let ptr = arg!(call, 1);
     if ptr != 0 {
@@ -3748,12 +3759,22 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
 
 /// NtResumeThread(ThreadHandle, *PreviousSuspendCount)
 fn nt_resume_thread(call: &mut Call<'_>) -> NtStatus {
-    let entry = tri!(call.handle(Handle(arg!(call, 0))));
-    let object = tri!(entry.require(THREAD_SUSPEND_RESUME));
-    if !matches!(object.body, ObjectBody::Thread(_)) {
-        return NtStatus::OBJECT_TYPE_MISMATCH;
-    }
-    let previous = thread::resume(object);
+    let h = arg!(call, 0);
+    // A resume that does not happen is how a thread stays suspended
+    // forever, so it is recorded as the suspension is (nt/thread.rs).
+    let object =
+        match call.handle(Handle(h)).and_then(|e| e.require(THREAD_SUSPEND_RESUME).cloned()) {
+            Ok(object) if matches!(object.body, ObjectBody::Thread(_)) => object,
+            Ok(_) => {
+                thread::refused("resume", None, h, NtStatus::OBJECT_TYPE_MISMATCH);
+                return NtStatus::OBJECT_TYPE_MISMATCH;
+            }
+            Err(status) => {
+                thread::refused("resume", None, h, status);
+                return status;
+            }
+        };
+    let previous = thread::resume(&object);
     let prev_ptr = arg!(call, 1);
     if prev_ptr != 0 {
         tri!(call.write_u32(prev_ptr, previous));

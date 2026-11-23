@@ -39,6 +39,14 @@ pub struct NtThread {
     pub dispatcher: Dispatcher,
     exit_status: IrqMutex<Option<NtStatus>>,
     suspend_count: IrqMutex<u32>,
+    /// Its last suspension or resume: who asked, where from and when
+    /// (`SuspendMark`). A suspended thread is in no wait and runs
+    /// nothing, so the count alone says nothing about the cause; every
+    /// thread dump prints this beside it.
+    suspend_mark: IrqMutex<Option<SuspendMark>>,
+    /// Suspensions counted since it was created: what tells a thread
+    /// stopped once from one stopped again and again.
+    suspends: AtomicU32,
     /// Set when this thread is to end on its way back to user mode: asked
     /// by another thread (`request_termination`) or by itself.
     terminate_request: IrqMutex<Option<NtStatus>>,
@@ -177,6 +185,227 @@ pub struct Parked {
 
 /// The most a thread can be suspended (MAXIMUM_SUSPEND_COUNT).
 const MAXIMUM_SUSPEND_COUNT: u32 = 127;
+
+/// What a suspension leaves behind: who raised or lowered a thread's
+/// suspend count, where that thread called from, and when. A suspension
+/// is the one way a thread stops without a wait -- it holds no handle,
+/// is queued for nothing and runs nothing -- so without this a dump
+/// shows a count and no cause, which is all Word's parked main thread
+/// showed (ROADMAP OF).
+#[derive(Clone, Copy)]
+struct SuspendMark {
+    why: Why,
+    /// The thread that asked: (pid, tid); (0, 0) for the kernel's own
+    /// code (a service's first thread, a Linux fork's child).
+    by: (u64, u64),
+    /// Where it called from: the return address above its system-call
+    /// stub, as a thread dump names a wait's caller (0: none).
+    from: u64,
+    /// The count the call left behind.
+    count: u32,
+    /// Uptime in ms when it was made.
+    at: u64,
+}
+
+/// Which call a `SuspendMark` is of.
+#[derive(Clone, Copy, PartialEq)]
+enum Why {
+    /// Created suspended (CREATE_SUSPENDED): it has never run.
+    Created,
+    Suspended,
+    Resumed,
+    /// A resume of a thread that was not suspended: it answers 0 and
+    /// changes nothing, so a program that has lost count of its own
+    /// suspensions -- or whose suspension gala refused -- shows up here.
+    Stray,
+}
+
+impl Why {
+    /// How a line says it, before who asked.
+    fn text(self) -> &'static str {
+        match self {
+            Why::Created => "created suspended by",
+            Why::Suspended => "suspended by",
+            Why::Resumed => "resumed by",
+            Why::Stray => "resumed while not suspended by",
+        }
+    }
+
+    /// Its event's name and `why` field (`events=thread`).
+    fn event(self) -> (&'static str, &'static str) {
+        match self {
+            Why::Created => ("thread suspend", "created"),
+            Why::Suspended => ("thread suspend", "suspended"),
+            Why::Resumed => ("thread resume", "resumed"),
+            Why::Stray => ("thread resume", "stray"),
+        }
+    }
+}
+
+/// Who asked, as a line says it: a thread and where it called from (with
+/// the image it is in, resolved when the mark was made), or the
+/// kernel's own code.
+struct By(SuspendMark, Option<super::crashreport::At>);
+
+impl core::fmt::Display for By {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let m = self.0;
+        if m.by == (0, 0) {
+            return write!(f, "the kernel");
+        }
+        write!(f, "pid {} tid {}", m.by.0, m.by.1)?;
+        match (&self.1, m.from) {
+            (Some(at), _) => write!(f, ", called from {at}"),
+            (None, 0) => Ok(()),
+            (None, from) => write!(f, ", called from {from:#x}"),
+        }
+    }
+}
+
+/// Suspension lines a boot prints before it keeps only the count: a
+/// program that suspends in a loop (a debugger stepping, a profiler
+/// sampling) must not bury the log, and past that the mark every thread
+/// dump prints is the record that answers the question.
+const SUSPEND_LINES: u32 = 64;
+
+/// Suspensions, resumes and refusals since boot, how many of them were
+/// printed (`SUSPEND_LINES`), and how many were a thread's own creation,
+/// which prints nothing (`note`).
+static SUSPENDS: AtomicU32 = AtomicU32::new(0);
+static SUSPEND_PRINTED: AtomicU32 = AtomicU32::new(0);
+static SUSPEND_CREATES: AtomicU32 = AtomicU32::new(0);
+
+/// Whether this record is printed: a thread's own creation never is, and
+/// past the boot's budget nothing is. The line that says the budget is
+/// spent is printed once, so a log that goes quiet here cannot be read
+/// as a run that stopped suspending.
+fn budget(creation: bool) -> bool {
+    SUSPENDS.fetch_add(1, Ordering::Relaxed);
+    if creation {
+        SUSPEND_CREATES.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let printed = SUSPEND_PRINTED.fetch_add(1, Ordering::Relaxed);
+    if printed == SUSPEND_LINES {
+        info!(
+            "suspend: {SUSPEND_LINES} lines printed; the rest are counted only (every thread dump still names each thread's own)"
+        );
+    }
+    printed < SUSPEND_LINES
+}
+
+/// Records a thread's suspension or resume as its mark and logs it: who
+/// asked, where that thread called from, and the count the call left
+/// behind. The mark is kept whatever the log budget, so a thread dump
+/// always names the cause of a suspension.
+fn note(t: &NtThread, why: Why, count: u32) {
+    let asker = current();
+    let caller = asker.as_ref().map(as_thread);
+    // The caller's registers at its `syscall` give the return address
+    // above the stub, which is what a thread dump names a wait's caller
+    // by. The guard ends with the statement: what follows copies user
+    // memory, which waits for a page that is not there, and no lock may
+    // be held across a wait. A WOW64 thread's 64-bit registers are
+    // wow64.dll's, not the program's, so it gets no address (as the
+    // thread dump gives it none).
+    let from = match caller.filter(|c| c.teb32 == 0) {
+        Some(c) => {
+            let in_syscall = *c.in_syscall.lock();
+            let regs = in_syscall.map(|(_, regs)| regs);
+            regs.and_then(|regs| super::abi::stub_return_address(&c.process, &regs)).unwrap_or(0)
+        }
+        None => 0,
+    };
+    let mark = SuspendMark {
+        why,
+        by: caller.map_or((0, 0), |c| (c.process.id, c.id)),
+        from,
+        count,
+        at: platform::monotonic_ns() / 1_000_000,
+    };
+    let before = t.suspend_mark.lock().replace(mark);
+    if matches!(why, Why::Created | Why::Suspended) {
+        t.suspends.fetch_add(1, Ordering::Relaxed);
+    }
+    // Every CreateThread starts its thread suspended -- kernel32 asks
+    // for CREATE_SUSPENDED and resumes it once the handle is the
+    // caller's -- so in a program that starts dozens of threads that
+    // pair is all a log of suspensions holds: OfficeClickToRun spent
+    // this one's whole budget on 25 threads of its own before Word had
+    // started (ROADMAP OF). The pair is counted and kept as the thread's
+    // mark, so a thread created suspended and never resumed still has
+    // its cause in every dump, and it is not printed: `thread create` is
+    // where a thread being made is said.
+    let creation = match why {
+        Why::Created => true,
+        Why::Resumed => count == 0 && matches!(before, Some(b) if b.why == Why::Created),
+        _ => false,
+    };
+    let (event, field) = why.event();
+    crate::events::emit(
+        crate::events::Category::Thread,
+        event,
+        format_args!(
+            r#""pid":{},"tid":{},"by_pid":{},"by_tid":{},"from":{from},"count":{count},"why":"{field}""#,
+            t.process.id, t.id, mark.by.0, mark.by.1
+        ),
+    );
+    if !budget(creation) {
+        return;
+    }
+    // The address is resolved to its image before the line (`At` keeps
+    // the name it found), so no lock of the images is taken while the
+    // name's is held.
+    let at = match (caller, from) {
+        (Some(c), from) if from != 0 => Some(super::crashreport::At::of(&c.process, from)),
+        _ => None,
+    };
+    info!(
+        "suspend: pid {} tid {} ({}) {} {}: count {count}",
+        t.process.id,
+        t.id,
+        t.process.name_now(),
+        why.text(),
+        By(mark, at)
+    );
+}
+
+/// Logs a suspension or a resume that did not happen, with the status
+/// the caller is answered with. kernel32's SuspendThread turns a failure
+/// into (DWORD)-1, and a program may take that as fatal with nothing
+/// else left behind: Office's Mso30win32client raises 0xe0000002 one
+/// instruction past its own call (ROADMAP OF). `what` is "suspension"
+/// or "resume"; `target` is the thread named, when the handle named one
+/// at all.
+pub fn refused(what: &str, target: Option<&ObjectRef>, handle: u64, status: NtStatus) {
+    let asker = current();
+    let caller = asker.as_ref().map(as_thread);
+    let (pid, tid) = caller.map_or((0, 0), |c| (c.process.id, c.id));
+    crate::events::emit(
+        crate::events::Category::Thread,
+        "thread suspend refused",
+        format_args!(
+            r#""by_pid":{pid},"by_tid":{tid},"handle":{handle},"what":"{what}","status":{}"#,
+            status.0
+        ),
+    );
+    if !budget(false) {
+        return;
+    }
+    match target.map(as_thread) {
+        Some(t) => info!(
+            "suspend: pid {} tid {} ({}): no {what} for pid {pid} tid {tid}: {:#010x}",
+            t.process.id,
+            t.id,
+            t.process.name_now(),
+            status.0
+        ),
+        None => info!(
+            "suspend: no {what} on handle {handle:#x} for pid {pid} tid {tid}: {:#010x}",
+            status.0
+        ),
+    }
+}
 
 /// A user-mode APC: `routine(args[0], args[1], args[2])`. A special one
 /// (QueueUserAPC2's QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) runs at the
@@ -557,6 +786,8 @@ fn create_inner(
         dispatcher: Dispatcher::new(0),
         exit_status: IrqMutex::new(None),
         suspend_count: IrqMutex::named("thread.suspend_count", u32::from(suspended)),
+        suspend_mark: IrqMutex::named("thread.suspend_mark", None),
+        suspends: AtomicU32::new(0),
         terminate_request: IrqMutex::new(None),
         ended_by_other: core::sync::atomic::AtomicBool::new(false),
         owns_stack: core::sync::atomic::AtomicBool::new(false),
@@ -607,6 +838,9 @@ fn create_inner(
                     process.id, win32_start
                 ),
             );
+            if suspended {
+                note(as_thread(&object), Why::Created, 1);
+            }
             Ok(object)
         }
         Err(_) => {
@@ -740,6 +974,9 @@ pub fn resume(object: &ObjectRef) -> u32 {
             platform::wake(tid);
         }
     }
+    let now = *count;
+    drop(count);
+    note(t, if previous == 0 { Why::Stray } else { Why::Resumed }, now);
     previous
 }
 
@@ -991,11 +1228,19 @@ pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
     // Checked under the suspend count, which the thread's exit marks it
     // under (`exit_current`): no suspension is counted once it began.
     let mut count = t.suspend_count.lock();
-    if t.has_exited() || t.terminate_request.lock().is_some() {
-        return Err(NtStatus::THREAD_IS_TERMINATING);
-    }
-    if *count >= MAXIMUM_SUSPEND_COUNT {
-        return Err(NtStatus::SUSPEND_COUNT_EXCEEDED);
+    let refusal = if t.has_exited() || t.terminate_request.lock().is_some() {
+        Some(NtStatus::THREAD_IS_TERMINATING)
+    } else if *count >= MAXIMUM_SUSPEND_COUNT {
+        Some(NtStatus::SUSPEND_COUNT_EXCEEDED)
+    } else {
+        None
+    };
+    // The count's guard ends before the record: it names the process,
+    // whose lock is not taken under this one anywhere else.
+    if let Some(status) = refusal {
+        drop(count);
+        refused("suspension", Some(object), 0, status);
+        return Err(status);
     }
     let previous = *count;
     *count += 1;
@@ -1004,6 +1249,7 @@ pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
     if let Some(tid) = *t.sched_id.lock() {
         platform::interrupt(tid);
     }
+    note(t, Why::Suspended, previous + 1);
     Ok(previous)
 }
 
@@ -1154,6 +1400,10 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         dispatcher: Dispatcher::new(i32::from(!live)),
         exit_status: IrqMutex::new(a.exited.map(|e| e.0)),
         suspend_count: IrqMutex::named("thread.suspend_count", a.suspend),
+        // A handover carries the count, not who asked: a thread suspended
+        // across it says so (`dump`).
+        suspend_mark: IrqMutex::named("thread.suspend_mark", None),
+        suspends: AtomicU32::new(0),
         terminate_request: IrqMutex::new(None),
         ended_by_other: core::sync::atomic::AtomicBool::new(false),
         owns_stack: core::sync::atomic::AtomicBool::new(false),
@@ -1295,6 +1545,11 @@ pub fn dump() {
         info!("thread: no memory to list the threads");
         return;
     };
+    info!(
+        "thread: {} suspensions, resumes and refusals so far, {} of them a thread's own creation (not printed)",
+        SUSPENDS.load(Ordering::Relaxed),
+        SUSPEND_CREATES.load(Ordering::Relaxed)
+    );
     for object in threads.iter() {
         let t = as_thread(object);
         let in_syscall = *t.in_syscall.lock();
@@ -1323,6 +1578,37 @@ pub fn dump() {
                 t.process.personality,
                 t.process.name_now()
             );
+        }
+        // Why it is stopped, when it is. A suspended thread is in no
+        // wait and in no queue, so the count on the line above is all
+        // there would otherwise be; a thread parked with a count of 0 is
+        // a resume that was lost.
+        let parked_at = t.parked.lock().as_ref().map(|p| (p.regs.ip(), p.regs.sp()));
+        if suspended > 0 || parked_at.is_some() {
+            match *t.suspend_mark.lock() {
+                Some(m) => {
+                    // Resolved before the line, and only when the caller
+                    // is of this process: another process's images do not
+                    // place its address.
+                    let at = (m.from != 0 && m.by.0 == t.process.id)
+                        .then(|| super::crashreport::At::of(&t.process, m.from));
+                    info!(
+                        "thread:   {} {} at {} ms; count {} ({} suspensions so far)",
+                        m.why.text(),
+                        By(m, at),
+                        m.at,
+                        m.count,
+                        t.suspends.load(Ordering::Relaxed)
+                    );
+                }
+                None => info!("thread:   stopped with no record of who asked"),
+            }
+            if let Some((ip, sp)) = parked_at {
+                info!(
+                    "thread:   parked at rip {} rsp {sp:#x}",
+                    super::crashreport::At::of(&t.process, ip)
+                );
+            }
         }
         let Some((number, regs)) = in_syscall else {
             // Running user code: where a tick last caught it.

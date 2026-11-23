@@ -2027,30 +2027,56 @@ need gala's.
 
    Word now puts its splash window on the screen -- the Office splash,
    "Word", "Starting...", Word's icon in the taskbar, 7 windows of its
-   own with `MsoSplash` among them -- and runs on with no exception
-   anywhere. It does not finish starting: the run reaches the
-   scenario's limit at 900 s with no `Document1 - Word` window. What
-   the state dump says then is that **Word's main thread is suspended**
-   -- pid 12 tid 16, suspend count 1, parked in `wait_if_suspended`
-   (`nt/thread.rs`) -- and has been since the first minute, with tid
-   276 (its OfficePowerManagerWindow thread) suspended beside it, while
-   the splash thread and 22 others run; three of them yield in a loop.
-   Nothing in the run says who suspended them or whether a resume was
-   ever asked for, which is the gap to close first: NtSuspendThread and
-   NtResumeThread leave no record, so the next piece of work is that
-   record plus a stack capture on the suspend (`stack_at=NtSuspendThread
-   stack_from=<the module that calls it>`, OBSERVABILITY "Stack
-   captures"), which says whether this is Word parking its main thread
-   by design and waiting for something that never comes, or gala losing
-   a resume. Loud in the same stretch, and not yet tied to it: Word
-   asks again and again for the WinRT identity factory
+   own with `MsoSplash` among them. It does not finish starting, and
+   what ends it is named in the crash report: **the delay load of
+   `WTSAPI32.dll!WTSRegisterSessionNotificationEx`**, which gala's
+   wtsapi32 does not export (it has the pair without the `Ex`). The
+   delay-load helper raises 0xc06d007f from Mso40UIwin32client under
+   WWLIB's startup, 16 frames unwind and 5 handlers are asked -- three
+   of them passing it on -- and none takes it, so WINWORD ends at 33 s
+   and consolerun with it. On Windows the function is there and nothing
+   is raised, so the fix is the export, not the unwind:
+   `WTSRegisterSessionNotificationEx` and
+   `WTSUnRegisterSessionNotificationEx` in `user/wtsapi32`, measured by
+   `office_api_test`, which already covers that DLL. Another run of the
+   same scenario ended at 34 s on 0xe0000002 raised from
+   Mso30win32client inside a user APC (24 frames, 5 handlers asked,
+   none taking it): Word reaching a different gap first, not a
+   different kind of gap. The miss itself is in the ledger --
+   `wtsapi32.dll!WTSRegisterSessionNotificationEx`, `missing export`,
+   one hit -- and that is where it hid: the triage prints the ledger's
+   top five by hits out of 445 entries, and the entry that ended the
+   run had a single hit, 6400 lines below the crash report that named
+   it. A `missing export` is always a function gala should have and
+   never the program's doing, so the triage names every one of them,
+   which is the other half of this piece of work.
+
+   Who suspended a thread is now recorded (`nt/thread.rs`,
+   OBSERVABILITY "Suspensions", `user/suspend_test`): every raise and
+   every drop of a suspend count keeps a mark on the thread -- who
+   asked, where that thread called from, the count the call left behind
+   -- which every thread dump prints beside a thread that is suspended
+   or parked, together with the rip it is parked at, and a refused
+   suspension or resume is recorded with the status the caller is
+   answered with. What it says about Word so far is that nothing
+   mysterious stops its main thread: tid 16's only suspension up to the
+   crash is the ordinary one, created suspended by consolerun's
+   CreateProcess (kernel32+0x30d5d) and resumed at once, and
+   OfficeClickToRun starts 25 threads of its own the same way -- which
+   is why that pair is counted and not printed. The suspended main
+   thread the 900 s run's dump showed is past the crash above, so it
+   has not been seen with the record armed; when Word runs that far
+   again the dump will name the cause instead of a bare count. Loud in
+   the same stretch, and not yet tied to anything: Word asks again and
+   again for the WinRT identity factory
    `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`,
    which RoGetActivationFactory refuses with REGDB_E_CLASSNOTREG (the
    loader then looking for `windows.security.authentication*.dll`,
    which are not there), at 138 s, 348 s and 770 s -- a retry that
    spreads out rather than a wait that ends. A program whose own
    handler never gets asked was a gap of the same kind the class table
-   was, one layer down; what is left here is a program that waits.
+   was, one layer down; what is left here is a handful of named
+   functions and no record of their absence.
    The same silent-refusal shape is still in user32's other fixed
    tables, each to be measured against a real program rather than
    widened: `accel.rs` 32 accelerator tables (`MAX_TABLES`), `menu.rs`

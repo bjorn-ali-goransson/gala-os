@@ -596,6 +596,12 @@ stacks, so try the next one. Reach for this before
 adding records by hand to a DLL -- it costs a run, needs nothing of the
 program, and works for Microsoft's DLLs too.
 
+A thread that is *stopped* rather than waiting needs no run of its own:
+it has no wait, no handle and no queue, and a suspension is the only way
+it got there, so the dump's own lines name who suspended it and where
+that thread called from (OBSERVABILITY "Suspensions"). Read those first
+and arm a capture only for the frames above the caller.
+
 ### When the call that matters is a repeat
 
 A `reached` record is one-shot per call site, so a method the program
