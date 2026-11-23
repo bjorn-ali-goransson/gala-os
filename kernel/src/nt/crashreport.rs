@@ -153,12 +153,7 @@ impl Note {
         regs: UserRegs,
         wow64: bool,
     ) -> Note {
-        let tid = super::thread::current()
-            .and_then(|t| match &t.body {
-                super::object::ObjectBody::Thread(t) => Some(t.id),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let tid = current_tid();
         // A word at `base` + `i` words (4 bytes each for 32-bit code).
         let word = |base: u64, i: usize| {
             if wow64 {
@@ -610,6 +605,143 @@ impl fmt::Display for At {
     }
 }
 
+/// The thread a note is taken on, or 0 when there is none (the
+/// kernel's own context): what says whose exception a note describes,
+/// and so whose filter may withdraw it.
+fn current_tid() -> u64 {
+    super::thread::current()
+        .and_then(|t| match &t.body {
+            super::object::ObjectBody::Thread(t) => Some(t.id),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// ntdll reported an exception no handler took and the kernel could not
+/// read what it reported, so no note is kept and the crash report will
+/// say nothing about it. ntdll goes on either way (its dispatcher does
+/// not look at the status), so without this the exception is lost in the
+/// one place that would have described it: a process that dies of it
+/// then looks like one that died of nothing.
+pub fn unread(process: &Process, record: u64, context: u64, what: &str) {
+    let tid = current_tid();
+    info!(
+        "exception report unread: {} (pid {}) thread {tid}: {what} of ntdll's report (record \
+         {record:#x}, context {context:#x}) could not be read, so no note is kept and no crash \
+         report will describe this exception",
+        process.name, process.id
+    );
+    super::ledger::record(
+        "GalaUnhandledException",
+        "a report whose record or context could not be read",
+        record,
+    );
+}
+
+/// What a filter's withdrawal may do to the note its process keeps.
+/// There is one note in a process, so a withdrawal can meet a note that
+/// is not the withdrawing thread's: another thread's unhandled
+/// exception, on its way to ending the process. That one stays.
+#[derive(Debug, PartialEq, Eq)]
+enum Withdrawal {
+    /// The note is the withdrawing thread's: it goes, and the exception
+    /// it describes is what the line is written from.
+    Takes,
+    /// The note is another thread's (which thread), and is left for the
+    /// crash report.
+    Leaves(u64),
+    /// No note was kept at all.
+    Nothing,
+}
+
+/// Whether a withdrawal by thread `tid` takes the note the process
+/// keeps, `kept` being the thread that note describes.
+fn withdrawal(kept: Option<u64>, tid: u64) -> Withdrawal {
+    match kept {
+        Some(whose) if whose == tid => Withdrawal::Takes,
+        Some(whose) => Withdrawal::Leaves(whose),
+        None => Withdrawal::Nothing,
+    }
+}
+
+/// ntdll withdraws the note it reported: the top-level filter returned
+/// EXCEPTION_CONTINUE_EXECUTION, so the process carries on and no crash
+/// report will ever name this exception. Nothing else in the run would
+/// either -- the ledger row ntdll writes is on its death path -- so a
+/// program that carries on past an exception nobody handled leaves
+/// nothing behind at all, which is what Office's shared code does. This
+/// is the one moment it can be said out loud, so it is said here.
+///
+/// The note is dropped only when it is the calling thread's. There is
+/// one slot in a process, so another thread's note in it is an
+/// unhandled exception still on its way to ending the process, and this
+/// thread's filter has no say over it: it stays, for the crash report.
+pub fn continued(process: &Process) {
+    let tid = current_tid();
+    // The slot is read and emptied under its lock, so that the decision
+    // cannot straddle another thread's report; the lines are written
+    // after it, holding nothing.
+    let (mine, other) = {
+        let mut slot = process.unhandled_exception.lock();
+        match withdrawal(slot.map(|note| note.tid), tid) {
+            Withdrawal::Takes => (slot.take(), None),
+            Withdrawal::Leaves(whose) => (None, Some(whose)),
+            Withdrawal::Nothing => (None, None),
+        }
+    };
+    if let Some(note) = mine {
+        let (code, name) = (note.status.0, exception_name(note.status));
+        let at = At(note.regs.ip(), module_at(process, note.regs.ip()));
+        match note.access {
+            Some((addr, kind)) => info!(
+                "exception continued: {} (pid {}) thread {tid}: its top-level filter continued \
+                 past an unhandled {code:#010x} ({name}) at {at}, {} address {addr:#x}",
+                process.name,
+                process.id,
+                match kind {
+                    1 => "writing",
+                    8 => "executing",
+                    _ => "reading",
+                }
+            ),
+            None => info!(
+                "exception continued: {} (pid {}) thread {tid}: its top-level filter continued \
+                 past an unhandled {code:#010x} ({name}) at {at}",
+                process.name, process.id
+            ),
+        }
+        // The ledger's own row, so a long run's gaps carry it too: a
+        // program swallowing exceptions is a gap whatever it then does.
+        super::ledger::record(
+            "GalaUnhandledException",
+            "an exception the top-level filter continued past",
+            u64::from(code) << 32 | (note.regs.ip() & 0xffff_ffff),
+        );
+    } else {
+        // Two ways to have no note of one's own: another thread's is in
+        // the slot (the process is ending of that one, and it stays), or
+        // the report never reached the kernel.
+        match other {
+            Some(whose) => info!(
+                "exception continued: {} (pid {}) thread {tid}: its top-level filter continued \
+                 past an unhandled exception, whose code is not known here: the note kept is \
+                 thread {whose}'s, left for the crash report",
+                process.name, process.id
+            ),
+            None => info!(
+                "exception continued: {} (pid {}) thread {tid}: its top-level filter continued \
+                 past an unhandled exception, of which no note was kept",
+                process.name, process.id
+            ),
+        }
+        super::ledger::record(
+            "GalaUnhandledException",
+            "an exception the top-level filter continued past, with no note of it kept",
+            0,
+        );
+    }
+}
+
 /// Prints the crash report of `process`, which ended with `status` by
 /// `note`'s exception (or after it, when a top-level filter ended it with
 /// another status).
@@ -702,7 +834,10 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
     if note.params_len > 0 && note.access.is_none() && note.delay.is_none() && note.cxx.is_none() {
         let shown = Params(process, &note.params[..note.params_len]);
         if note.params_count > note.params_len {
-            info!("crash report:   {} parameters, the first {PARAMS}: {shown}", note.params_count);
+            info!(
+                "crash report:   {} parameters, the first {}: {shown}",
+                note.params_count, note.params_len
+            );
         } else {
             info!(
                 "crash report:   {} parameter{}: {shown}",
@@ -970,6 +1105,24 @@ impl fmt::Display for Lossy<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A filter that continues execution withdraws the note of its own
+    /// exception and of no other thread's: what is left in the one slot
+    /// a process has is an exception still on its way to ending it, and
+    /// for a raise in user mode nothing else in the kernel describes it,
+    /// so a withdrawal that took it would lose the whole crash report
+    /// (scenario `crash_continued_other`).
+    #[test]
+    fn a_withdrawal_takes_only_its_own_threads_note() {
+        assert_eq!(withdrawal(Some(8), 8), Withdrawal::Takes);
+        assert_eq!(withdrawal(Some(12), 8), Withdrawal::Leaves(12));
+        assert_eq!(withdrawal(None, 8), Withdrawal::Nothing);
+        // 0 is "no thread of this process": the kernel's own context,
+        // which owns its note as a thread owns its own and no more.
+        assert_eq!(withdrawal(Some(0), 0), Withdrawal::Takes);
+        assert_eq!(withdrawal(Some(8), 0), Withdrawal::Leaves(8));
+        assert_eq!(withdrawal(Some(0), 8), Withdrawal::Leaves(0));
+    }
 
     #[test]
     fn exception_codes_have_names() {
