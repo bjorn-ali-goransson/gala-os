@@ -5559,7 +5559,7 @@ also holds the LSA functions ("Accounts and logon").
 ### COM: ole32 and oleaut32
 
 What CoreCLR imports, and what UI Automation needs (`com_test`,
-`ole32_test`, `oleaut32_test`).
+`ole32_test`, `oleaut32_test`, `moniker_test`).
 
 - **ole32**: apartments per thread behind TEB.ReservedForOle (MTA/STA
   with reference counts, initialize spies, the error object). Invariant:
@@ -5683,9 +5683,64 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   one with no IPersistStream E_NOINTERFACE
   (`ole32.dll!OleLoadFromStream(no IPersistStream)`), and Load refusing
   is its own error with the object released and the caller's pointer
-  zeroed (all measured, `ole32_test`). Monikers are not here: gala has
-  no CreateFileMoniker, so OleSaveToStream and OleLoadFromStream over
-  one are untested.
+  zeroed (all measured, `ole32_test`). A moniker's own Save and Load are
+  not there (`moniker.rs`), so persisting one through these is recorded
+  and fails.
+- **Monikers and the running object table** (`moniker.rs`,
+  `moniker_test`, measured against Windows 11): a moniker here is its
+  kind and its display name, and every operation is on that name, which
+  is what programs do with monikers outside binding -- parse a name,
+  join two, ask whether an object is running under one, put one in the
+  table. Word's Mso20win32client.dll delay-loads MkParseDisplayName, and
+  an absent delay-load export raises an exception no handler takes.
+  MkParseDisplayName takes a path to a file that exists (a file moniker,
+  the whole name eaten) and `clsid:<guid>:` (a class moniker), and
+  refuses the rest as Windows does: MK_E_CANTOPENFILE for a file that is
+  not there and for a directory, MK_E_SYNTAX for a bare word or a URL,
+  E_NOINTERFACE for a `@ProgID`, E_INVALIDARG for a NULL argument or an
+  empty name. Three answers are Windows' and not the documentation's,
+  and programs depend on them: a file followed by an extension that
+  cannot be parsed is MK_E_INVALIDEXTENSION with the file part eaten
+  *and* the file's moniker handed back -- a failure that still gives the
+  caller an object; IMoniker::ParseDisplayName refusing the same
+  extension does not write the count at all, where MkParseDisplayName
+  writes 0 for every refusal of its own; and composing anything with an
+  anti moniker is S_OK with a NULL moniker, so S_OK does not promise
+  one. Names compare and hash without regard to case, so a moniker
+  reaches its table entry whatever case it was written in; a file and an
+  item compose into a generic composite whose name is the two joined;
+  Inverse of a file or an item is an anti moniker (whose hash is
+  Windows' 0x80000001, which programs test for); CommonPrefixWith of two
+  paths is their shared directory with its separator still on, and of a
+  moniker with itself MK_S_US; RelativePathTo steps out of the source's
+  own last component before descending, so two files in one directory
+  are `..\<name>` apart. The running object table is one object for the
+  process, handed out by GetRunningObjectTable and by
+  IBindCtx::GetRunningObjectTable alike; it holds a reference on each
+  registered object and moniker, gives a second registration of one name
+  its own key and MK_S_MONIKERALREADYREGISTERED (a success), finds
+  entries by the moniker's value and not its pointer, and after a revoke
+  answers S_FALSE, MK_E_UNAVAILABLE and E_INVALIDARG for the key again.
+  Like the class table it is a `gala_lock::Lock` with nothing held
+  across a call into a program's code: a moniker's display name is asked
+  for before the lock is taken, references are taken and given back
+  outside it, and a borrow on the entry keeps it alive in between. That
+  borrow is a value with a Drop rather than a call to remember, because
+  a forgotten one leaves a revoked entry out of reach with its
+  references still held -- the object then lives for ever and nothing
+  says why. Limits, each with a ledger row where a program meets it:
+  binding is not implemented (a file moniker whose file is absent is
+  MK_E_CANTOPENFILE and BindToStorage is E_NOINTERFACE, both as
+  measured; binding a file that is there would need the file's class,
+  which gala does not register), Reduce, Load, Save,
+  IROTData::GetComparisonData and a composite's Enum are recorded and
+  fail, the table is this process's where Windows keeps one per logon
+  session in RPCSS, GetSizeMax and Hash are gala's own numbers (only
+  their consistency is promised), case folding is ASCII, names are at
+  most 320 characters and the table holds at most 64 entries.
+  CreateFileMoniker and GetRunningObjectTable do not check the caller's
+  out pointer on Windows -- they fault on a NULL one, measured -- and
+  gala refuses it with E_INVALIDARG instead.
 - **Marshaling** (`marshal.rs`): gala has no proxies, so marshaling is
   within the process: the data for MSHCTX_INPROC/CROSSCTX is gala's own
   record (a magic, the MSHLFLAGS, the interface pointer, its IID), and

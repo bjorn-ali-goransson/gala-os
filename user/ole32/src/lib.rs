@@ -34,6 +34,7 @@ mod absent;
 mod bindctx;
 mod class;
 mod marshal;
+mod moniker;
 mod persist;
 mod props;
 mod roerror;
