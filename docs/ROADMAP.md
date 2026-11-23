@@ -1370,19 +1370,13 @@ the kernel.
   Word draws with (ROADMAP OF).
 
 **Next**:
-1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
-   answering its monitor (no `x`, no `info registers`, no NMI) after the
-   guest started its program; not reproduced locally. A failed log now
-   carries every QEMU thread's stack when the monitor gives nothing:
-   the next occurrence says which thread holds QEMU, and whether the
-   device reset (`gpureset=`) is in it.
-2. G1's rest: shasha's pointer on the hardware cursor,
+1. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-3. G2's rest: a drawn triangle in `d3d11_test` (DXVK is in, but
+2. G2's rest: a drawn triangle in `d3d11_test` (DXVK is in, but
    nothing is drawn through the pipeline yet), then DXVK's d3d9 and
    d3d10core and its own tests, then vkd3d-proton 3.1 (d3d12,
    d3d12core) beside the program the same way. Drawing needs DXBC
@@ -1402,9 +1396,9 @@ the kernel.
    expects Windows' S_OK on Windows). It is replaced by a real compiler
    with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
    on it) behind this DLL's exports, PREBUILT.
-4. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
+3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
-5. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
+4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
    until there is spare capacity; hardware partitioning and passthrough
    are out of scope).
 
@@ -6047,19 +6041,11 @@ the next breakthroughs).
    GIO's mount monitor), inotify (`lx_inotify`: GIO's file monitors),
    setfsuid and setfsgid (`lx_fsid`), a process's name after execve in
    the log (`lx_gimp_batch`: `process gimp-console-3.2`), seccomp: strict
-   mode, filters enforced, the probes (`lx_seccomp`). Open: once, in a
-   full parallel run of the `lx_` scenarios, `lx_gimp_batch`'s file-png
-   plug-in (the load of in.png, its result right) printed "gimp_flush():
-   error: Broken pipe" at its end: it wrote after GIMP had closed its
-   pipe. Seen once more, in CI on a host at load 5.9 for 4 CPUs: that
-   time two plug-ins at once, file-png and script-fu, each of which had
-   taken far longer than on an idle host (521 ms and 1670 ms), while
-   gimp-console was still running (it exited 5.7 s later). A third
-   sighting, again in CI (host load 5.6 for 4 CPUs), was file-png alone,
-   so two plug-ins at once is not what it takes. Every sighting is a
-   slow plug-in on a loaded host, which puts the question at the
-   plug-in's last write and not at a reader that had gone; the cause is
-   not found yet.
+   mode, filters enforced, the probes (`lx_seccomp`). `lx_gimp_batch`'s
+   file-png plug-in sometimes ends with "gimp_flush(): error: Broken
+   pipe" on Linux too: GIMP 3.2 closes a plug-in's pipes when its
+   procedure returns, while the plug-in still writes GP_QUIT; the
+   comparison accepts that line (WORKFLOW "GIMP").
 10. Inkscape (the owner): Ubuntu 26.04's Inkscape 1.4.3 (LINUX_ROOTS
    "inkscape"), first in batch mode (`lx_inkscape_batch`: in.svg rendered
    to a PNG Ubuntu's byte for byte; WORKFLOW "Inkscape") and its window

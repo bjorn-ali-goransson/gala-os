@@ -126,7 +126,10 @@ port. Lines that tools and agents rely on:
   and a C runtime call with an invalid argument in a program without an
   invalid-parameter handler ends the process with 0xc0000409 after
   `ucrtbase: invalid parameter passed to a C runtime function, ending the
-  process (0xc0000409)` on its stderr;
+  process (0xc0000409)` on its stderr; a Rust panic in a test program
+  built on ntrt prints `<program>: panic at <file>:<line>:<col>:
+  <message>` before the process ends with 0xc0000409 (gala and real
+  Windows alike);
   `wow64: ... cannot free an exited
   thread's 64-bit stack|TEB32` if a WOW64 thread's exit leaks them; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
