@@ -354,6 +354,53 @@ mod tests {
         );
     }
 
+    /// The faults of `ci.yml`'s download caches' keys (WORKFLOW "CI build
+    /// caches"): each hashes the pins that decide its contents, and no key
+    /// hashes `xtask/src/main.rs`, which every branch changes.
+    fn download_cache_key_faults(yml: &str) -> Vec<String> {
+        let mut faults = Vec::new();
+        for (n, line) in yml.lines().enumerate() {
+            let Some(key) = line.trim().strip_prefix("key: ") else { continue };
+            let want = if key.starts_with("gala-debs-") {
+                Some("hashFiles('xtask/src/pins/debs.rs')")
+            } else if key.starts_with("gala-prebuilt-") {
+                Some("hashFiles('xtask/src/pins/**')")
+            } else {
+                None
+            };
+            if want.is_some_and(|w| !key.ends_with(&format!("${{{{ {w} }}}}"))) {
+                faults.push(format!("line {}: {key} (want {})", n + 1, want.unwrap_or("")));
+            }
+            if key.contains("xtask/src/main.rs") {
+                faults.push(format!("line {}: {key} hashes xtask/src/main.rs", n + 1));
+            }
+        }
+        faults
+    }
+
+    #[test]
+    fn a_download_cache_keyed_on_main_rs_is_a_fault() {
+        let yml = "          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}\n          key: gala-prebuilt-3-${{ hashFiles('xtask/src/pins/**') }}\n          key: gala-target-boot-${{ github.sha }}\n";
+        let f = download_cache_key_faults(yml);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f[0].starts_with("line 1: gala-debs-"), "{f:?}");
+    }
+
+    #[test]
+    fn the_download_caches_are_keyed_on_the_pins() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let yml = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+        assert_eq!(download_cache_key_faults(&yml), Vec::<String>::new());
+        assert!(yml.contains("key: gala-debs-") && yml.contains("key: gala-prebuilt-"));
+        // The tables the keys stand for are where the keys hash.
+        let debs = fs::read_to_string(root.join("xtask/src/pins/debs.rs")).unwrap();
+        assert!(debs.contains("pub const LINUX_ROOTS") && debs.contains("pub const DEBS_ARM64"));
+        let prebuilt = fs::read_to_string(root.join("xtask/src/pins/prebuilt.rs")).unwrap();
+        assert!(
+            prebuilt.contains("pub const PREBUILT") && prebuilt.contains("pub const OFFICE_SOURCE")
+        );
+    }
+
     #[test]
     fn event_reset_after_a_request_is_flagged() {
         // The defect as it was: WSAEnumNetworkEvents' own reset.

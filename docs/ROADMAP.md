@@ -8447,21 +8447,6 @@ Each entry: what, why it matters, the structural fix, the owning item.
   held (R3), and `lx_gimp` then logged no late input. What is left is
   to see the warning stay quiet on CI's `arm_lx_gimp`.
 
-- **CI caches keyed on what every branch changes**: every cache key in
-  `ci.yml` ends in `hashFiles('xtask/src/main.rs')`, and test-first makes
-  a new boot scenario change that file, so each branch writes its own
-  set -- six prebuilt caches of about 900 MiB and the Linux roots'
-  packages at 320 MiB, over 5 GiB of a repository limit of 10 GiB. The
-  limit is therefore always met and eviction always running: one
-  branch's caches push out the last branch's, and a rerun of a run's
-  failed jobs can find that the packages the `debs` job wrote are gone
-  (which is why the boot shards fetch for themselves what their restore
-  did not hold, instead of demanding the key). What the keys should name
-  is what decides the contents: the pins. They sit among the scenarios
-  in a file of 29 777 lines, so the fix is to move them to their own
-  module and hash that -- the packages' pins for `gala-debs-`, the
-  prebuilt programs' for `gala-prebuilt-` -- after which a branch that
-  adds a scenario shares both caches instead of replacing them.
 - **Three more tables scanned for a free slot**, the pattern the
   registry's arena no longer has (ARCHITECTURE "Registry"):
   `fs::ramfs`'s `slot`, `nt::object`'s handle tables and `net::tcp`'s

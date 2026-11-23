@@ -1575,22 +1575,30 @@ per run by the `debs` job (`cargo xtask fetch-debs`: every root's pinned
 packages, amd64 and arm64, and the prebuilts that are Ubuntu packages
 (glibc, libwayland-client, libffi, weston: `fetch_prebuilt` takes them
 from this cache), checked, the ones no longer pinned removed) into one
-cache, `gala-debs-<hash of xtask/src/main.rs>` (the newest restored first,
-so only new pins are downloaded); the boot shards restore it by that key
-or its prefix, keep it out of their own prebuilt caches, and fetch for
-themselves what the entry they got does not hold. Six shards each fetching
-them had Ubuntu's archive reset their connections whenever the scenarios
-moved between shards, which is what the one shared fetch is for -- but a
-cache is an optimisation and never a dependency, and demanding this one
-(`fail-on-cache-miss`) failed every shard of a rerun. Every key here ends
-in the hash of `xtask/src/main.rs`, the file a new boot scenario must
-change, so each branch writes its own set: six prebuilt caches of about
-900 MiB and the packages' 320 MiB, over 5 GiB for a branch, against a
-repository limit of 10 GiB. The limit is therefore always met and the
-least recently used entry always going, so a rerun of a run's failed jobs
--- which skips the `debs` job, there being nothing wrong with it -- can
-find the packages it wrote gone. ROADMAP, "CI caches keyed on what every
-branch changes", is the key that would be shared. CI fetches amd64
+cache, `gala-debs-<hash of xtask/src/pins/debs.rs>` (the newest restored
+first, so only new pins are downloaded); the boot shards restore it by
+that key or its prefix, keep it out of their own prebuilt caches, and
+fetch for themselves what the entry they got does not hold. Six shards
+each fetching them had Ubuntu's archive reset their connections whenever
+the scenarios moved between shards, which is what the one shared fetch
+is for -- but a cache is an optimisation and never a dependency, and
+demanding this one (`fail-on-cache-miss`) failed every shard of a rerun.
+A download cache's key hashes what decides its contents and nothing
+else: the pins, in `xtask/src/pins/` (`debs.rs`: LINUX_ROOTS and
+DEBS_ARM64; `prebuilt.rs`: PREBUILT and the Office source), the
+prebuilt caches (`gala-prebuilt-<shard>-` and the `linux` job's
+`gala-prebuilt-linux-`) hashing both, since the assembled Linux roots
+are kept in them. Keyed on `xtask/src/main.rs`, which a new boot
+scenario must change, every branch wrote its own set (six prebuilt
+caches of about 900 MiB and the packages' 320 MiB, over 5 GiB of the
+repository's 10 GiB), so eviction always ran and runs met cold caches:
+a run then downloads every program from its publisher, and one reset
+connection (python.org's) failed a shard. A pin therefore never goes
+back into main.rs, and `lint`'s test
+`the_download_caches_are_keyed_on_the_pins` fails a key that hashes
+anything else. Whatever a cache holds is still checked at use (each
+release's marker names its checksum and selection), so a restore by
+prefix is never stale. CI fetches amd64
 packages (and the prebuilts from Ubuntu's pool) through the mirror the
 runners' apt uses,
 `XTASK_UBUNTU_MIRROR=http://azure.archive.ubuntu.com/ubuntu`:
