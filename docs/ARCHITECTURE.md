@@ -28,6 +28,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/cmdline.rs        kernel command line parsing (host-tested)
   src/selftest.rs       in-kernel tests run at boot with `selftest`
   src/events.rs         the JSON event stream (`events=`)
+  src/virtio_console.rs the stream's transport by DMA ("The event stream's transport")
   src/flight.rs         flight recorder, watchdogs; statedump.rs: dumps on NMI
   src/failpoint.rs      fault injection (`failpoint=`); sim.rs: deterministic simulation
   src/clockctl.rs       clock control (`clock=`); replay.rs: record/replay
@@ -593,7 +594,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `wayland=on`, `wayland=trace`, `wayland=off` | the Wayland server at boot, listening on `/run/user/<uid>/wayland-0` ("Linux applications on the desktop (Wayland)"): on by default where the desktop has a shell (not the server profile; a screen or `presenter=`), off where desktops are bare; `on` starts it anyway, `off` never; `trace` also logs every request and event as `WAYLAND_DEBUG=1` prints them |
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in\|out\|note: ...`) |
 | `trace` | log every system call (arguments, status) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line). The console holds a line and writes it to port 0xe9 in one `rep outsb` (`arch::x86_64::debugcon`, `Port::write_all`), aarch64 one semihosting write a piece of a line; what the stream costs is the crossing and not the device, about 12 us a byte, which is what bounds how much of a run can be written (OBSERVABILITY "What the stream costs") |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line). The console holds a line and hands it to the virtio console when the machine has one (x86-64; "The event stream's transport"), else writes it to port 0xe9 in one `rep outsb` (`arch::x86_64::debugcon`, `Port::write_all`), aarch64 one semihosting write a piece of a line; through the port what the stream costs is the crossing, about 12 us a byte under KVM (OBSERVABILITY "What the stream costs") |
 | `stack_at=<service>[:<n>]` | the calling thread's user stack the first `n` times a process reaches that system call, as `stack:` lines (OBSERVABILITY "Stack captures"; `n` default 4, at most 512; the processes are the ones `events_pid=`/`events_match=` choose; scenario `stack_at_test`) |
 | `stack_from=<module>` | of those, only the calls a module whose name contains the text is on the stack of; the others are passed over without spending a capture (a service another thread reaches in a loop spends any count before the call in question; scenario `stack_at_from_test`) |
 | `stack_words=<n>` | how many words of the caller's stack a capture reads (default 128, at most 512): a service that keeps a large frame of its own, such as user32's `MessageBoxW`, puts the program's frames past the default (OBSERVABILITY "Stack captures") |
@@ -6479,6 +6480,48 @@ of their own, clients of it) is the yardstick.
   through GetProcAddress, so a stub shows up there as the delay-load
   exception 0xC06D007F with `dll!function` in the ledger as a missing
   export.
+
+## The event stream's transport
+
+`events=` writes JSON lines (`events.rs`); how they leave the machine
+is the transport's. x86-64's debug console (`arch::x86_64::debugcon`)
+holds a line until its newline and hands it to the virtio console
+(`virtio_console.rs`) when the machine has one, which every boot
+scenario's QEMU does; otherwise, and for the lines before the device
+starts, it writes the line to port 0xe9. aarch64 writes the stream to a
+file by semihosting (`events_file=`) and has no virtio console.
+
+- **Why**: under KVM every byte written to an I/O port leaves the
+  guest, `rep outsb` included, about 12 us each, so a line of 200 bytes
+  cost 2-3 ms and a traced run was its stream's length
+  (OBSERVABILITY "What the stream costs"). A line handed to the virtio
+  console is copied into a buffer and costs one notify.
+- **The device**: QEMU's `virtio-serial-pci` at slot 0x1e with one
+  `virtconsole` on port 0, both writing the same host file as the port
+  (`-chardev file,append=on` twice; xtask `add_event_devices`), so the
+  file holds the port's lines and then the device's, in order. The
+  driver asks no features (no MULTIPORT): port 0's transmit queue is
+  queue 1, 64 buffers of 1024 bytes (`arch::debugcon`'s line). It
+  polls, as every virtio driver here does: used buffers are taken back
+  on the next line, and a line that finds all 64 in flight waits for one.
+- **Started** right after PCI configuration space (`lib.rs`), before
+  the disk and any program, and said in the log: `events: the stream
+  goes through the virtio console at <bus:dev.fn>`.
+- **The end of a run**: `debugcon::flush` (before the summary) waits
+  until the device has taken every line it was handed, because QEMU's
+  exit device ends the process at once and a line is written to the
+  host's file only when its notify has been handled.
+- **When the device misbehaves** -- failed, asking for a reset, or not
+  taking a buffer back for a second, or not draining within a second
+  at the end -- it is given up on: a warning names it and how many lines
+  it took, and the lines after go to the port. Lines it held when given
+  up on are lost; xtask's `stream_complete` compares the file's lines
+  with the count in the summary (`events: N written: V through the
+  virtio console, P writes of the debug console's port`) for every run
+  from boot and fails one that lost any, saying how many.
+- **Not a ring per CPU**: lines from all CPUs share the debug console's
+  lock as before, so their order in the file is the order they were
+  written in. OT2's per-CPU rings would remove the lock, not a crossing.
 
 ## Diagnostics of stuck and crashed programs
 

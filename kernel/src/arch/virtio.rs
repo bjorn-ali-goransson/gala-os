@@ -161,6 +161,11 @@ impl Virtqueue {
         self.slot_size
     }
 
+    /// Whether the device holds any slot (has not used it yet).
+    pub fn busy(&self) -> bool {
+        self.in_flight != 0
+    }
+
     fn posted(&self, slot: u16) -> bool {
         self.in_flight & 1 << slot != 0
     }

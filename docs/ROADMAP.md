@@ -7257,24 +7257,12 @@ among the slowest hand-offs.
    (the unwind tables of x64 images). Still open of OT1's gaps: an
    entry event for every system call; times on serial lines; the boot's
    wall-clock start.
-   The rings are now also what the measurement asks for. An event
-   costs its bytes' crossing out of the guest and nothing else, about
-   12 us a byte: 2.1 ms for a 162-byte `import` event, the figure
-   `user/import_cost_test` and the `import_cost` scenario measure
-   (OBSERVABILITY "What the stream costs"). It is the crossing and not
-   the device -- the same stream to a port with no device behind it
-   costs the same -- and not the instruction either: a line written in
-   one `rep outsb` costs what its bytes cost, KVM leaving the guest
-   once a byte for string I/O. So a traced Word run is ten to thirty
-   times its own length, its events 2 ms apart, and every question
-   asked of the stream is first a question about what one can afford to
-   write. The way out is to stop crossing a byte at a time: the rings
-   handed to the host by DMA (virtio-serial, which QEMU writes to the
-   same `<image>.events.jsonl`), one exit a line or a batch of lines
-   rather than one an event's every byte. The debug console already
-   holds whole lines (`arch::x86_64::debugcon::Line`, with the host
-   tests that count the writes a line costs), which is what a batched
-   transport needs.
+   The stream already leaves x86-64 by DMA, a line a notify, through
+   a virtio console (ARCHITECTURE "The event stream's transport"):
+   through port 0xe9 an event cost its bytes' crossing, about 12 us a
+   byte under KVM (OBSERVABILITY "What the stream costs"). What the
+   rings add is no shared lock between CPUs, and batching several
+   lines into one notify.
 2. OT3: trace context carried through ntdll/kernel32 (a TEB slot) and
    ALPC/RPC; sockets and events signaled across processes as links like
    pipes and completion ports.

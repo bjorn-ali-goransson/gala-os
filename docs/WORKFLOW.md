@@ -536,7 +536,8 @@ xtask that change how a scenario boots:
   before believing either -- a timeout alone does not say which, and a
   scenario that is only slow says nothing about the code. A scenario
   whose length is a count times what the host charges for each unit
-  (`import_cost`: its events times what a KVM exit costs) is sized for
+  (`import_cost` was one: its events times what a KVM exit costs,
+  until the stream left by DMA) is sized for
   the slowest host that runs it, CI's runners, not the laptop it was
   measured on: a passing run's `in kernel` seconds in CI's log within
   a factor of two of the limit is a timeout waiting to happen.
