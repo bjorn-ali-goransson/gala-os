@@ -7,7 +7,97 @@
 //! across processes".
 
 use crate::window::{Hwnd, MAX_WINDOWS, window, with};
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+/// Whether this process has told the kernel it is input idle. Reported
+/// once: the kernel's latch is never cleared, because Windows answers
+/// WaitForInputIdle 0 for good once a process has been idle once,
+/// however busy it is afterwards (`waitidle_test`), so one system call
+/// per process is the whole cost of being waited for.
+static IDLE_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// A message wait is about to block with nothing in the queue: the
+/// process has finished starting and is waiting for input, which is what
+/// WaitForInputIdle waits for. Called by `window::wait_wake`, so every
+/// message wait reports it -- GetMessage, and
+/// MsgWaitForMultipleObjects(Ex) waiting on the queue beside its
+/// handles.
+pub(crate) fn report_idle() {
+    if IDLE_REPORTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // SAFETY: a plain system call, no arguments.
+    unsafe { GalaWindowIdle() };
+    crate::window::reached(b"user32.dll!GetMessage(the process is input idle)", 0);
+}
+
+/// WaitForInputIdle(hProcess, dwMilliseconds): waits until that process
+/// has finished starting and is waiting for input -- a thread of it
+/// waiting on an empty message queue, which the kernel latches when
+/// user32 there reports it (`report_idle`). 0 once it has, WAIT_TIMEOUT
+/// while it has not, WAIT_FAILED for a handle this cannot answer for.
+///
+/// Measured on Windows 11 24H2 (`waitidle_test`), where the answers are
+/// not the documented ones: a process with no message queue does not
+/// "return immediately" but waits the timeout out, and what counts as a
+/// GUI process is the subsystem byte in the image's PE header and
+/// nothing else -- a console program with its window up and its queue
+/// being pumped is still ERROR_NOT_GUI_PROCESS. Only the three errors
+/// below are ever set: 0, WAIT_TIMEOUT and a process that has ended
+/// leave the last error exactly as it was, so a caller cannot tell those
+/// two failures apart by GetLastError at all.
+#[unsafe(no_mangle)]
+pub extern "system" fn WaitForInputIdle(process: usize, ms: u32) -> u32 {
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    const WAIT_FAILED: u32 = 0xffff_ffff;
+    const ERROR_INVALID_HANDLE: u32 = 6;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    const ERROR_NOT_GUI_PROCESS: u32 = 1471;
+    const STATUS_SUCCESS: u32 = 0;
+    const STATUS_TIMEOUT: u32 = 0x0000_0102;
+    const STATUS_OBJECT_TYPE_MISMATCH: u32 = 0xc000_0024;
+    const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
+    const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
+    const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
+    const STATUS_PROCESS_IS_TERMINATING: u32 = 0xc000_010a;
+    // SAFETY: a plain system call; the handle is the caller's.
+    let status = unsafe { GalaWindowWaitIdle(process, ms) };
+    // Every answer leaves a row naming it: who waited for what, and what
+    // they were told. A program that stops here (Office's shared runtime
+    // waits for the process it starts) is then one row away from being
+    // explained, and the rows are bounded -- one per answer, counted.
+    let (answer, error, row): (u32, Option<u32>, &[u8]) = match status {
+        STATUS_SUCCESS => (0, None, b"user32.dll!WaitForInputIdle(idle)"),
+        STATUS_TIMEOUT => (WAIT_TIMEOUT, None, b"user32.dll!WaitForInputIdle(timed out)"),
+        STATUS_PROCESS_IS_TERMINATING => {
+            (WAIT_FAILED, None, b"user32.dll!WaitForInputIdle(the process has ended)")
+        }
+        STATUS_NOT_SUPPORTED => (
+            WAIT_FAILED,
+            Some(ERROR_NOT_GUI_PROCESS),
+            b"user32.dll!WaitForInputIdle(not a GUI process)",
+        ),
+        // A thread handle, which is the one place this function tells the
+        // two pseudo handles apart.
+        STATUS_OBJECT_TYPE_MISMATCH => (
+            WAIT_FAILED,
+            Some(ERROR_INVALID_PARAMETER),
+            b"user32.dll!WaitForInputIdle(not a process handle)",
+        ),
+        // A handle that is no handle, and one without the query right:
+        // Windows reads a missing right as a bad handle here, not as
+        // ERROR_ACCESS_DENIED.
+        STATUS_INVALID_HANDLE | STATUS_ACCESS_DENIED => {
+            (WAIT_FAILED, Some(ERROR_INVALID_HANDLE), b"user32.dll!WaitForInputIdle(a bad handle)")
+        }
+        _ => (WAIT_FAILED, Some(ERROR_INVALID_HANDLE), b"user32.dll!WaitForInputIdle(refused)"),
+    };
+    crate::window::reached(row, u64::from(status));
+    if let Some(e) = error {
+        crate::set_last_error(e);
+    }
+    answer
+}
 
 #[cfg_attr(
     target_arch = "x86",
@@ -29,6 +119,8 @@ unsafe extern "system" {
     fn GalaWindowPostThread(tid: u32, message: u32, wparam: u64, lparam: u64) -> u32;
     fn GalaWindowSendAbandon(id: u64) -> u32;
     fn GalaWindowFilter(hwnd: u64, message: u32, action: u32, ext: *mut u32) -> u32;
+    fn GalaWindowIdle() -> u32;
+    fn GalaWindowWaitIdle(process: usize, ms: u32) -> u32;
 }
 
 /// The kernel's answer when UIPI blocks a message (a lower integrity

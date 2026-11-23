@@ -28,7 +28,8 @@
  * _getdrive/_chdrive; what FileZilla Server's GUI imports: iswlower,
  * iswupper (and iswcntrl, iswgraph, iswascii), _wtol and difftime; what
  * Git for Windows' curl imports: rand_s (two draws differ), _sys_nerr
- * (43) and _sys_errlist (strerror's texts). Built against msvcrt
+ * (43) and _sys_errlist (strerror's texts); _snwprintf (what mingw's
+ * inline swprintf calls) and wcsrchr, which waitidle_test needs. Built against msvcrt
  * (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #define _CRT_RAND_S /* rand_s */
@@ -451,6 +452,40 @@ int main(void) {
     CHECK(_controlfp(_RC_NEAR, _MCW_RC) == 0x8001f);
     CHECK(_snprintf(small, sizeof small, "%d", 42) == 2 && strcmp(small, "42") == 0);
     CHECK(_snprintf(small, sizeof small, "%d", 123456) == -1);
+    /* _snwprintf: _snprintf's shape counted in characters. Measured
+     * here because the documented "returns -1 when truncated" is not the
+     * whole rule: an output that fills the buffer exactly is not
+     * terminated and still answers its length, and only a NULL buffer
+     * with a count of 0 measures -- a count of 0 with a buffer of its own
+     * is a truncation like any other. */
+    wchar_t wsmall[5];
+    CHECK(_snwprintf(wsmall, 5, L"%d", 42) == 2 && wcscmp(wsmall, L"42") == 0);
+    /* Truncated: the characters that fit, no terminator, -1. */
+    for (int i = 0; i < 5; i++) {
+        wsmall[i] = L'#';
+    }
+    CHECK(_snwprintf(wsmall, 5, L"%ls", L"123456") == -1);
+    CHECK(wsmall[0] == L'1' && wsmall[4] == L'5');
+    for (int i = 0; i < 5; i++) {
+        wsmall[i] = L'#';
+    }
+    CHECK(_snwprintf(wsmall, 1, L"%d", 42) == -1);
+    CHECK(wsmall[0] == L'4' && wsmall[1] == L'#');
+    /* Filled exactly: the characters, no terminator, and the length. */
+    for (int i = 0; i < 5; i++) {
+        wsmall[i] = L'#';
+    }
+    CHECK(_snwprintf(wsmall, 2, L"%d", 42) == 2);
+    CHECK(wsmall[0] == L'4' && wsmall[1] == L'2' && wsmall[2] == L'#');
+    /* A count of 0 with a buffer writes nothing and is a truncation. */
+    for (int i = 0; i < 5; i++) {
+        wsmall[i] = L'#';
+    }
+    CHECK(_snwprintf(wsmall, 0, L"%d", 42) == -1 && wsmall[0] == L'#');
+    /* NULL with a count of 0 is the measurement, as _snprintf's is. */
+    CHECK(_snwprintf(NULL, 0, L"%d", 42) == 2);
+    CHECK(_snwprintf(NULL, 0, L"%ls", L"abcdef") == 6);
+    CHECK(_snprintf(NULL, 0, "%d", 42) == 2);
     char mixed[] = "MiXeD 1";
     CHECK(_strlwr(mixed) == mixed && strcmp(mixed, "mixed 1") == 0);
     FILE *tmp = fopen("msvcrt_test.tmp", "w");
@@ -542,6 +577,11 @@ int main(void) {
     {
         const wchar_t *w = L"abc";
         CHECK(wcschr(w, L'b') == w + 1 && wcschr(w, L'z') == NULL && wcschr(w, 0) == w + 3);
+        /* wcsrchr: the last one, the terminator for 0, NULL for absent. */
+        const wchar_t *r = L"a.b.c";
+        CHECK(wcsrchr(r, L'.') == r + 3 && wcsrchr(r, L'a') == r);
+        CHECK(wcsrchr(r, L'z') == NULL && wcsrchr(r, 0) == r + 5);
+        CHECK(wcsrchr(L"", L'a') == NULL);
         char num[40];
         CHECK(_ultoa(4000000000UL, num, 16) == num && strcmp(num, "ee6b2800") == 0);
         CHECK(__mb_cur_max == 1);

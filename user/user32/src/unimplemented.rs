@@ -23,7 +23,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     SetCaretPos
     ShowCaret
     ValidateRgn
-    WaitForInputIdle
     keybd_event
     mouse_event
     DialogBoxParamW

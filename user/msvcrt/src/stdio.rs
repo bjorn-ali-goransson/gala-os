@@ -1698,14 +1698,20 @@ pub extern "C" fn _vsnprintf(buf: *mut u8, count: usize, fmt: *const u8, args: V
 }
 
 /// _vsnwprintf(buf, count, fmt, args): the wide version (counts in
-/// characters).
+/// characters), with `_vsnprintf`'s rules: the length, or -1 if it did
+/// not fit (then without a terminator), and a null buffer with a count of
+/// 0 measures. A count of 0 with a buffer of its own is a truncation like
+/// any other, which `msvcrt_test` measures.
 #[unsafe(no_mangle)]
 pub extern "C" fn _vsnwprintf(buf: *mut u16, count: usize, fmt: *const u16, args: VaList) -> i32 {
     with_utf8_format(fmt, |f| {
         let mut out = Out::wide(buf, count);
         format(&mut out, f, args, Style::msvcrt(true));
         let w = out.total;
-        if w < count {
+        if buf.is_null() && count == 0 {
+            // The documented way to measure: the length the output needs.
+            w as i32
+        } else if w < count {
             // SAFETY: room for the terminator.
             unsafe { *buf.add(w) = 0 };
             w as i32

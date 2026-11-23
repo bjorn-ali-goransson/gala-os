@@ -203,7 +203,7 @@ Excluded:
 |---|---|
 | network scenarios (`NET_SCENARIOS`: net_echo, winsock_test, go_http, nginx, nginx_master, nginx_tls, sshd_*, java_http, ...) | they need a network card and xtask's client (a TAP device or host sockets behind AFD would be needed) |
 | disk scenarios | no virtio-blk in a Linux process |
-| `NOT_IN_UM`: process_test, smprace_test, conpty_test, busybox, cmd_test, go_exec, logon_test, windows_across_test, uipi_test, shell32_test, winevent_test, uia_test | child processes: one NT process per Linux process |
+| `NOT_IN_UM`: process_test, smprace_test, conpty_test, busybox, cmd_test, go_exec, logon_test, windows_across_test, uipi_test, shell32_test, winevent_test, uia_test, waitidle_test | child processes: one NT process per Linux process |
 | `NOT_IN_UM`: system_test, session_test | run as SYSTEM (a boot option), and child processes |
 | kernel flags um does not apply: `as=system` (lsa_test, restricted_test, profile_test), `start=` (schannel_test's Nginx), `events=`, `wallpaper=`, ... | the `UM_FLAGS` rule above |
 | `NOT_IN_UM`: gui_test, gala_cli, console_window | need a screen (ROADMAP U5) |

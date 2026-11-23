@@ -8,7 +8,7 @@
 //! Wine's msvcrt (its `_setjmp3`/`longjmp`) as documentation.
 
 use crate::scan::vsscanf;
-use crate::stdio::{_vsnprintf, vfprintf, vfwprintf, vprintf, vsprintf};
+use crate::stdio::{_vsnprintf, _vsnwprintf, vfprintf, vfwprintf, vprintf, vsprintf};
 use crate::wide::{_execv, _execvp, _gala_vfscanf, _gala_vswprintf};
 use core::arch::{asm, naked_asm};
 
@@ -55,6 +55,8 @@ variadic! {
     sprintf(2) => vsprintf;
     /// _snprintf(buf, count, fmt, ...).
     _snprintf(3) => _vsnprintf;
+    /// _snwprintf(buf, count, fmt, ...) (counted in characters).
+    _snwprintf(3) => _vsnwprintf;
     /// fwprintf(file, fmt, ...).
     fwprintf(2) => vfwprintf;
     /// swprintf(buf, fmt, ...) (msvcrt's, without a count).

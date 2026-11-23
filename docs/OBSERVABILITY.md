@@ -596,6 +596,30 @@ that row is in the dump only when the filter freed the slot it took.
   with a number in it (ROADMAP OF). A name already registered is not
   this row: that is ERROR_CLASS_ALREADY_EXISTS and the program's own
   business. Scenario `wndclass_test`.
+  Input idleness (user32): every answer WaitForInputIdle gives leaves a
+  row naming it -- `user32.dll!WaitForInputIdle(idle)`, `(timed out)`,
+  `(the process has ended)`, `(not a GUI process)`, `(not a process
+  handle)`, `(a bad handle)` and `(refused)` -- all "reached", with the
+  kernel's status as the detail. A program that stops waiting for a
+  process it started (Office's shared runtime waits for one) is then one
+  row away from being explained, and the rows are bounded: one per
+  answer, counted. The reporting side is one row per process ever,
+  `user32.dll!GetMessage(the process is input idle)`, from the first
+  message wait the process makes, because the kernel's latch is set once
+  and never cleared (ARCHITECTURE "Windows across processes: input
+  idleness"). Scenarios `waitidle_test`, `wow64_waitidle_test`.
+  Credentials (advapi32): `advapi32.dll!CredEnumerateW(no credential
+  store)`, "unsupported", for a search gala has no store to answer.
+  The detail carries the flags in its high word and the filter's length
+  in its low one (a NULL filter is `u32::MAX`), so the row says what was
+  asked for without naming a credential -- nothing of a credential's
+  name or contents is ever recorded. The argument errors are "reached"
+  rows of their own, named by the case: `(an unknown flag)`, `(all
+  credentials, with a filter)`, `(a null out parameter)`. A free of a
+  buffer no CredEnumerateW handed out is
+  `advapi32.dll!CredFree(a buffer gala did not hand out)`, with the
+  pointer as the detail. Scenarios `credman_test`,
+  `wow64_credman_test`.
   Direct2D (d2d1): `d2d1.dll!<interface>::<method>`, "not
   implemented", for each method not built (CreateLayer,
   CreateCompatibleRenderTarget, ...); "unsupported" with the case in the
@@ -2147,6 +2171,16 @@ data first, which disarms the slot (below), so that one leaves a
   import is bound by the program's own helper on its first call, and a
   `GetProcAddress` result never goes through an IAT slot at all;
   neither is seen.
+- **64-bit processes only.** The arming is a system call gala's ntdll
+  makes in every process it starts (`GalaImports`, 0x7f2c), and that
+  service has no WOW64 descriptor: both of its operations pass
+  64-bit-shaped buffers, so a thunk for it needs a conversion of its
+  own rather than a row in `generic`'s table of argument kinds. A
+  32-bit process is answered STATUS_NOT_IMPLEMENTED and leaves
+  `wow64.dll!service 0x7f2c` in the ledger, which its ntdll lives with
+  -- nothing else of the process is affected -- so `imports=` reports
+  nothing for a program under WOW64, and that row is the reason rather
+  than a fault. Tracked in ROADMAP WOW.
 - **A stream is read per thread, and a window from the right
   record.** The records of every thread are one stream in time order,
   so the calls a pump makes on its own thread sit between the calls

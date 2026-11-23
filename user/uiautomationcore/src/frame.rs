@@ -313,8 +313,11 @@ extern "system" fn close(this: *mut Pattern) -> HResult {
     }
 }
 
-/// WaitForInputIdle: gala does not track input idleness; a window that is
-/// there counts as idle (success TRUE at once). gala's choice.
+/// WaitForInputIdle: a window that is there counts as idle (success TRUE
+/// at once), without consulting the kernel's input-idle latch, which
+/// user32's own WaitForInputIdle waits on (ARCHITECTURE "Windows across
+/// processes: input idleness"). gala's choice: a provider that waited
+/// would need a two-process test of its own (ROADMAP UIA).
 extern "system" fn wait_for_input_idle(this: *mut Pattern, _ms: i32, out: *mut i32) -> HResult {
     if out.is_null() {
         return E_POINTER;

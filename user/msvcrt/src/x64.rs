@@ -8,7 +8,7 @@
 //! build.rs.
 
 use crate::scan::vsscanf;
-use crate::stdio::{_vsnprintf, vfprintf, vfwprintf, vprintf, vsprintf};
+use crate::stdio::{_vsnprintf, _vsnwprintf, vfprintf, vfwprintf, vprintf, vsprintf};
 use crate::wide::{_execv, _execvp, _gala_vfscanf, _gala_vswprintf};
 
 // fprintf(file, fmt, ...): rcx = file, rdx = fmt, r8/r9 and the stack =
@@ -46,6 +46,16 @@ core::arch::global_asm!(
     "call {_vsnprintf}",
     "add rsp, 40",
     "ret",
+    // _snwprintf(buf, count, fmt, ...): _snprintf's shape, counted in
+    // characters.
+    ".globl _snwprintf",
+    "_snwprintf:",
+    "mov [rsp+32], r9",
+    "lea r9, [rsp+32]",
+    "sub rsp, 40",
+    "call {_vsnwprintf}",
+    "add rsp, 40",
+    "ret",
     // fwprintf(file, fmt, ...): fprintf's shape.
     ".globl fwprintf",
     "fwprintf:",
@@ -73,6 +83,7 @@ core::arch::global_asm!(
     vsprintf = sym vsprintf,
     vprintf = sym vprintf,
     _vsnprintf = sym _vsnprintf,
+    _vsnwprintf = sym _vsnwprintf,
 );
 
 // sscanf(input, fmt, ...): sprintf's shape (vsscanf).

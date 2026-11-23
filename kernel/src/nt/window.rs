@@ -188,6 +188,9 @@ struct Registry {
     /// Each process's queue event (GalaWindowListen), set when a message
     /// is posted or sent to it.
     listeners: Vec<(u32, ObjectRef)>,
+    /// Each process's input-idle latch (`Idle`), for the processes that
+    /// have gone idle or that a thread has waited for.
+    idle: Vec<Idle>,
     /// Messages sent to another thread's window, until their sender has
     /// the reply.
     sent: Vec<Sent>,
@@ -233,6 +236,25 @@ struct Filter {
     pid: u32,
     hwnd: u64,
     message: u32,
+}
+
+/// A process's "input idle" state, which WaitForInputIdle waits for:
+/// set once a thread of it has waited on an empty message queue
+/// (GalaWindowIdle, from user32's message wait). A latch and not a
+/// reading -- Windows answers 0 for good once a process has been idle
+/// once, however busy it is afterwards (`waitidle_test`) -- so nothing
+/// clears it while the process lives, and user32 reports it once per
+/// process. The entry is made by whichever comes first: the report, or a
+/// thread waiting for it.
+struct Idle {
+    pid: u32,
+    /// The latch itself.
+    idle: bool,
+    /// Set with the latch and never reset (a notification event), so
+    /// every thread waiting for this process wakes and a later one waits
+    /// not at all. Set without the latch when the process ends, so a
+    /// waiter wakes to find it gone.
+    event: ObjectRef,
 }
 
 /// Who sends or posts a message, for UIPI (User Interface Privilege
@@ -406,6 +428,7 @@ impl Windows {
             windows: Vec::new(),
             posted: Vec::new(),
             listeners: Vec::new(),
+            idle: Vec::new(),
             sent: Vec::new(),
             next_sent: 1,
             queues: Vec::new(),
@@ -585,16 +608,64 @@ impl Windows {
         self.0.lock().queues.iter().find(|&&(_, t)| t == tid).map(|&(p, _)| p)
     }
 
+    /// Whether process `pid` has been input idle (WaitForInputIdle): a
+    /// thread of it has waited on an empty message queue at least once.
+    pub fn is_idle(&self, pid: u32) -> bool {
+        self.0.lock().idle.iter().any(|i| i.pid == pid && i.idle)
+    }
+
+    /// The event set when process `pid` goes input idle, for a thread
+    /// about to wait for it (GalaWindowWaitIdle), and whether the latch
+    /// is set already -- then the event is set too and the wait ends at
+    /// once. The entry is made here when the process has not reported
+    /// yet, so a report that comes between this call and the wait is not
+    /// missed.
+    pub fn idle_event(&self, pid: u32) -> Result<(ObjectRef, bool), NtStatus> {
+        // Made before the lock, used only if the process has no entry.
+        let fresh = notification_event()?;
+        let mut r = self.0.lock();
+        if let Some(i) = r.idle.iter().find(|i| i.pid == pid) {
+            return Ok((i.event.clone(), i.idle));
+        }
+        r.idle
+            .try_push(Idle { pid, idle: false, event: fresh.clone() })
+            .map_err(|_| NtStatus::NO_MEMORY)?;
+        Ok((fresh, false))
+    }
+
+    /// Process `pid` has waited on an empty message queue: it is input
+    /// idle from now on and every thread waiting for it wakes
+    /// (GalaWindowIdle). Reporting it again is no error and costs
+    /// nothing: the latch is already set.
+    pub fn mark_idle(&self, pid: u32) -> Result<(), NtStatus> {
+        let fresh = notification_event()?;
+        let event = {
+            let mut r = self.0.lock();
+            match r.idle.iter_mut().find(|i| i.pid == pid) {
+                Some(i) if i.idle => return Ok(()),
+                Some(i) => {
+                    i.idle = true;
+                    i.event.clone()
+                }
+                None => {
+                    r.idle
+                        .try_push(Idle { pid, idle: true, event: fresh.clone() })
+                        .map_err(|_| NtStatus::NO_MEMORY)?;
+                    fresh
+                }
+            }
+        };
+        // Outside the registry's lock, as every other wake here is.
+        super::wait::set_signal(&event, 1);
+        Ok(())
+    }
+
     /// Queues a sent message for its window's thread: its id and the
     /// receiver's queue event to set. STATUS_INVALID_HANDLE for no window,
     /// STATUS_ACCESS_DENIED when UIPI blocks it (`passes`), STATUS_TIMEOUT
     /// for a hung receiver with SEND_ABORT_IF_HUNG.
     pub fn send(&self, req: Request) -> Result<(u64, Option<ObjectRef>), NtStatus> {
-        let done = KObject::new(ObjectBody::Event(Event {
-            kind: EventType::Notification,
-            dispatcher: Dispatcher::new(0),
-        }))
-        .map_err(|_| NtStatus::NO_MEMORY)?;
+        let done = notification_event()?;
         let mut r = self.0.lock();
         let (to_pid, to_tid) = r
             .windows
@@ -974,7 +1045,7 @@ impl Windows {
 
     /// A process ended: its windows go.
     pub fn process_ended(&self, pid: u32) {
-        {
+        let idle = {
             let mut r = self.0.lock();
             r.windows.retain(|w| w.pid != pid);
             r.posted.retain(|m| m.pid != pid);
@@ -983,6 +1054,14 @@ impl Windows {
             r.filters.retain(|f| f.pid != pid);
             // Its own sends go; sends to it fail (their senders wake).
             abandon_sends(&mut r, |m| m.from_pid == pid);
+            // Its input-idle latch goes with it, so a later process of
+            // the same id starts out not idle; a thread waiting for it
+            // wakes below to find it gone (WaitForInputIdle fails for an
+            // ended process, as on Windows).
+            r.idle.iter().position(|i| i.pid == pid).map(|at| r.idle.remove(at))
+        };
+        if let Some(i) = idle {
+            super::wait::set_signal(&i.event, 1);
         }
         self.prune_surfaces();
         self.fail_sends(|m| m.to_pid == pid);
@@ -1041,6 +1120,16 @@ pub struct Received {
     pub out_max: u32,
     /// How it was sent (SEND_NOTIFY, SEND_CALLBACK, ...).
     pub flags: u32,
+}
+
+/// A notification event for the registry's own waits: a send's reply,
+/// a process's input-idle latch.
+fn notification_event() -> Result<ObjectRef, NtStatus> {
+    KObject::new(ObjectBody::Event(Event {
+        kind: EventType::Notification,
+        dispatcher: Dispatcher::new(0),
+    }))
+    .map_err(|_| NtStatus::NO_MEMORY)
 }
 
 /// How many failed sends' senders one round of [`fail_sends`] wakes.
@@ -1337,5 +1426,55 @@ mod tests {
             assert_eq!(reg.take_reply(922, *id).map(|r| r.is_err()), Some(true));
         }
         reg.process_ended(921);
+    }
+
+    /// The input-idle latch WaitForInputIdle waits for: set once by the
+    /// process itself, never cleared while it lives (Windows answers 0
+    /// for good once a process has been idle once, however busy it is
+    /// afterwards: `waitidle_test`), and gone with the process, so a
+    /// later process of the same id starts out not idle.
+    #[test]
+    fn input_idle_is_a_latch_a_process_keeps_until_it_ends() {
+        let reg = Windows::new();
+        assert!(!reg.is_idle(901));
+        // A thread that waits before the process has reported gets an
+        // unset event and "not yet".
+        let (event, already) = reg.idle_event(901).unwrap();
+        assert!(!already);
+        assert_eq!(event.dispatcher().map(|d| d.signal_state()), Some(0));
+        // Every later waiter gets that same event, so one report wakes
+        // all of them (the entry is kept, not remade).
+        let (again, already) = reg.idle_event(901).unwrap();
+        assert!(!already);
+        crate::nt::wait::set_signal(&again, 1);
+        assert_eq!(event.dispatcher().map(|d| d.signal_state()), Some(1));
+        crate::nt::wait::set_signal(&again, 0);
+        // The report sets the latch and that event.
+        reg.mark_idle(901).unwrap();
+        assert!(reg.is_idle(901));
+        assert_eq!(event.dispatcher().map(|d| d.signal_state()), Some(1));
+        // A thread arriving afterwards is told so at once: no wait.
+        assert!(reg.idle_event(901).unwrap().1);
+        // Reporting twice is no error and clears nothing (user32 reports
+        // once per process, and the kernel does not depend on that).
+        reg.mark_idle(901).unwrap();
+        assert!(reg.is_idle(901));
+        // A process that never reported is not idle because another is.
+        assert!(!reg.is_idle(902));
+        // Its first report makes the entry, with no waiter to have made
+        // one, and is readable at once.
+        reg.mark_idle(902).unwrap();
+        assert!(reg.is_idle(902));
+        // The process ends: the latch goes and its waiters wake, to find
+        // it gone rather than idle.
+        reg.process_ended(901);
+        assert!(!reg.is_idle(901));
+        assert_eq!(event.dispatcher().map(|d| d.signal_state()), Some(1));
+        let (fresh, already) = reg.idle_event(901).unwrap();
+        assert!(!already);
+        assert_eq!(fresh.dispatcher().map(|d| d.signal_state()), Some(0));
+        reg.process_ended(901);
+        reg.process_ended(902);
+        assert!(reg.0.lock().idle.is_empty());
     }
 }
