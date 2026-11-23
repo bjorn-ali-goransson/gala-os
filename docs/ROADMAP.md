@@ -3484,8 +3484,9 @@ need gala's.
      Windows.Networking.Connectivity.NetworkInformation and
      Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator
      (not registered, recorded; REGDB_E_CLASSNOTREG, survived) and opens
-     an asynchronous wininet session (`wininet.dll!InternetOpenW(INTERNET_
-     FLAG_ASYNC)`, ERROR_NOT_SUPPORTED, recorded, survived). It then uses
+     an asynchronous wininet session (done: served, with its operations
+     answering ERROR_IO_PENDING and reporting REQUEST_COMPLETE;
+     `wininet_test` step 13). It then uses
      shlwapi's path helpers (done: PathIsUNCW, PathGetArgsW,
      PathGetCharTypeW, PathGetDriveNumberW, StrRetToBufW, every shlwapi
      function it imports; `shlwapi_test` and its x86 twin
@@ -4268,8 +4269,7 @@ need gala's.
      functions its imports lack (shell32's
      SHGetSettings, user32's CheckRadioButton,
      iphlpapi's CreateSortedAddressPairs); BITS (the
-     BackgroundCopyManager it asks for: absent, survived); WinINet's
-     asynchronous sessions (INTERNET_FLAG_ASYNC: setup.exe opens one),
+     BackgroundCopyManager it asks for: absent, survived);
      RtlConvertDeviceFamilyInfoToString in ntdll, urlmon's
      ProcessUrlAction from the zones' default policies (the Internet Settings\Zones keys), a run with
      direct egress (the TLS chain of Microsoft's servers to a public
@@ -4453,9 +4453,32 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    "WinHTTP and WinINet"); x86 too (`wow64_wininet_test`), with
    InternetQueryOptionW, InternetSetStatusCallbackW, InternetGetCookieExW
    (no cookie store: none) and the A functions ODT's setup.exe imports.
-   Still open there, besides winhttp's list: the other A functions, the
-   cookie store (Set-Cookie kept, sent and answered), FTP, the cache,
-   InternetTimeFrom/ToSystemTimeW.
+   An asynchronous session (INTERNET_FLAG_ASYNC) is served too
+   (`wininet_test` step 13, written from Windows 11 26100 and passing
+   there before gala was asked for any of it; ODT's setup.exe and Word
+   both open one): the session remembers the flag, its connections and
+   requests inherit it and are still made in the call (HANDLE_CREATED on
+   the calling thread), and the operation that goes to the server
+   answers ERROR_IO_PENDING -- whether it succeeds or fails -- with its
+   outcome in INTERNET_STATUS_REQUEST_COMPLETE's INTERNET_ASYNC_RESULT
+   (dwResult 1 for a send, the new handle for InternetOpenUrlW, or 0
+   with the error: ERROR_INTERNET_CANNOT_CONNECT for a closed port,
+   _NAME_NOT_RESOLVED for a host that does not resolve); a handle with
+   no callback or a context of 0 is told nothing at all, and the
+   response is in hand regardless, so HttpQueryInfoW,
+   InternetQueryDataAvailable and InternetReadFile answer synchronously;
+   InternetQueryOptionW(INTERNET_OPTION_ASYNC) is
+   ERROR_CALL_NOT_IMPLEMENTED, there as on any other session. One
+   difference stays, recorded where it is met
+   (`wininet.dll!HttpSendRequestW(in the background)`): gala's engine is
+   synchronous, so the operation finishes -- and reports its completion
+   -- inside the call, where Windows runs it on a thread of its own and
+   completes it after the call has returned; a caller that blocks for a
+   request it was told was pending is the one way that can be felt.
+   Still open there, besides winhttp's list: running an asynchronous
+   operation in the background rather than inside the call (recorded
+   where met), the other A functions, the cookie store (Set-Cookie kept,
+   sent and answered), FTP, the cache, InternetTimeFrom/ToSystemTimeW.
 3. Done: curl and Git over Schannel. curl.se's own Windows build
    (8.23.0_8, PREBUILT `curl`) has LibreSSL as its only TLS backend (no
    Schannel, no MultiSSL), so it runs as that (`curl`: its CA list is
@@ -6158,7 +6181,9 @@ wow64.dll converts 32-bit system calls in user mode).
   STARTUPINFO and the descriptor-inheritance block with 4-byte
   pointers, the 32-bit time_t of `time`/`gmtime`/`localtime`/`mktime`/
   `ctime`/`difftime`, and what mingw's startup imports (`__p__fmode`,
-  `__p__commode`).
+  `__p__commode`, and the accessors only the 32-bit msvcrt.dll has:
+  `__p___initenv`, `__p___mb_cur_max`, `__p__iob`, which its newer
+  C runtime calls instead of reading the variables).
   **The 32-bit advapi32** (`wow64_adv_test`, a Rust program): gala's
   advapi32 and bcryptprimitives built for i686, shipped as
   `C:\Windows\SysWOW64\advapi32.dll` and `bcryptprimitives.dll`

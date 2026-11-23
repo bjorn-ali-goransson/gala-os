@@ -49,6 +49,25 @@
  * 12. InternetGetCookieExW for a URL nothing has set a cookie for: FALSE,
  *    ERROR_NO_MORE_ITEMS; for about:blank ERROR_INVALID_PARAMETER (Wine's
  *    internet.c test_cookie_url and test_cookie_attrs).
+ * 13. An asynchronous session (InternetOpenW with INTERNET_FLAG_ASYNC):
+ *    the flag opens a session like any other, and its connection and
+ *    request are made synchronously (HANDLE_CREATED as in 11). What
+ *    changes is the operation that goes to the server:
+ *    HttpSendRequestW answers FALSE with ERROR_IO_PENDING and reports
+ *    INTERNET_STATUS_REQUEST_COMPLETE with an INTERNET_ASYNC_RESULT of
+ *    dwResult 1 and dwError 0; afterwards HttpQueryInfoW,
+ *    InternetQueryDataAvailable and InternetReadFile answer as they do
+ *    on a synchronous session (the response is in hand). InternetOpenUrlW
+ *    answers NULL with ERROR_IO_PENDING and hands its new handle to the
+ *    completion, in dwResult. InternetQueryOptionW(INTERNET_OPTION_ASYNC)
+ *    is ERROR_CALL_NOT_IMPLEMENTED.
+ *    Not asserted, because the two systems differ and both are within
+ *    what WinINet promises: which thread the completion arrives on and
+ *    whether it arrives before the call returns. Windows runs the
+ *    operation on a pool thread and completes it after the return;
+ *    gala's engine finishes it inside the call and reports the
+ *    completion from there (ARCHITECTURE "WinHTTP and WinINet"). A
+ *    program told "pending" waits for the completion either way.
  * The test retries its first request while Nginx starts. Steps 3 and 5,
  * which need the test CA trusted, run last (after 11, before 12) and print
  * the status and error they got, so a machine that cannot trust the CA
@@ -73,6 +92,13 @@ static DWORD events[MAX_EVENTS];
 static DWORD_PTR contexts[MAX_EVENTS];
 static volatile LONG nevents;
 
+/* The last completion a callback was given, and the event it sets (13).
+   The callback may run on a thread of WinINet's own, so the waiter reads
+   these only after the event. */
+static HANDLE completed;
+static DWORD_PTR complete_result;
+static DWORD complete_error;
+
 static void CALLBACK status_callback(HINTERNET h, DWORD_PTR context, DWORD status, LPVOID info, DWORD len) {
     (void)h;
     LONG i = InterlockedIncrement(&nevents) - 1;
@@ -88,6 +114,12 @@ static void CALLBACK status_callback(HINTERNET h, DWORD_PTR context, DWORD statu
     case INTERNET_STATUS_REQUEST_SENT:
     case INTERNET_STATUS_RESPONSE_RECEIVED:
         CHECK(len == sizeof(DWORD) && *(DWORD *)info > 0);
+        break;
+    case INTERNET_STATUS_REQUEST_COMPLETE:
+        CHECK(len == sizeof(INTERNET_ASYNC_RESULT) && info != NULL);
+        complete_result = ((INTERNET_ASYNC_RESULT *)info)->dwResult;
+        complete_error = ((INTERNET_ASYNC_RESULT *)info)->dwError;
+        CHECK(completed != NULL && SetEvent(completed));
         break;
     }
 }
@@ -375,6 +407,55 @@ int main(void) {
     len = sizeof cookie / sizeof cookie[0];
     CHECK(!InternetGetCookieExW(L"about:blank", NULL, cookie, &len, 0, NULL));
     CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+
+    /* 13. */
+    completed = CreateEventW(NULL, FALSE, FALSE, NULL);
+    CHECK(completed != NULL);
+    HINTERNET as = InternetOpenW(agent, INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, INTERNET_FLAG_ASYNC);
+    CHECK(as != NULL);
+    CHECK(InternetSetStatusCallbackW(as, status_callback) == NULL);
+    DWORD async_option = 0;
+    size = sizeof async_option;
+    CHECK(!InternetQueryOptionW(as, INTERNET_OPTION_ASYNC, &async_option, &size));
+    CHECK(GetLastError() == ERROR_CALL_NOT_IMPLEMENTED);
+    nevents = 0;
+    c = InternetConnectW(as, L"127.0.0.1", 8080, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0x33);
+    CHECK(c != NULL);
+    r = HttpOpenRequestW(c, L"GET", L"/", NULL, NULL, NULL, INTERNET_FLAG_RELOAD, 0x44);
+    CHECK(r != NULL);
+    complete_result = 0;
+    complete_error = ERROR_INVALID_FUNCTION;
+    CHECK(!HttpSendRequestW(r, NULL, 0, NULL, 0));
+    CHECK(GetLastError() == ERROR_IO_PENDING);
+    CHECK(WaitForSingleObject(completed, 30000) == WAIT_OBJECT_0);
+    CHECK(complete_result == 1 && complete_error == 0);
+    status = response(r, body, sizeof body, 1);
+    CHECK(status == 200 && strstr(body, "Welcome to nginx!") != NULL);
+    /* The connection and the request were still reported as they are made,
+       on the thread that made them (11's statuses, 13's contexts). */
+    static const DWORD want_async[] = {
+        INTERNET_STATUS_HANDLE_CREATED, INTERNET_STATUS_HANDLE_CREATED,
+        INTERNET_STATUS_REQUEST_COMPLETE,
+    };
+    static const DWORD_PTR want_async_context[] = { 0x33, 0x44, 0x44 };
+    CHECK(in_order(want_async, want_async_context, 3));
+    CHECK(InternetCloseHandle(r));
+    CHECK(InternetCloseHandle(c));
+    /* InternetOpenUrlW: pending, and its handle comes with the completion. */
+    complete_result = 0;
+    complete_error = ERROR_INVALID_FUNCTION;
+    CHECK(InternetOpenUrlW(as, L"http://127.0.0.1:8080/", NULL, 0, INTERNET_FLAG_RELOAD, 0x55) == NULL);
+    CHECK(GetLastError() == ERROR_IO_PENDING);
+    CHECK(WaitForSingleObject(completed, 30000) == WAIT_OBJECT_0);
+    CHECK(complete_error == 0 && complete_result != 0);
+    HINTERNET opened = (HINTERNET)complete_result;
+    status = response(opened, body, sizeof body, 1);
+    CHECK(status == 200 && strstr(body, "Welcome to nginx!") != NULL);
+    CHECK(InternetCloseHandle(opened));
+    CHECK(InternetSetStatusCallbackW(as, NULL) == status_callback);
+    CHECK(InternetCloseHandle(as));
+    CHECK(CloseHandle(completed));
+
     printf(NAME ": ok\n");
     return 0;
 }

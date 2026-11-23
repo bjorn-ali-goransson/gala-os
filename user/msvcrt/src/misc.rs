@@ -340,6 +340,15 @@ pub extern "C" fn ___mb_cur_max_func() -> i32 {
 #[unsafe(no_mangle)]
 pub static __mb_cur_max: i32 = 1;
 
+/// __p___mb_cur_max: the address of `__mb_cur_max`, which 32-bit
+/// msvcrt.dll exports (`__p___initenv` in lib.rs says why). Ours is
+/// constant: one locale, one byte, and nothing writes through it.
+#[cfg(all(target_arch = "x86", not(ucrt)))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __p___mb_cur_max() -> *mut i32 {
+    (&raw const __mb_cur_max).cast_mut()
+}
+
 /// _ismbblead(c): whether `c` is the lead byte of a multibyte character
 /// in the multibyte code page. Ours is single-byte (as `__mb_cur_max`
 /// says; on en-US Windows it is ANSI 1252): no byte leads one, 0.

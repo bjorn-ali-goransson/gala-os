@@ -4578,7 +4578,8 @@ runtime of mingw-w64 programs.
   and __CxxFrameHandler3); `_except_handler3/4` are not there yet.
 - **FILE**: `struct _iobuf` (48 bytes on x64, 32 on x86, typed with
   pointer-sized fields); `_iob` is exported (20 FILEs, `__iob_func`
-  returns it; 32-bit programs import the data), its first three the
+  returns it, and on x86 `__p__iob` as well, which 32-bit msvcrt.dll
+  exports beside it and the 64-bit one does not), its first three the
   console streams with `_file` 0, 1, 2. Streams from fopen are a FILE
   (`_cnt` 0, because mingw's inline getc reads it and calls `_filbuf`)
   followed by a CRITICAL_SECTION, as msvcrt.dll's `_FILEX`: mingw's
@@ -6920,8 +6921,25 @@ HTTP on 127.0.0.1:8080.
   session's (exactly a DWORD) and changes nothing: Passport's sign-in is
   retired and Windows returns its 401 to the caller (Wine's
   test_passport_auth on Windows), as gala does.
-- **Limits** (recorded where met): asynchronous sessions
-  (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED);
+- **Asynchronous WinINet sessions** (INTERNET_FLAG_ASYNC): the session,
+  its connections and its requests are made in the call, as on Windows;
+  the operation that goes to the server (HttpSendRequestW,
+  InternetOpenUrlW) answers ERROR_IO_PENDING -- whether it succeeded or
+  failed -- and reports INTERNET_STATUS_REQUEST_COMPLETE with an
+  INTERNET_ASYNC_RESULT: what it returned (1 for a send, the new handle
+  for InternetOpenUrlW) with dwError 0, or dwResult 0 with the error. A
+  handle whose context is 0, or which has no callback, reports nothing,
+  as on Windows, and the response is in hand all the same
+  (HttpQueryInfoW, InternetQueryDataAvailable and InternetReadFile answer
+  synchronously). The engine is synchronous, so the operation finishes --
+  and reports its completion -- inside the call, where Windows runs it on
+  a thread of its own and completes it after the call returns; that is
+  recorded where it is met (`wininet.dll!HttpSendRequestW(in the
+  background)`) and is what step 13 of `wininet_test` deliberately leaves
+  unasserted.
+- **Limits** (recorded where met): asynchronous WinHTTP sessions
+  (WINHTTP_FLAG_ASYNC: ERROR_NOT_SUPPORTED) and running a WinINet
+  asynchronous operation in the background (above);
   WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW
   (`gala_stubs` stubs); named
   proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;

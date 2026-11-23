@@ -216,6 +216,14 @@ pub extern "C" fn __iob_func() -> *mut u8 {
     (&raw mut _iob).cast()
 }
 
+/// __p__iob(): the same array, under the name 32-bit msvcrt.dll exports
+/// beside `__iob_func` (`__p___initenv` in lib.rs says why).
+#[cfg(all(target_arch = "x86", not(ucrt)))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __p__iob() -> *mut u8 {
+    (&raw mut _iob).cast()
+}
+
 /// The stream behind a FILE pointer (a console slot or one of ours).
 fn stream<'a>(file: *mut u8) -> Option<&'a mut Stream> {
     let base = (&raw mut _iob) as usize;

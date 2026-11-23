@@ -16,8 +16,18 @@
 //! queries); this crate is WinINet's functions, flags and error codes
 //! over it.
 //!
+//! A session opened INTERNET_FLAG_ASYNC is served: its connections and
+//! requests are made in the call, as on Windows, and the operation that
+//! goes to the server (HttpSendRequestW, InternetOpenUrlW) answers
+//! ERROR_IO_PENDING and reports INTERNET_STATUS_REQUEST_COMPLETE
+//! (`callback.rs`). The engine itself is synchronous, so the operation is
+//! finished -- and its completion reported -- inside the call, where
+//! Windows runs it on a thread of its own and completes it after the call
+//! returns; a program told "pending" is answered either way, and the
+//! difference is recorded where it is met (`completed`).
+//!
 //! Limits (each recorded in the ledger where a program meets it):
-//! asynchronous operation (INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED),
+//! running an asynchronous operation in the background (above),
 //! proxies (INTERNET_OPEN_TYPE_PROXY), FTP and Gopher, authentication (user names
 //! and passwords are not sent), the cache (every request goes to the
 //! server, as with INTERNET_FLAG_RELOAD), cookies (none kept or sent;
@@ -92,6 +102,10 @@ const DLL: http_client::Dll = "wininet.dll";
 
 const ERROR_INVALID_PARAMETER: u32 = err::INVALID_PARAMETER;
 const ERROR_NOT_SUPPORTED: u32 = err::NOT_SUPPORTED;
+/// What every operation on an asynchronous session answers.
+const ERROR_IO_PENDING: u32 = 997;
+/// What Windows answers for INTERNET_OPTION_ASYNC.
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 const ERROR_INSUFFICIENT_BUFFER: u32 = err::INSUFFICIENT_BUFFER;
 const ERROR_INTERNET_INCORRECT_HANDLE_TYPE: u32 = err::INCORRECT_HANDLE_TYPE;
 const ERROR_INTERNET_SEC_CERT_DATE_INVALID: u32 = 12037;
@@ -116,6 +130,7 @@ const INTERNET_OPTION_SEND_TIMEOUT: u32 = 5;
 const INTERNET_OPTION_RECEIVE_TIMEOUT: u32 = 6;
 const INTERNET_OPTION_DATA_SEND_TIMEOUT: u32 = 7;
 const INTERNET_OPTION_DATA_RECEIVE_TIMEOUT: u32 = 8;
+const INTERNET_OPTION_ASYNC: u32 = 30;
 const INTERNET_OPTION_SECURITY_FLAGS: u32 = 31;
 const INTERNET_OPTION_USER_AGENT: u32 = 41;
 const INTERNET_OPTION_CONTEXT_VALUE: u32 = 45;
@@ -203,10 +218,60 @@ fn handle(r: Result<Kind, u32>, context: usize, parent: usize) -> usize {
 }
 
 fn new_handle(r: Result<Kind, u32>, context: usize, parent: usize) -> Result<usize, u32> {
-    let callback = if parent == 0 { 0 } else { HANDLES.get(parent).map_or(0, |p| p.callback) };
-    let h = HANDLES.insert(Object { kind: r?, context, callback })?;
+    // A child takes its parent's callback and its asynchrony.
+    let (callback, asynchronous) = match parent {
+        0 => (0, false),
+        p => HANDLES.get(p).map_or((0, false), |o| (o.callback, o.asynchronous)),
+    };
+    let h = HANDLES.insert(Object { kind: r?, context, callback, asynchronous })?;
     callback::created(&callback::observer(parent, callback, context), h);
     Ok(h)
+}
+
+/// Ends InternetOpenW: the session handle, which remembers whether it was
+/// opened for asynchronous operation (INTERNET_FLAG_ASYNC). A session has
+/// no parent, so there is no HANDLE_CREATED for it.
+fn session_handle(r: Result<Kind, u32>, asynchronous: bool) -> usize {
+    let h =
+        r.and_then(|kind| HANDLES.insert(Object { kind, context: 0, callback: 0, asynchronous }));
+    match h {
+        Ok(h) => {
+            set_error(0);
+            h
+        }
+        Err(e) => {
+            set_error(e);
+            0
+        }
+    }
+}
+
+/// Whether `h` belongs to a session opened INTERNET_FLAG_ASYNC.
+fn asynchronous(h: usize) -> bool {
+    HANDLES.get(h).is_ok_and(|o| o.asynchronous)
+}
+
+/// Reports an operation's completion on an asynchronous session's handle
+/// (INTERNET_STATUS_REQUEST_COMPLETE: what it returned, or 0 and the error
+/// it failed with) and gives back the error the call itself answers:
+/// ERROR_IO_PENDING, which is what Windows answers for such an operation
+/// whether it succeeds or fails -- the outcome arrives in the completion
+/// (measured on 26100: a send to a port nobody listens on is
+/// ERROR_IO_PENDING with dwError ERROR_INTERNET_CANNOT_CONNECT in the
+/// completion).
+///
+/// `what` is recorded where it is met: the operation ran inside the call,
+/// not on a thread of its own, which is the one difference a program can
+/// see here (ROADMAP: WinINet's asynchronous sessions).
+fn completed(o: Option<&http_client::Observer>, what: &[u8], result: Result<usize, u32>) -> u32 {
+    missing(what, 0);
+    if let Some(o) = o {
+        match result {
+            Ok(v) => callback::request_complete(o, v, 0),
+            Err(e) => callback::request_complete(o, 0, code(e)),
+        }
+    }
+    ERROR_IO_PENDING
 }
 
 /// A handle's callback as the engine's observer.
@@ -245,6 +310,10 @@ struct Object {
     context: usize,
     /// The status callback (0: none; `callback`).
     callback: usize,
+    /// The session was opened INTERNET_FLAG_ASYNC (inherited by its
+    /// connections and requests): its operations answer ERROR_IO_PENDING
+    /// and report their completion (`completed`).
+    asynchronous: bool,
 }
 
 impl Object {
@@ -275,6 +344,10 @@ fn headers_text(p: *const u16, len: u32) -> Result<Vec<u16>, u32> {
     wide(p, if len == u32::MAX { None } else { Some(len as usize) })
 }
 
+/// INTERNET_FLAG_ASYNC opens a session like any other and is remembered
+/// on it: its operations answer ERROR_IO_PENDING and report their
+/// completion (`completed`, and the crate's own documentation for what
+/// gala does inside the call that Windows does on a thread of its own).
 #[unsafe(no_mangle)]
 pub extern "system" fn InternetOpenW(
     agent: *const u16,
@@ -284,10 +357,6 @@ pub extern "system" fn InternetOpenW(
     flags: u32,
 ) -> usize {
     let r = (|| {
-        if flags & INTERNET_FLAG_ASYNC != 0 {
-            missing(b"InternetOpenW(INTERNET_FLAG_ASYNC)", flags.into());
-            return Err(ERROR_NOT_SUPPORTED);
-        }
         if flags & INTERNET_FLAG_FROM_CACHE != 0 {
             // No cache: every request goes to the server.
             missing(b"InternetOpenW(INTERNET_FLAG_OFFLINE)", flags.into());
@@ -317,7 +386,7 @@ pub extern "system" fn InternetOpenW(
             redirect_rules: RedirectRules::WinInet,
         }))
     })();
-    handle(r, 0, 0)
+    session_handle(r, flags & INTERNET_FLAG_ASYNC != 0)
 }
 
 #[unsafe(no_mangle)]
@@ -436,7 +505,7 @@ pub extern "system" fn HttpSendRequestW(
     optional: *const u8,
     optional_length: u32,
 ) -> i32 {
-    done((|| {
+    let sent = (|| {
         let r = request_observed(h)?;
         let headers = headers_text(headers, headers_length)?;
         let optional: &[u8] = if optional.is_null() || optional_length == 0 {
@@ -448,7 +517,16 @@ pub extern "system" fn HttpSendRequestW(
         // WinINet's send includes the response's status line and headers.
         r.send(&headers, optional, optional.len() as u64)?;
         r.receive()
-    })())
+    })();
+    if asynchronous(h) {
+        // The response is in hand either way: what the caller is told is
+        // that the operation is under way, and the completion says how it
+        // went (1 as dwResult for a send, as on Windows).
+        let o = observer_of(h).ok();
+        let r = sent.map(|()| 1usize);
+        return done(Err(completed(o.as_ref(), b"HttpSendRequestW(in the background)", r)));
+    }
+    done(sent)
 }
 
 #[unsafe(no_mangle)]
@@ -631,6 +709,22 @@ pub extern "system" fn InternetOpenUrlW(
             r.send(&[], &[], 0)?;
             r.receive()
         });
+        if asynchronous(session) {
+            // The caller never sees this handle returned: it arrives
+            // in the completion, as dwResult (measured on 26100). A
+            // handle whose request failed is closed, as on the
+            // synchronous path: the caller has no way to close one it
+            // was never given.
+            let o = observer_of(h).ok();
+            let result = match sent {
+                Ok(()) => Ok(h),
+                Err(e) => {
+                    let _ = close(h);
+                    Err(e)
+                }
+            };
+            return Err(completed(o.as_ref(), b"InternetOpenUrlW(in the background)", result));
+        }
         if let Err(e) = sent {
             let _ = close(h);
             return Err(e);
@@ -868,6 +962,18 @@ pub extern "system" fn InternetQueryOptionW(
                     *len = size_of::<usize>() as u32;
                 }
                 return Ok(());
+            }
+            INTERNET_OPTION_ASYNC => {
+                // Windows does not implement this query, on an
+                // asynchronous session or any other (measured on 26100:
+                // FALSE, ERROR_CALL_NOT_IMPLEMENTED, the length zeroed).
+                // SAFETY: the caller's length.
+                unsafe {
+                    if !len.is_null() {
+                        *len = 0;
+                    }
+                }
+                return Err(ERROR_CALL_NOT_IMPLEMENTED);
             }
             _ => {
                 missing(b"InternetQueryOptionW", option.into());

@@ -215,6 +215,17 @@ pub extern "C" fn __p__commode() -> *mut i32 {
     &raw mut _commode
 }
 
+/// __p___initenv: the address of `__initenv`. 32-bit msvcrt.dll exports
+/// accessors beside those variables (`__p___initenv`, `__p___mb_cur_max`
+/// and `__p__iob`, in its export table and not in the 64-bit one's), and
+/// mingw-w64's 32-bit startup code calls them rather than read the
+/// variables, so a program built with it does not start without them.
+#[cfg(all(target_arch = "x86", not(ucrt)))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __p___initenv() -> *mut *mut *mut u8 {
+    &raw mut __initenv
+}
+
 /// _acmdln: the command line, narrowed (set when the DLL loads; MinGW's
 /// startup code for GUI programs reads it).
 #[unsafe(no_mangle)]
