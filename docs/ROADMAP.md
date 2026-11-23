@@ -2025,31 +2025,68 @@ need gala's.
    Word's own crash shape (3 frames unwound, 1 with no unwind data, 0
    handlers asked).
 
-   Word now puts its splash window on the screen -- the Office splash,
-   "Word", "Starting...", Word's icon in the taskbar, 7 windows of its
-   own with `MsoSplash` among them. It does not finish starting, and
-   what ends it is named in the crash report: **the delay load of
-   `WTSAPI32.dll!WTSRegisterSessionNotificationEx`**, which gala's
-   wtsapi32 does not export (it has the pair without the `Ex`). The
-   delay-load helper raises 0xc06d007f from Mso40UIwin32client under
-   WWLIB's startup, 16 frames unwind and 5 handlers are asked -- three
-   of them passing it on -- and none takes it, so WINWORD ends at 33 s
-   and consolerun with it. On Windows the function is there and nothing
-   is raised, so the fix is the export, not the unwind:
-   `WTSRegisterSessionNotificationEx` and
-   `WTSUnRegisterSessionNotificationEx` in `user/wtsapi32`, measured by
-   `office_api_test`, which already covers that DLL. Another run of the
-   same scenario ended at 34 s on 0xe0000002 raised from
-   Mso30win32client inside a user APC (24 frames, 5 handlers asked,
-   none taking it): Word reaching a different gap first, not a
-   different kind of gap. The miss itself is in the ledger --
-   `wtsapi32.dll!WTSRegisterSessionNotificationEx`, `missing export`,
-   one hit -- and that is where it hid: the triage prints the ledger's
-   top five by hits out of 445 entries, and the entry that ended the
-   run had a single hit, 6400 lines below the crash report that named
-   it. A `missing export` is always a function gala should have and
-   never the program's doing, so the triage names every one of them,
-   which is the other half of this piece of work.
+   The delay load that ended Word next is answered: gala's wtsapi32
+   exports `WTSRegisterSessionNotificationEx` and
+   `WTSUnRegisterSessionNotificationEx` beside the pair without the
+   `Ex`, which is the one WWLIB delay-loads. `hServer` is ignored:
+   WTS_CURRENT_SERVER_HANDLE is the only handle a caller can hold while
+   WTSOpenServer, which is what hands out any other, is not exported.
+   Every registration leaves a ledger line of its own ("unsupported",
+   the caller's dwFlags as the detail), because gala sends no
+   WM_WTSSESSION_CHANGE -- its session never connects, disconnects or
+   locks -- so a program whose startup waits for one has that line and
+   nothing else to say why. `office_api_test` registers and unregisters
+   a window of its own in both forms, for NOTIFY_FOR_THIS_SESSION and
+   NOTIFY_FOR_ALL_SESSIONS; without the implementation the program does
+   not load at all (STATUS_ENTRYPOINT_NOT_FOUND in 66 ms, both missing
+   imports in the ledger). The run that follows holds no 0xc06d007f
+   anywhere: both forms are reached, at 37.0 s and 41.0 s, and recorded.
+
+   What ends Word now is 400 ms after that registration and is Word's
+   own report: `Mso30win32client.dll` raises 0xe0000002 through
+   kernel32's RaiseException from a user APC, 24 frames unwind and 9
+   handlers are asked -- four of them passing it on -- and none takes
+   it, so WINWORD ends 33.0 s into its own run with consolerun behind
+   it. One window of Word's own reaches the screen, unnamed; the run
+   ends before the splash. The unwind itself is sound this time: the
+   single frame with `no unwind data found` is `NtQuerySystemTime`'s
+   16-byte syscall stub, the rip the APC interrupted, a leaf that needs
+   no entry (ntdll's `.pdata` starts above its 209 stubs).
+
+   The nearest named gap, 127 ms before the raise, is **not** what
+   Office is reporting: `advapi32.dll!CredEnumerateW`, a missing export
+   at the end of a long identity stretch
+   (`Identity/ServiceAuthInfoCache`, `IdentityCRL`,
+   `CredStoreKeyToAuthScheme`, and `WebAuthenticationCoreManager`, which
+   RoGetActivationFactory refuses). A throwaway export that answers as
+   Windows answers a user with nothing stored -- FALSE with
+   ERROR_NOT_FOUND -- was measured against the whole run: the function
+   leaves the list of functions gala lacks, Office asks it and goes on,
+   and the same 0xe0000002 is raised 650 ms later than before (33.7 s
+   against 33.0 s into Word's own run). A gap next to a crash is a
+   suspect, not a cause, and a probe run costs less than a credential
+   store would have. What raises it is still unnamed; a stack capture on
+   the raise (OBSERVABILITY "Stack captures": `stack_at=` on
+   kernel32's RaiseException with `stack_from=mso30win32client`) is what
+   names a caller without a record typed by hand, and is the next step.
+
+   The credential store remains a gap of its own: CredReadW, CredWriteW,
+   CredDeleteW and CredFree are in advapi32's `unimplemented_exports!`
+   and end the process when called, and CredEnumerateW is not listed
+   even there, so a probe for it gets NULL. It is work for the program
+   that needs it -- a poison stub behind a function Office has just
+   found is worse than the miss that led to it -- and `advapi32_test` is
+   where it will be measured.
+
+   That this gap cost a run to find is why the triage names every
+   missing export and import the ledger holds, however few its hits
+   (the busiest thirty, named in full). A function gala lacks is not
+   like the other gaps: it is always one gala should have, never the
+   program's own doing, and a single hit is enough to end a program.
+   The line is 131 entries long in this run and
+   `advapi32.dll!CredEnumerateW x1` is on it, while the ledger's top
+   five by hits, out of 463 entries, names none of the three functions
+   that have ended Word so far.
 
    Who suspended a thread is now recorded (`nt/thread.rs`,
    OBSERVABILITY "Suspensions", `user/suspend_test`): every raise and
@@ -2059,14 +2096,16 @@ need gala's.
    or parked, together with the rip it is parked at, and a refused
    suspension or resume is recorded with the status the caller is
    answered with. What it says about Word so far is that nothing
-   mysterious stops its main thread: tid 16's only suspension up to the
-   crash is the ordinary one, created suspended by consolerun's
-   CreateProcess (kernel32+0x30d5d) and resumed at once, and
-   OfficeClickToRun starts 25 threads of its own the same way -- which
-   is why that pair is counted and not printed. The suspended main
-   thread the 900 s run's dump showed is past the crash above, so it
-   has not been seen with the record armed; when Word runs that far
-   again the dump will name the cause instead of a bare count. Loud in
+   mysterious stops its main thread: tid 16 is created suspended by
+   consolerun's CreateProcess (kernel32+0x30d5d) and resumed at once,
+   and OfficeClickToRun starts 25 threads of its own the same way --
+   which is why that pair is counted and not printed. The suspended main
+   thread the 900 s run's dump showed has a culprit of its own shape
+   now: tid 276 suspends tid 16 through kernel32's SuspendThread
+   (+0x6fd7) and resumes it at once (+0x62d7), 400 ms before the crash
+   above, and tid 272 suspends itself the same way -- so a run that
+   parks tid 16 for good names the thread that did it instead of
+   leaving a bare count. Loud in
    the same stretch, and not yet tied to anything: Word asks again and
    again for the WinRT identity factory
    `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`,

@@ -10,6 +10,15 @@
 //!   documentation); WTSFreeMemory frees the lists. WTSQueryUserToken
 //!   (the same task asks for the console user's token) without
 //!   SeTcbPrivilege: ERROR_PRIVILEGE_NOT_HELD, as documented.
+//! - wtsapi32's session notifications (Word's WWLIB registers for them
+//!   while it starts, through the Ex form, which is a delay load:
+//!   ROADMAP OF; Microsoft's documentation of
+//!   WTSRegisterSessionNotification and
+//!   WTSRegisterSessionNotificationEx and of their Un pair): a window
+//!   of this process registers and unregisters, TRUE each time, for
+//!   NOTIFY_FOR_THIS_SESSION and NOTIFY_FOR_ALL_SESSIONS, the Ex form
+//!   with WTS_CURRENT_SERVER_HANDLE, and the same window takes both
+//!   forms.
 //! - userenv's CreateEnvironmentBlock and DestroyEnvironmentBlock (the
 //!   same task builds the console user's environment; 64-bit; Wine's
 //!   dlls/userenv/tests/userenv.c test_create_env, run on Windows): with
@@ -73,6 +82,10 @@ unsafe extern "system" {
     ) -> i32;
     fn WTSFreeMemory(p: *mut SessionInfo);
     fn WTSQueryUserToken(session: u32, token: *mut usize) -> i32;
+    fn WTSRegisterSessionNotification(hwnd: usize, flags: u32) -> i32;
+    fn WTSUnRegisterSessionNotification(hwnd: usize) -> i32;
+    fn WTSRegisterSessionNotificationEx(server: usize, hwnd: usize, flags: u32) -> i32;
+    fn WTSUnRegisterSessionNotificationEx(server: usize, hwnd: usize) -> i32;
 }
 
 #[cfg_attr(
@@ -104,6 +117,39 @@ unsafe extern "system" {
     fn SetSecurityDescriptorDacl(sd: *mut u8, present: i32, acl: *mut u8, defaulted: i32) -> i32;
     fn InitializeAcl(acl: *mut u8, size: u32, revision: u32) -> i32;
     fn MakeSelfRelativeSD(abs: *const u8, rel: *mut u8, len: *mut u32) -> i32;
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "user32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "user32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    #[allow(clippy::too_many_arguments)]
+    fn CreateWindowExW(
+        ex_style: u32,
+        class: *const u16,
+        name: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        parent: usize,
+        menu: usize,
+        instance: usize,
+        param: usize,
+    ) -> usize;
+    fn DestroyWindow(hwnd: usize) -> i32;
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn GetModuleHandleW(name: *const u16) -> usize;
 }
 
 /// WTS_SESSION_INFOW/A.
@@ -167,6 +213,38 @@ fn sessions(c: &mut Checks) -> Result<(), u32> {
         let mut token = 0usize;
         let ok = WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token) != 0;
         c.fails(ok, 1314)?; // ERROR_PRIVILEGE_NOT_HELD
+    }
+    Ok(())
+}
+
+/// The session notifications WWLIB registers for while Word starts,
+/// which it asks for by the Ex names (ROADMAP OF). gala sends none --
+/// its session never connects, disconnects or locks -- so each
+/// registration leaves an "unsupported" ledger line; what is checked
+/// here is that the four functions are there and answer as Microsoft
+/// documents.
+fn notifications(c: &mut Checks) -> Result<(), u32> {
+    /// WTS_CURRENT_SERVER_HANDLE: the server this process runs on.
+    const CURRENT_SERVER: usize = 0;
+    const NOTIFY_FOR_THIS_SESSION: u32 = 0;
+    const NOTIFY_FOR_ALL_SESSIONS: u32 = 1;
+    let class: [u16; 8] = super::w("STATIC");
+    let title: [u16; 8] = super::w("wts");
+    // SAFETY: a window of this process of a system class (no class of
+    // our own to register), destroyed below; the registrations are the
+    // documented calls with that window.
+    unsafe {
+        let instance = GetModuleHandleW(core::ptr::null());
+        let hwnd =
+            CreateWindowExW(0, class.as_ptr(), title.as_ptr(), 0, 0, 0, 16, 16, 0, 0, instance, 0);
+        c.ok(hwnd != 0, super::GetLastError().into())?;
+        for flags in [NOTIFY_FOR_THIS_SESSION, NOTIFY_FOR_ALL_SESSIONS] {
+            c.eq(WTSRegisterSessionNotificationEx(CURRENT_SERVER, hwnd, flags) as u64, 1)?;
+            c.eq(WTSUnRegisterSessionNotificationEx(CURRENT_SERVER, hwnd) as u64, 1)?;
+            c.eq(WTSRegisterSessionNotification(hwnd, flags) as u64, 1)?;
+            c.eq(WTSUnRegisterSessionNotification(hwnd) as u64, 1)?;
+        }
+        c.eq(DestroyWindow(hwnd) as u64, 1)?;
     }
     Ok(())
 }
@@ -457,6 +535,8 @@ pub fn c2r_service(c: &mut Checks) -> Result<(), u32> {
     // Each part announced, so a crash on Windows names the part it was in.
     super::info("part sessions", 0);
     sessions(c)?;
+    super::info("part notifications", 0);
+    notifications(c)?;
     super::info("part build_root", 0);
     build_root(c)?;
     super::info("part file_id", 0);

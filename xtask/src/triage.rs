@@ -170,6 +170,29 @@ fn ledger(serial: &str) -> Vec<(u64, String)> {
     v
 }
 
+/// Every `missing export` and `missing import` the ledger holds:
+/// (hits, service), busiest first. These are named in full, however few
+/// hits each has, because they are not like the other gaps: a missing
+/// function is always one gala should have, never the program's own
+/// doing, and a single hit is enough to end a program -- the delay load
+/// of `wtsapi32.dll!WTSRegisterSessionNotificationEx` ended Word's
+/// startup with one hit, nowhere near `ledger`'s top five by hits
+/// (ROADMAP OF).
+fn missing_functions(serial: &str) -> Vec<(u64, String)> {
+    let mut merged: BTreeMap<String, u64> = BTreeMap::new();
+    for line in gaps(serial) {
+        let what = field(line, "what").unwrap_or("");
+        if what != "missing export" && what != "missing import" {
+            continue;
+        }
+        let hits = field(line, "hits").and_then(|h| h.parse().ok()).unwrap_or(1);
+        *merged.entry(field(line, "service").unwrap_or("?").to_string()).or_default() += hits;
+    }
+    let mut v: Vec<(u64, String)> = merged.into_iter().map(|(k, h)| (h, k)).collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    v
+}
+
 /// The NT threads of the last state or hang dump, one line each.
 fn dumped_threads(serial: &str) -> Vec<String> {
     let lines: Vec<&str> = serial.lines().map(text).collect();
@@ -398,6 +421,17 @@ pub fn triage(serial: &str, events: Option<&str>, facts: &Facts) -> String {
             top.join("; ")
         )
         .ok();
+    }
+    let lacking = missing_functions(serial);
+    if !lacking.is_empty() {
+        let shown: Vec<String> =
+            lacking.iter().take(30).map(|(h, name)| format!("{name} x{h}")).collect();
+        let how_many = if shown.len() == lacking.len() {
+            format!("all {}", lacking.len())
+        } else {
+            format!("the busiest {} of {}", shown.len(), lacking.len())
+        };
+        writeln!(o, "triage: functions gala lacks (ledger, {how_many}): {}", shown.join("; ")).ok();
     }
     // The state dump (xtask asked on a timeout) or the hang dump.
     if let Some(begin) = plain.iter().find(|l| l.starts_with("statedump: begin")) {
@@ -641,6 +675,25 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
         );
         has("triage: last calls of tid 8 (flight recorder): NtCreateEvent, NtWaitForSingleObject");
         assert!(!t.contains("no \"statedump: end\""));
+    }
+
+    #[test]
+    fn every_missing_function_is_named_however_few_its_hits() {
+        let log = "[info ] ledger: {\"service\":\"user32.dll!Foo\",\"what\":\"missing export\",\"detail\":0,\"hits\":900,\"first\":10,\"last\":20}
+[info ] ledger: {\"service\":\"NtOpenFile\",\"what\":\"unsupported\",\"detail\":\"0x1\",\"hits\":5000,\"first\":1,\"last\":2}
+[info ] ledger: {\"service\":\"wtsapi32.dll!WTSRegisterSessionNotificationEx\",\"what\":\"missing export\",\"detail\":0,\"hits\":1,\"first\":40190,\"last\":40190}
+[info ] ledger: {\"service\":\"gdi32.dll!Bar(imported by WWLIB.DLL)\",\"what\":\"missing import\",\"detail\":0,\"hits\":1,\"first\":5,\"last\":5}
+";
+        let t = triage(log, None, &Facts::default());
+        // The one hit at 40 s is named beside the one hit 900 times, and
+        // a gap of another kind is not.
+        assert!(
+            t.contains(
+                "triage: functions gala lacks (ledger, all 3): user32.dll!Foo x900; gdi32.dll!Bar(imported by WWLIB.DLL) x1; wtsapi32.dll!WTSRegisterSessionNotificationEx x1"
+            ),
+            "{t}"
+        );
+        assert!(!t.lines().any(|l| l.starts_with("triage: functions") && l.contains("NtOpenFile")));
     }
 
     #[test]
