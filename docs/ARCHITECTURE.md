@@ -963,6 +963,17 @@ Invariants:
   `set/take_pending_continue`).
 - Every lock that may be held while preemptible is an `IrqMutex`: the
   timer interrupt then only preempts code that holds no locks.
+- Preemption never blocks a thread. One preempted between
+  `prepare_wait` and `wait` (already `Waiting`) is queued as ready, its
+  `Waiting` state kept aside (`Thread::preempted_wait`); when it runs
+  again it is `Waiting` again, unless a `wake` came meanwhile (its
+  `wait` then returns at once) or its deadline passed (`TimedOut`).
+  The code between the two halves may be what makes the thread
+  wakeable: the Linux personality records a thread as its signals'
+  sleeper after `prepare` (`lx::wait::block`), and a shell preempted
+  there, blocked as if in `wait`, slept through its children's SIGCHLD
+  for good (`arm_lx_xdesktop`'s sh in `wait`; the selftest
+  `preempted_waiter_runs_on_to_wait`).
 
 ## NT personality
 

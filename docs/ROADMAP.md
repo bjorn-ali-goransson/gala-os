@@ -525,7 +525,8 @@ time, instead of waiting for flaky scenarios to point at each one.
   itself: `sched::schedule` panics when the thread giving up its CPU
   still holds a lock.
 - Checked and found sound: the scheduler's `prepare_wait`/`wait`/`wake`
-  protocol (preemption between them included), `on_cpu`, KArc's counts,
+  protocol (preemption between them: it does not block the thread,
+  ARCHITECTURE "Threads and scheduling"), `on_cpu`, KArc's counts,
   the heap's and frame allocator's single locks, keyed events,
   semaphores (`update_signal`), APC queueing against the alertable
   flag, termination requests against `wake_if_terminating`,
