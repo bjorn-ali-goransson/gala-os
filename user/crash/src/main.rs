@@ -33,10 +33,38 @@
 //! where it queued it from, and **that** thread's last calls: the
 //! failing NtClose just before the queueing is what says whose they are.
 
+//! With the argument `continued_other` (and ntdll, scenario
+//! `crash_continued_other`) two threads make the withdrawal meet
+//! another thread's note. A process has one note, so the order is
+//! arranged to be the one that matters: the swallowing thread reports
+//! its exception, the dying thread reports its own (which takes the
+//! slot), and only then does the swallowing thread's filter withdraw.
+//! It must withdraw its own and nothing else, because what is left in
+//! the slot is the note the crash report is written from -- and the
+//! dying thread raised its exception in user mode, so the kernel never
+//! saw a fault and has nothing else to describe it with. The report
+//! naming 0xe0000044 and the thread that raised it is what says the
+//! withdrawal left it alone.
+//!
+//! With the argument `continued` (and ntdll, scenario
+//! `crash_continued`) nothing dies: a top-level filter returns
+//! EXCEPTION_CONTINUE_EXECUTION, the faulting instruction is retried and
+//! the process goes on to exit 0. This is the exception that leaves
+//! nothing behind -- no handler took it, no crash report describes it,
+//! and ntdll's ledger row is on the death path it never reaches -- which
+//! is what Office's shared code does to the exceptions it swallows. So
+//! the kernel must say what was continued past, with its code and
+//! address, at the moment ntdll withdraws the note
+//! (nt::crashreport::continued). The fault is a write to a page this
+//! program made read-only, and the filter makes it writable before
+//! continuing: the retried store then succeeds, which is what proves
+//! execution really was continued rather than the process merely
+//! surviving.
+
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use ntrt::{Handle, NtStatus, find_export, find_ntdll, peb};
 
@@ -62,6 +90,226 @@ static WAITING: AtomicU32 = AtomicU32::new(0);
 extern "system" fn filter(_pointers: *mut u8) -> i32 {
     ntrt::print("crash: the top-level filter ends the process\r\n");
     ntrt::exit(FILTER_STATUS)
+}
+
+/// What a filter returns to have the faulting instruction retried.
+const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
+
+/// What a filter returns to say it did not take the exception, which
+/// ends the process with it.
+const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+
+/// The code `continued_other`'s dying thread raises: as `RAISED`, a
+/// continuable customer code no runtime of its own raises, and distinct
+/// from it so a run says which mode raised.
+const RAISED_BY_OTHER: u32 = 0xe000_0044;
+
+/// How long one thread of `continued_other` waits for the other before
+/// giving up and saying so: a wait that cannot end is a test that says
+/// nothing.
+const WAIT_MS: i64 = 10_000;
+
+/// 1 once `continued_other`'s swallower is in the filter with its note
+/// reported.
+static SWALLOWING: AtomicU32 = AtomicU32::new(0);
+/// 1 once the dying thread's note is the one in the process's slot.
+static REPORTED: AtomicU32 = AtomicU32::new(0);
+/// 1 once the swallower's filter has withdrawn its own note and the
+/// process has carried on.
+static WITHDRAWN: AtomicU32 = AtomicU32::new(0);
+/// 1 once the dying thread's filter has let the process end.
+static DEAD: AtomicU32 = AtomicU32::new(0);
+
+/// What `continued` writes to the page it faults on, and reads back
+/// afterwards: the retried store must have gone through.
+const WRITTEN: u32 = 0x5a5a_5a5a;
+
+/// The page `continued` faults on, for its filter to make writable
+/// (0 until it is allocated).
+static PAGE: AtomicUsize = AtomicUsize::new(0);
+
+/// The filter of `continued`: it makes the page the store faulted on
+/// writable and has the store retried, so the process carries on past an
+/// exception no handler took.
+extern "system" fn continuing(_pointers: *mut u8) -> i32 {
+    let page = PAGE.load(Ordering::SeqCst);
+    let (status, _old) = ntrt::protect(page, 0x1000, ntrt::PAGE_READWRITE);
+    if status != 0 {
+        ntrt::print("crash: the filter could not make the page writable\r\n");
+        ntrt::exit(2)
+    }
+    ntrt::print("crash: the top-level filter continues execution\r\n");
+    EXCEPTION_CONTINUE_EXECUTION
+}
+
+/// `continued`: an exception nobody handles that the process carries on
+/// past, and so the only kind that would otherwise leave no record at
+/// all. A read-only page is written to, the filter makes it writable and
+/// continues, and the retried store goes through.
+fn continued() -> u32 {
+    let set = find_ntdll().and_then(|n| find_export(n, b"RtlSetUnhandledExceptionFilter"));
+    let Some(set) = set else {
+        ntrt::print("crash: no RtlSetUnhandledExceptionFilter\r\n");
+        return 2;
+    };
+    // SAFETY: the documented signature.
+    let set: extern "system" fn(usize) = unsafe { core::mem::transmute(set) };
+    let (status, base, _) =
+        ntrt::allocate(0, 0x1000, ntrt::MEM_COMMIT | ntrt::MEM_RESERVE, ntrt::PAGE_READONLY);
+    if status != 0 || base == 0 {
+        ntrt::print("crash: no page to fault on\r\n");
+        return 2;
+    }
+    PAGE.store(base, Ordering::SeqCst);
+    set(continuing as *const () as usize);
+    ntrt::print("crash: writing to a read-only page\r\n");
+    // SAFETY: a committed page of this process; the write faults because
+    // it is read-only, and the filter makes it writable before the store
+    // is retried.
+    unsafe { core::ptr::write_volatile(base as *mut u32, WRITTEN) };
+    // SAFETY: as above, and readable either way.
+    let seen = unsafe { core::ptr::read_volatile(base as *const u32) };
+    if seen != WRITTEN {
+        ntrt::print("crash: the retried write left ");
+        ntrt::write_file(ntrt::stdout(), &ntrt::hex32(seen));
+        ntrt::print("\r\n");
+        return 1;
+    }
+    ntrt::print("crash: the write that faulted went through; ok\r\n");
+    0
+}
+
+/// `continued_other`: two threads, so that a filter's withdrawal is
+/// made to meet another thread's note. There is one note in a process,
+/// and the order is arranged to be the one that matters: the swallower
+/// reports first, the dying thread reports second (taking the slot),
+/// and only then does the swallower's filter withdraw. What it
+/// withdraws must be its own and nothing else -- the note left in the
+/// slot is the one the crash report is about to be written from, and
+/// nothing else in the run would have it, because the dying thread
+/// raised its exception in user mode and the kernel never saw a fault.
+///
+/// The swallower is the main thread (an access violation it continues
+/// past, as in `continued`); the dying thread raises `RAISED_BY_OTHER`,
+/// which nothing handles, and the process ends with it. One top-level
+/// filter serves both and tells them apart by the exception's code.
+fn continued_other() -> u32 {
+    let set = find_ntdll().and_then(|n| find_export(n, b"RtlSetUnhandledExceptionFilter"));
+    let Some(set) = set else {
+        ntrt::print("crash: no RtlSetUnhandledExceptionFilter\r\n");
+        return 2;
+    };
+    // SAFETY: the documented signature.
+    let set: extern "system" fn(usize) = unsafe { core::mem::transmute(set) };
+    let (status, base, _) =
+        ntrt::allocate(0, 0x1000, ntrt::MEM_COMMIT | ntrt::MEM_RESERVE, ntrt::PAGE_READONLY);
+    if status != 0 || base == 0 {
+        ntrt::print("crash: no page to fault on\r\n");
+        return 2;
+    }
+    PAGE.store(base, Ordering::SeqCst);
+    set(sharing as *const () as usize);
+    let (status, _, _) = ntrt::create_thread(raiser, 0, false);
+    if status != 0 {
+        ntrt::print("crash: no raiser thread\r\n");
+        return 2;
+    }
+    ntrt::print("crash: the swallower writes to a read-only page\r\n");
+    // SAFETY: a committed page of this process; the write faults because
+    // it is read-only, and the filter makes it writable before the store
+    // is retried.
+    unsafe { core::ptr::write_volatile(base as *mut u32, WRITTEN) };
+    // SAFETY: as above, and readable either way.
+    let seen = unsafe { core::ptr::read_volatile(base as *const u32) };
+    if seen != WRITTEN {
+        ntrt::print("crash: the retried write did not go through\r\n");
+        return 1;
+    }
+    // The withdrawal has happened: the raiser's filter may end the
+    // process now, and this thread has nothing left to do but wait for
+    // it to.
+    ntrt::print("crash: the swallower carried on; the raiser may die now\r\n");
+    WITHDRAWN.store(1, Ordering::SeqCst);
+    if !until(&DEAD, "the raiser's filter to let the process end") {
+        return 3;
+    }
+    // The filter has returned EXCEPTION_CONTINUE_SEARCH; the process
+    // ends on the dispatcher's way out of it, which is a moment later.
+    // This thread must not outlive it and must not race it either, so it
+    // waits out the same bound and only then says it is still here.
+    let deadline = ntrt::now_ms() + WAIT_MS;
+    while ntrt::now_ms() < deadline {
+        ntrt::delay(PAUSE);
+    }
+    ntrt::print("crash: the raiser did not end the process?!\r\n");
+    1
+}
+
+/// The thread that dies: it waits until the swallower's filter is in,
+/// so that its own note is the one in the slot when the swallower
+/// withdraws, then raises a code nothing handles.
+extern "C" fn raiser(_arg: usize) -> ! {
+    if !until(&SWALLOWING, "the swallower's filter") {
+        ntrt::exit(3)
+    }
+    ntrt::print("crash: the raiser raises 0xe0000044, which nothing handles\r\n");
+    raise_bare(RAISED_BY_OTHER);
+    ntrt::print("crash: the raiser's raise returned?!\r\n");
+    ntrt::exit(1)
+}
+
+/// The one top-level filter of `continued_other`, which both threads
+/// reach: the access violation is the swallower's and is continued past,
+/// the raised code is the dying thread's and is not. Each waits for the
+/// other, so that the two exceptions meet in the order that puts the
+/// dying thread's note under the swallower's withdrawal.
+extern "system" fn sharing(pointers: *mut u8) -> i32 {
+    // SAFETY: EXCEPTION_POINTERS: the record's address first, and the
+    // record starts with its ExceptionCode.
+    let code = unsafe { *(*(pointers as *const *const u32)) };
+    if code == RAISED_BY_OTHER {
+        // The slot now holds this thread's note. The swallower may
+        // withdraw its own, and must leave this one alone.
+        ntrt::print("crash: the raiser's filter has reported its exception\r\n");
+        REPORTED.store(1, Ordering::SeqCst);
+        if !until(&WITHDRAWN, "the swallower to withdraw its note") {
+            ntrt::exit(3)
+        }
+        ntrt::print("crash: the raiser's filter lets the process end\r\n");
+        DEAD.store(1, Ordering::SeqCst);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    let page = PAGE.load(Ordering::SeqCst);
+    let (status, _old) = ntrt::protect(page, 0x1000, ntrt::PAGE_READWRITE);
+    if status != 0 {
+        ntrt::print("crash: the filter could not make the page writable\r\n");
+        ntrt::exit(2)
+    }
+    SWALLOWING.store(1, Ordering::SeqCst);
+    // Not past the raiser's report: before it, the slot holds this
+    // thread's note and the withdrawal would be of its own, which is
+    // the easy case and not the one under test.
+    if !until(&REPORTED, "the raiser to report its exception") {
+        ntrt::exit(3)
+    }
+    ntrt::print("crash: the swallower's filter continues execution\r\n");
+    EXCEPTION_CONTINUE_EXECUTION
+}
+
+/// Waits for `flag`, for at most `WAIT_MS`: a wait that cannot end is a
+/// test that says nothing, so it says what it was waiting for instead.
+fn until(flag: &AtomicU32, what: &str) -> bool {
+    let deadline = ntrt::now_ms() + WAIT_MS;
+    while flag.load(Ordering::SeqCst) == 0 {
+        if ntrt::now_ms() > deadline {
+            ntrt::print("crash: waited 10 s for ");
+            ntrt::print(what);
+            ntrt::print("\r\n");
+            return false;
+        }
+        ntrt::delay(PAUSE);
+    }
+    true
 }
 
 /// Whether the command line's last word is `word`.
@@ -197,6 +445,12 @@ fn apc() -> u32 {
 }
 
 fn main() -> u32 {
+    if arg_is(*b"continued_other") {
+        return continued_other();
+    }
+    if arg_is(*b"continued") {
+        return continued();
+    }
     if arg_is(*b"raise") {
         return raise();
     }

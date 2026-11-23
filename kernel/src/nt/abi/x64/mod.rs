@@ -496,9 +496,25 @@ pub(in crate::nt) fn create_wow64_thread(
 /// process's crash report, printed when it ends (nt::crashreport).
 pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     let (record, context) = (arg!(call, 0), arg!(call, 1));
+    let status = unhandled_note(call);
+    // ntdll's dispatcher does not look at the status, so a report the
+    // kernel could not read would leave no trace of itself.
+    if status != NtStatus::SUCCESS && record != 0 {
+        crate::nt::crashreport::unread(&call.process, record, context, "part");
+    }
+    status
+}
+
+/// The note itself (`gala_unhandled_exception`, which records what this
+/// refuses to read).
+fn unhandled_note(call: &mut Call<'_>) -> NtStatus {
+    let (record, context) = (arg!(call, 0), arg!(call, 1));
     let walk = arg!(call, 2);
     if record == 0 {
-        *call.process.unhandled_exception.lock() = None;
+        // The top-level filter continued execution, so the process
+        // carries on: the note goes, and the exception it swallowed is
+        // recorded now or never (nt::crashreport::continued).
+        crate::nt::crashreport::continued(&call.process);
         return NtStatus::SUCCESS;
     }
     // EXCEPTION_RECORD: code +0, address +0x10, parameter count +0x18,

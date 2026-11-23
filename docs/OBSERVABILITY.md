@@ -1104,8 +1104,49 @@ top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
 "ended with status S after an unhandled exception C"; a filter that
-continues execution withdraws it. Scenarios `crash`, `crash_dispatched`
-and `crash_filtered`. An exception in 32-bit code (a WOW64 process, CS
+continues execution withdraws it, and the withdrawal is said out loud as
+it happens:
+
+```
+exception continued: crash.exe (pid 4) thread 8: its top-level filter continued past an unhandled 0xc0000005 (access violation) at 0x140001579 (crash.exe+0x1579), writing address 0x20000
+```
+
+That line, and a ledger row beside it (`GalaUnhandledException`, "an
+exception the top-level filter continued past", so a long run's gaps
+carry it too), are the whole record of such an exception. Nothing else
+in the run would hold it: no crash report is ever written, and the
+ledger row ntdll writes is on its death path, so a program that carries
+on past an exception nobody handled used to leave nothing at all behind
+-- which is what Office's shared code does.
+
+A report the kernel could not read is said out loud as well, because
+ntdll's dispatcher does not look at the status it gets back and would
+carry on as if the note had been kept:
+
+```
+exception report unread: crash.exe (pid 4) thread 12: the record of ntdll's report (record 0x3ff98, context 0x3fbe0) could not be read, so no note is kept and no crash report will describe this exception
+```
+
+with a ledger row beside it. **An EXCEPTION_RECORD is only as long as the
+parameters it carries**, so it is read a word at a time and never as a
+block of its full size: a record that lands at the top of a thread's
+stack has fewer bytes above it than that, and ARM64 read the whole of it,
+failed and kept no note -- so an exception that went on to end the
+process was described by nothing at all. The CONTEXT beside it is one
+size and is read whole.
+
+**A process keeps one note**, so the withdrawal takes it only when the
+note is the withdrawing thread's. Another thread's note in the slot is
+an unhandled exception still on its way to ending the process, and when
+that one was raised in user mode (`RtlRaiseException`: the kernel saw no
+fault and has nothing of its own to describe it with) the note is the
+only account of it there is -- a withdrawal that took it would lose the
+whole crash report. The line then says whose note it left instead. What
+is left is the slot: two unhandled exceptions in one process and the
+later note writes over the earlier, so the report describes the second
+(ROADMAP: a note per thread). Scenarios `crash`, `crash_dispatched`,
+`crash_filtered`, `crash_continued` and `crash_continued_other`, each
+with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
 eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`

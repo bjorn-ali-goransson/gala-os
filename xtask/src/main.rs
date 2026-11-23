@@ -8460,6 +8460,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("hotswap_files", "hotswap_dll.dll@hotswap_late.dll", "gala"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
+    ("crash_continued", "ntdll.dll", "Windows/System32"),
+    ("crash_continued_other", "ntdll.dll", "Windows/System32"),
     ("crash_raise", "ntdll.dll", "Windows/System32"),
     ("crash_apc", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -14160,6 +14162,8 @@ const ARM64_TWINS: &[&str] = &[
     "apc_test",
     "crash_dispatched",
     "crash_filtered",
+    "crash_continued",
+    "crash_continued_other",
     "crash_raise",
     "crash_apc",
     "seh_test",
@@ -20736,6 +20740,62 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "(crash.exe+0x",
             "writing address 0x0",
             "process crash.exe (pid 4) exited with status 0xffff7002",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // The exception that leaves nothing behind: no handler takes it,
+        // the top-level filter continues execution, and the process goes
+        // on to exit 0 -- so no crash report ever describes it and the
+        // ledger row ntdll writes is on the death path it never reaches.
+        // This is what Office's shared code does to the exceptions it
+        // swallows, and the kernel must name the code and the address at
+        // the moment ntdll withdraws its note. That the retried store
+        // goes through is what says execution was continued and not
+        // merely survived.
+        name: "crash_continued",
+        cmdline: "qemu_exit run=crash.exe args=continued",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to a read-only page",
+            "crash: the top-level filter continues execution",
+            "exception continued: crash.exe (pid 4) thread",
+            "its top-level filter continued past an unhandled 0xc0000005 (access violation) at ",
+            "(crash.exe+0x",
+            ", writing address 0x",
+            "an exception the top-level filter continued past",
+            "crash: the write that faulted went through; ok",
+            "process crash.exe (pid 4) exited with status 0x00000000",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // The same withdrawal, made to meet another thread's note. A
+        // process has one note; the swallowing thread reports its
+        // exception, the dying thread reports its own (which takes the
+        // slot), and only then does the swallower's filter withdraw. It
+        // must withdraw its own and nothing else: what is left is the
+        // note the crash report is written from, and the dying thread
+        // raised its exception in user mode, so the kernel saw no fault
+        // and has nothing else to describe it with. The report naming
+        // 0xe0000044 is what says the note was left alone; the line
+        // about a note that is another thread's is what says the
+        // withdrawal knew.
+        name: "crash_continued_other",
+        cmdline: "qemu_exit run=crash.exe args=continued_other",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the swallower writes to a read-only page",
+            "crash: the raiser's filter has reported its exception",
+            "crash: the swallower's filter continues execution",
+            "its top-level filter continued past an unhandled exception, whose code is not known \
+             here: the note kept is thread ",
+            "left for the crash report",
+            "crash: the swallower carried on; the raiser may die now",
+            "crash: the raiser's filter lets the process end",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000044 \
+             (exception) in thread",
+            "process crash.exe (pid 4) exited with status 0xe0000044",
             BOOT_OK_MARKER,
         ],
     },

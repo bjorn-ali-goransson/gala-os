@@ -7568,6 +7568,27 @@ among the slowest hand-offs.
    one event (a window becoming visible) and one action (a picture of
    the whole screen).
 
+   An exception a program swallows is a gap too, and used to be a
+   silent one: a top-level filter that returns
+   EXCEPTION_CONTINUE_EXECUTION has ntdll withdraw the note the kernel
+   keeps, no crash report is ever written and ntdll's own ledger row
+   sits on its death path, so nothing in the run said an exception had
+   happened -- Office's shared code swallows them. The withdrawal is
+   where it can be said, so it says it: a line naming the code, the
+   thread, the address as module+offset and what was read or written,
+   and a ledger row beside it (`nt::crashreport::continued`, scenarios
+   `crash_continued` and `crash_continued_other` and their ARM64 twins,
+   OBSERVABILITY "Crash reports"). A process keeps one note, so the
+   withdrawal takes it only when it is the withdrawing thread's -- for
+   an exception raised in user mode that note is the only description
+   there is, and taking another thread's would lose the crash report
+   wholesale. What is left is the slot itself: two unhandled exceptions
+   in a process and the later note writes over the earlier. The fix is
+   a note per thread, boxed when the thread first takes an exception
+   (a note is large and most threads never take one), with the
+   process's slot kept for the kernel's own context; then a withdrawal
+   needs no guard, because it has only its own note to reach.
+
    What this is for: every program whose compatibility is worked on
    next runs into the same wall Word did, and the answer should not be
    another round of records typed by hand. Its gaps when done: the
