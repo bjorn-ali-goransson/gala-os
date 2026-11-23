@@ -8510,6 +8510,20 @@ Each entry: what, why it matters, the structural fix, the owning item.
   addresses were symbolized against the x86-64 kernel (fixed,
   OBSERVABILITY "Symbolized backtraces") and a Linux thread's dump
   names no system call (below).
+- **Input waits behind a commit's composition** (open; `arm_lx_gimp`'s
+  step 8): the Wayland server takes a client's input after the round's
+  requests are dispatched (`Connection::pump`), and a commit composes
+  the window's damage on that thread. With the guest slowed by a loaded
+  host, a round holding GIMP's full-window commit took 1.3 s; the key
+  release behind it reached GIMP after its client-side repeat's 500 ms
+  (`repeat_info`), so the typed search said "invvvv..." and Invert never
+  ran (statedump: `taken after 1188 ms`; every late key taken in one
+  round). Composition now skips what lies under an opaque window
+  (ARCHITECTURE "Invariants and limits": a full window 5x cheaper),
+  which makes such a round rare but does not bound it: a press and its
+  release are still as far apart as one round, however long. The cure
+  is input that does not queue behind drawing: taking it between a
+  round's requests, or composing off the server's thread.
 - **A starved vCPU cannot be told from one with interrupts off**
   (open): the hang watchdog's CPU report (`watchdog: CPU N has taken no
   timer interrupt for 5 s`) is the one of its two that cannot fail a

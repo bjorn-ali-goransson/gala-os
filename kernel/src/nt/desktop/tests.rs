@@ -1785,3 +1785,39 @@ fn a_tile_initial_from_the_title_or_else_the_program() {
     assert_eq!(tile_initial(&star, &[]), ('*', &star[..]));
     assert_eq!(tile_initial(&[], &[]), ('?', &[][..]));
 }
+
+/// A point under a window that covers it whole is that window's colour
+/// whatever lies under it, so composing from the topmost such window
+/// (`pixel`) gives every point of the screen what composing every layer
+/// gives: rounded corners and shadows over the drawn wallpaper, a window
+/// partly over another, a popup, a frameless window, a maximized one,
+/// active and inactive.
+#[test]
+fn composing_from_the_topmost_opaque_window_changes_no_point() {
+    let mut d = Desktop::new();
+    let (sw, sh) = (640u32, 480u32);
+    d.set_screen(sw, sh).unwrap();
+    let t = title("w");
+    let shown = |d: &mut Desktop, owner, x, y, w, h, style| {
+        let id = d.create(owner, x, y, w, h, &t, style).unwrap();
+        d.show(id, owner, true).unwrap();
+        id
+    };
+    let back = shown(&mut d, 1, 0, 0, 10, 10, 0);
+    d.place(back, 1, 0, 0, sw, sh - TASKBAR).unwrap();
+    assert!(d.s.window(back).unwrap().maximized);
+    let a = shown(&mut d, 2, 40, 30, 300, 200, 0);
+    d.present(a, Rect { x: 0, y: 0, w: 3, h: 3 }, &[0x00ab_cdef; 9], 3).unwrap();
+    shown(&mut d, 2, 200, 120, 260, 220, 0);
+    shown(&mut d, 3, 420, 60, 120, 90, STYLE_POPUP);
+    shown(&mut d, 3, 500, 300, 100, 80, STYLE_FRAMELESS);
+    let mut differ = 0;
+    for y in 0..i64::from(sh) {
+        for x in 0..i64::from(sw) {
+            if d.compose(x, y, true) != d.compose(x, y, false) {
+                differ += 1;
+            }
+        }
+    }
+    assert_eq!(differ, 0);
+}

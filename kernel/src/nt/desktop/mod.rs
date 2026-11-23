@@ -2887,8 +2887,33 @@ impl Desktop {
 
     /// The colour of screen point (x, y), all layers composed.
     pub fn pixel(&self, x: i64, y: i64) -> u32 {
-        let mut c = self.wallpaper.as_ref().map_or(DESKTOP_COLOR, |w| w.pixel(x, y));
-        for w in self.s.windows.iter().filter(|w| w.shown()) {
+        self.compose(x, y, true)
+    }
+
+    /// Composes point (x, y) bottom up. With `from_opaque`, from the
+    /// topmost window that covers the point whole (coverage 255): what
+    /// lies under it cannot show, and `blend` at 255 is that window's
+    /// own colour whatever was under it, so the result is the same and
+    /// a window's commit pays for the layers that show (the wallpaper's
+    /// two square roots a point and every lower window's shape and
+    /// shadow were most of a whole window's composition). Without, every
+    /// layer (the tests' reference).
+    fn compose(&self, x: i64, y: i64, from_opaque: bool) -> u32 {
+        let windows = &self.s.windows;
+        let opaque = from_opaque
+            .then(|| {
+                windows.iter().rposition(|w| {
+                    w.shown()
+                        && w.rect().contains(x, y)
+                        && w.coverage(x - i64::from(w.x), y - i64::from(w.y)) == 255
+                })
+            })
+            .flatten();
+        let mut c = match opaque {
+            Some(_) => 0,
+            None => self.wallpaper.as_ref().map_or(DESKTOP_COLOR, |w| w.pixel(x, y)),
+        };
+        for w in windows[opaque.unwrap_or(0)..].iter().filter(|w| w.shown()) {
             if !w.bounds(SHADOW).contains(x, y) {
                 continue;
             }

@@ -13483,6 +13483,26 @@ mod event_devices_tests {
 }
 
 #[cfg(test)]
+mod profile_cli_tests {
+    use super::*;
+
+    /// A stream's scenario, whichever way it is named, picks the kernel
+    /// its addresses are of: an arm twin's are the aarch64 kernel's.
+    #[test]
+    fn a_stream_names_its_scenario() {
+        assert_eq!(stream_scenario("arm_lx_gimp"), "arm_lx_gimp");
+        assert_eq!(stream_scenario("target/debug/test-arm_lx_gimp.events.jsonl"), "arm_lx_gimp");
+        assert_eq!(stream_scenario("target/failed/arm_lx_gimp.events.jsonl"), "arm_lx_gimp");
+        assert_eq!(
+            stream_scenario("target/debug/test-events_sample.events.jsonl"),
+            "events_sample"
+        );
+        assert!(is_aarch64_scenario(&stream_scenario("target/failed/arm_lx_gimp.events.jsonl")));
+        assert!(!is_aarch64_scenario(&stream_scenario("target/failed/lx_gimp.events.jsonl")));
+    }
+}
+
+#[cfg(test)]
 mod aarch64_cd_tests {
     use super::*;
 
@@ -31640,8 +31660,11 @@ fn profile_cli(args: &[String]) -> Result {
     };
     let symbols = flag("--symbols").map(PathBuf::from);
     // The kernel's own addresses: its ELF (the debug build boot tests
-    // use, or the release one).
-    let kernel = target_dir().join("x86_64-unknown-none").join(profile_dir).join("kernel");
+    // use, or the release one), of the architecture the scenario ran on.
+    let scenario = stream_scenario(what);
+    let target = if is_aarch64_scenario(&scenario) { KERNEL_TARGET_AARCH64 } else { KERNEL_TARGET };
+    let kernel = target_dir().join(target).join(profile_dir).join("kernel");
+    println!("profile: kernel addresses from {} (scenario {scenario})", kernel.display());
     let symbolize = |module: &str, offsets: &[u64]| match (module, &symbols) {
         ("kernel", _) => profile::llvm_symbolize_kernel(&kernel, offsets),
         (_, Some(dir)) => profile::llvm_symbolize(dir, module, offsets),
@@ -31649,6 +31672,15 @@ fn profile_cli(args: &[String]) -> Result {
     };
     print!("{}", profile::report(&text, &options, &symbolize));
     Ok(())
+}
+
+/// The scenario a stream is of: `what` itself when it is a scenario's
+/// name, else the name in its file's (`test-<name>.events.jsonl` in the
+/// target directory, `<name>.events.jsonl` in target/failed).
+fn stream_scenario(what: &str) -> String {
+    let file = Path::new(what).file_name().and_then(|f| f.to_str()).unwrap_or(what);
+    let name = file.strip_suffix(".events.jsonl").unwrap_or(file);
+    name.strip_prefix("test-").unwrap_or(name).to_string()
 }
 
 /// `cargo xtask otel`'s arguments: <what> [<events>] [--out <prefix>]
