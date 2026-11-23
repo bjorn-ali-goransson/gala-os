@@ -15120,6 +15120,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "flight: the last",
             "statedump: NMI part done",
             "statedump: threads",
+            // The NMI left each CPU's interrupt mask as it found it: the
+            // spinning thread's CPU, interrupted in user mode, still
+            // ticks (aarch64's mask is not restored by the return).
+            "statedump: every CPU took timer interrupts since the NMI part",
             "NtWaitForSingleObject from rip",
             "Event signal 0",
             "in user mode at rip",
