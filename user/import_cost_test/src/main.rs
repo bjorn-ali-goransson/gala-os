@@ -36,8 +36,13 @@ unsafe extern "C" {
 /// Calls through the one armed slot. Enough that the per-call cost is
 /// what the scenario's seconds are made of rather than its boot, and
 /// few enough that the slowest configuration of the trace (every call
-/// recorded, both arguments quoted) stays a test and not a wait.
-const CALLS: u64 = 20_000;
+/// recorded, both arguments quoted) stays a test and not a wait: its
+/// seconds are this times what an event costs to leave the guest,
+/// which is the host's figure and not gala's (3 ms on a laptop, about
+/// twice that on a CI runner), so the count has to leave the scenario
+/// far inside its time limit on the slowest host that runs it. 20 000
+/// did not: 60 s on a laptop and 98-121 s on CI, against 120 s.
+const CALLS: u64 = 5_000;
 
 /// A narrow string, as a `*A` call is handed one, and a wide one, as a
 /// `*W` call is: two quotes a call, which is what a call of Word's
