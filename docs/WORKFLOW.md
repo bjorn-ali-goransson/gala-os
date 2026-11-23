@@ -2464,6 +2464,16 @@ for the framebuffer.
   an app's run cannot spoil an install that takes an hour; without that
   image the run says so and stops. `XTASK_REUSE_DISK=1` boots the copy
   the last run kept instead of making another (what to iterate with).
+- **Word's own crash state outlives a run** (`XTASK_REUSE_DISK=1`).
+  Word records that it did not finish, so the run after one that
+  crashed is not the run before it: Word opens with "Word couldn't
+  start last time ... Do you want to start in safe mode?" (the ledger
+  names the box, `user32.dll!MessageBoxW(Word couldn't start last
+  time...)`, detail 36 = MB_YESNO | MB_ICONQUESTION), and gala gives
+  it no answer. A reused disk is for iterating; a measurement to
+  compare with an earlier one is taken on a fresh copy (no
+  `XTASK_REUSE_DISK`), or its safe-mode box is read as the previous
+  run's leftover and not as the change under test.
 - The copy is about 8 GB on the host, on top of the install's own. With
   the install's image in `/dev/shm` ("Office's fast path"), link the
   copy there too.

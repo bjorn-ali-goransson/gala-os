@@ -8936,7 +8936,19 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 
 - **Windows** (`window.rs`): classes and windows; HWNDs come from the
   kernel's window registry, unique on the desktop (`foreign::HWNDS`
-  maps slots to them without the lock). Up to 512 windows. A top-level
+  maps slots to them without the lock). Up to 512 windows. A
+  program's window classes are not bounded by a number gala chose: the
+  table starts at 32 slots on the process heap and doubles as they
+  fill, up to the application atom space (0x10000 - 0xc000 = 16384),
+  which is what bounds them on Windows too, because every class has an
+  atom. A fixed table of a few dozen is a limit real programs reach:
+  Word's startup registers its own classes and every Office library's,
+  more than 32 of them. A slot's index is its class's atom, so no two live
+  classes can share one and unregistering a class frees its atom with
+  its name. A registration with no room left answers 0 with
+  ERROR_NOT_ENOUGH_MEMORY and records a row; each doubling records one
+  too, which is the only measure a run keeps of how many classes a
+  program needed (`wndclass_test`, OBSERVABILITY). A top-level
   WS_POPUP window without WS_CAPTION is a desktop popup
   (`window::is_popup`; `window::frame` gives each top-level window's
   frame: none for these). An unregistered class makes CreateWindowExW
