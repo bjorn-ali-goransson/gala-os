@@ -1636,7 +1636,8 @@ samples).
    the profile's top items on a release kernel (`cargo xtask profile
    --release`: the kernel is 22% of samples, 124 s in the kernel
    against 215 s for the debug kernel the gate boots, whose lockdep
-   alone is 13% of kernel samples). Done: the run edits of
+   alone was 13% of kernel samples before it read only the locks
+   held). Done: the run edits of
    `Vad::commit`, one status read per serial FIFO, demand-paged image
    views (they were the longest interrupts-off stretches). What is left
    is about 1% of a run each: demand-zero faults zeroing frames
