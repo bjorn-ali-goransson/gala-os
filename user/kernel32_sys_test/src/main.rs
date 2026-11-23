@@ -9,7 +9,9 @@
 //! WER flags, priority boost and console control handlers are kept;
 //! GetSystemInfo, GetSystemDirectoryA, GetProcessAffinityMask,
 //! GetEnvironmentStringsW, CreateEventA, LoadLibraryW/LoadLibraryExW (with
-//! LOAD_LIBRARY_SEARCH_SYSTEM32; a path with forward slashes), DuplicateHandle (also through a process
+//! LOAD_LIBRARY_SEARCH_SYSTEM32, with every LOAD_LIBRARY_SEARCH_* flag and
+//! LOAD_LIBRARY_REQUIRE_SIGNED_TARGET as Office loads its own DLLs; a path
+//! with forward slashes), DuplicateHandle (also through a process
 //! handle, which needs PROCESS_DUP_HANDLE), VirtualQuery,
 //! WaitForMultipleObjects and SwitchToThread; GetSystemTimeAsFileTime
 //! (KUSER_SHARED_DATA's tick-updated SystemTime) and the precise time.
@@ -169,6 +171,10 @@ const ERROR_INVALID_FUNCTION: u32 = 1;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 const WAIT_TIMEOUT: u32 = 258;
 const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
+/// Every LOAD_LIBRARY_SEARCH_* flag: the DLL's own directory, the
+/// application's, LdrAddDllDirectory's, System32 and the default set.
+const LOAD_LIBRARY_SEARCH_FLAGS: u32 = 0x1f00;
+const LOAD_LIBRARY_REQUIRE_SIGNED_TARGET: u32 = 0x80;
 
 /// UTF-16 for an ASCII literal, NUL-terminated.
 macro_rules! w {
@@ -442,6 +448,20 @@ fn run() -> Result<(), u32> {
             0,
         )?;
         c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;
+
+        // LOAD_LIBRARY_REQUIRE_SIGNED_TARGET, with the whole search set:
+        // the flags Office loads its own DLLs with. Windows takes the
+        // flag and gives the module already loaded. An unsigned target
+        // is ERROR_INVALID_IMAGE_HASH there, which gala's loader --
+        // which verifies no signature (ROADMAP OF) -- cannot answer, so
+        // it is measured and not asked for here.
+        let signed = LoadLibraryExW(
+            w!("kernel32.dll"),
+            core::ptr::null_mut(),
+            LOAD_LIBRARY_REQUIRE_SIGNED_TARGET | LOAD_LIBRARY_SEARCH_FLAGS,
+        );
+        c.eq(signed as u64, k32 as u64)?;
+        c.ok(FreeLibrary(signed) != 0, 0)?;
 
         // VirtualQuery.
         let p = VirtualAlloc(core::ptr::null_mut(), 0x10000, 0x3000, 4);
