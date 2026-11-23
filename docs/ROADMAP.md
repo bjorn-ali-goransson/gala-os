@@ -6181,9 +6181,11 @@ wow64.dll converts 32-bit system calls in user mode).
   STARTUPINFO and the descriptor-inheritance block with 4-byte
   pointers, the 32-bit time_t of `time`/`gmtime`/`localtime`/`mktime`/
   `ctime`/`difftime`, and what mingw's startup imports (`__p__fmode`,
-  `__p__commode`, and the accessors only the 32-bit msvcrt.dll has:
-  `__p___initenv`, `__p___mb_cur_max`, `__p__iob`, which its newer
-  C runtime calls instead of reading the variables).
+  `__p__commode`), and the accessors only the 32-bit msvcrt.dll has,
+  which a newer mingw-w64 C runtime calls instead of reading the
+  variables: `__p___initenv`, `__p___mb_cur_max`, `__p__iob`
+  (`wow64_wininet_test` is built with that runtime and does not start
+  without them).
   **The 32-bit advapi32** (`wow64_adv_test`, a Rust program): gala's
   advapi32 and bcryptprimitives built for i686, shipped as
   `C:\Windows\SysWOW64\advapi32.dll` and `bcryptprimitives.dll`
