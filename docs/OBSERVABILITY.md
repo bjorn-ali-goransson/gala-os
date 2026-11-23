@@ -258,12 +258,13 @@ there.
 #### What the stream costs
 
 Its bytes, and nothing else: about 12 us for each one that leaves the
-guest. `user/import_cost_test` makes 20 000 calls through one traced
-import, and four runs of it differ only in what is written, so the
-difference between their in-kernel seconds is the stream itself
-(scenarios `import_cost_test`, the program with nothing armed, and
-`import_cost`, the calls recorded and their arguments quoted; the two
-in between are the same program with `XTASK_CMDLINE=`):
+guest. `user/import_cost_test` makes calls through one traced import
+(5 000; the table was measured with 20 000 on a laptop under KVM),
+and four runs of it differ only in what is written, so the difference
+between their in-kernel seconds is the stream itself (scenarios
+`import_cost_test`, the program with nothing armed, and `import_cost`,
+the calls recorded and their arguments quoted; the two in between are
+the same program with `XTASK_CMDLINE=`):
 
 | what the run writes | in the kernel | an event |
 |---|---|---|
@@ -272,7 +273,12 @@ in between are the same program with `XTASK_CMDLINE=`):
 | and `events=call`, 162 bytes an event | 41.6 s | 2.1 ms |
 | and `imports_strings=` too, 214 bytes an event | 59.9 s | 3.0 ms |
 
-So the trap machinery is free and the bytes are everything. It is the
+What an event costs is the host's figure, not gala's: a CI runner's KVM
+pays about twice the laptop's (the 20 000 calls took 96-121 s there,
+against `import_cost`'s 120 s limit, which is why the program now makes
+a quarter of them), and under TCG, where a port write is no exit at
+all, the same 5 000 calls cost 3.4 s. So the trap machinery is free and
+the bytes are everything. It is the
 crossing itself and not the device, QEMU's work or the formatting: the
 same stream written to port 0x80, which has no device behind it at all,
 costs 37.4 s of the 41.6; and holding each line and handing it to the
