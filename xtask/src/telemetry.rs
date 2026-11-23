@@ -118,9 +118,63 @@ pub fn vm_cpus(iso: &Path) -> u32 {
     if stem.starts_with("test-onecpu_") || stem.starts_with("test-arm_onecpu_") { 1 } else { 2 }
 }
 
+/// The firmware's own crash report in a boot's console output (serial or
+/// the firmware's debug log): EDK2's exception dump on aarch64
+/// (`Synchronous Exception at ...` and its `[ n] Module.dll` frame) or
+/// x64 (`!!!! X64 Exception Type ...`), and its `ASSERT [...]` line. A
+/// firmware that crashes hangs in its assert loop until the run's limit,
+/// before the kernel has printed anything, so without this the verdict is
+/// a bare timeout with no boot phases. The kernel prints none of these.
+pub fn firmware_crash(log: &str) -> Option<String> {
+    let lines: Vec<&str> = log.lines().map(str::trim).collect();
+    let at = lines.iter().position(|l| {
+        l.starts_with("Synchronous Exception at") || l.starts_with("!!!! X64 Exception")
+    })?;
+    let mut said = lines[at].to_string();
+    // The first frame names the module that faulted.
+    if let Some(module) = lines[at..]
+        .iter()
+        .find_map(|l| l.contains("[ 0]").then(|| l.split_whitespace().last()).flatten())
+    {
+        said += &format!(" in {module}");
+    }
+    if let Some(fault) = lines[at..].iter().find(|l| l.starts_with("ESR ")) {
+        said += &format!(" ({fault})");
+    }
+    if let Some(assert) = lines[at..].iter().find(|l| l.starts_with("ASSERT [")) {
+        said += &format!("; {assert}");
+    }
+    Some(said)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_a_firmware_crash() {
+        let aavmf = "BdsDxe: loading Boot0001\n\
+            Synchronous Exception at 0x000000005FC32100\n\
+            PC 0x00005FC32100 (0x00005FC31000+0x00001100) [ 0] VirtioNetDxe.dll\n\
+            PC 0x00005FC2C9A4 (0x00005FC28000+0x000049A4) [ 1] MnpDxe.dll\n\
+            ESR 0x96000007 FAR 0x0000000000000008  Data abort: Translation fault, third level\n\
+            ASSERT [ArmCpuDxe] DefaultExceptionHandler.c(343): ((BOOLEAN)(0==1))\n";
+        assert_eq!(
+            firmware_crash(aavmf).as_deref(),
+            Some(
+                "Synchronous Exception at 0x000000005FC32100 in VirtioNetDxe.dll \
+                 (ESR 0x96000007 FAR 0x0000000000000008  Data abort: Translation fault, third level); \
+                 ASSERT [ArmCpuDxe] DefaultExceptionHandler.c(343): ((BOOLEAN)(0==1))"
+            )
+        );
+        let ovmf = "!!!! X64 Exception Type - 0E(#PF - Page-Fault)  CPU Apic ID - 00000000 !!!!\n\
+            RIP  - 000000007E5A1234\n";
+        assert_eq!(
+            firmware_crash(ovmf).as_deref(),
+            Some("!!!! X64 Exception Type - 0E(#PF - Page-Fault)  CPU Apic ID - 00000000 !!!!")
+        );
+        assert_eq!(firmware_crash("[info ] smp: 2 CPUs online\npanicked at x"), None);
+    }
 
     #[test]
     fn reads_the_cpu_count() {

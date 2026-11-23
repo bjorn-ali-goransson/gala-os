@@ -17073,6 +17073,12 @@ fn boot_telemetry(f: BootFacts) -> String {
     if let Some(n) = telemetry::cpus_online(f.serial).filter(|&n| n < want) {
         out += &format!("xtask: {}\n", fewer_cpus(n, want));
     }
+    let [_, bios_log, _] = f.logs;
+    if let Some(crash) = telemetry::firmware_crash(f.serial)
+        .or_else(|| telemetry::firmware_crash(&fs::read_to_string(bios_log).unwrap_or_default()))
+    {
+        out += &format!("xtask: the firmware crashed before the kernel: {crash}\n");
+    }
     let code = f.status.and_then(|s| s.code());
     let normal = f.stopped || matches!(code, Some(QEMU_EXIT_SUCCESS | QEMU_EXIT_FAILURE));
     if !normal {
@@ -24364,6 +24370,12 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         }
     }
     let short = telemetry::cpus_online(&serial).filter(|&n| n < want_cpus);
+    // The firmware's own crash (serial, or its debug log on x64).
+    let firmware = telemetry::firmware_crash(&serial).or_else(|| {
+        telemetry::firmware_crash(
+            &fs::read_to_string(iso.with_extension("bios.log")).unwrap_or_default(),
+        )
+    });
     let code = status.and_then(|s| s.code());
     let facts = RunFacts { iso: Some(iso.to_path_buf()), secs: Some(time.total.as_secs_f64()) };
     let verdicts: Vec<(&Scenario, Result)> = match vm {
@@ -24482,14 +24494,19 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
             })
             .collect(),
     };
-    // A failure on a VM short of CPUs says so first.
+    // A failure on a VM short of CPUs, or whose firmware crashed before
+    // the kernel, says so first.
     let verdicts = verdicts
         .into_iter()
         .map(|(s, v)| {
             (
                 s,
                 v.map_err(|e| {
-                    short.map_or(e.clone(), |n| format!("{}: {e}", fewer_cpus(n, want_cpus)))
+                    let e =
+                        short.map_or(e.clone(), |n| format!("{}: {e}", fewer_cpus(n, want_cpus)));
+                    firmware
+                        .as_ref()
+                        .map_or(e.clone(), |f| format!("the firmware crashed ({f}): {e}"))
                 }),
             )
         })

@@ -1316,8 +1316,9 @@ ARM64 host); about 4 s to the kernel, most of it the firmware.
   one it connects every device, and its own network stack drives a
   scenario's virtio-net card before the kernel (DHCP, IPv6 duplicate
   address checks, router solicitations), where a send once crashed the
-  firmware's VirtioNetDxe (data abort at address 8, the serial log ends
-  in its `Synchronous Exception` dump, no boot phases). To see what the
+  firmware's VirtioNetDxe (data abort at address 8, no boot phases; the
+  verdict begins `the firmware crashed (... in VirtioNetDxe.dll
+  ...)`, OBSERVABILITY "A firmware crash"). To see what the
   firmware sends on the card, boot the firmware alone with
   `-netdev user,id=n0 -device virtio-net-pci,netdev=n0 -object
   filter-dump,id=f0,netdev=n0,file=fw.pcap`: with the boot order the

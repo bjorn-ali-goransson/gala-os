@@ -2459,6 +2459,14 @@ always on and cheap:
   the vCPUs it asked for (2, or 1 for `onecpu_*`); a boot short of CPUs
   is booted once more (not with a disk), and a failure on one says first
   `VM got 1 of 2 CPUs (host overloaded?)`.
+- **A firmware crash**: EDK2 crashing before the kernel (aarch64's
+  `Synchronous Exception at ...` dump on the serial log, x64's `!!!! X64
+  Exception ...` on the firmware's debug log `.bios.log`) hangs in its
+  assert loop until the run's limit, with no boot phases. xtask
+  (`telemetry::firmware_crash`) finds it and the failure says first
+  `the firmware crashed (<exception> in <module> (<ESR line>); <ASSERT
+  line>)`, with an `xtask: the firmware crashed before the kernel:` line
+  in the serial log's telemetry.
 - **Boot phase markers** (`arch::bootphase`): one line per step on
   debug-console port 0x403 (the event stream has 0xe9), lock-free and
   allocation-free, written only under QEMU (CPUID's hypervisor leaf; on
