@@ -13410,10 +13410,7 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
         copy(&vars, &copy_path)?;
         cmd.arg("-drive").arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
     }
-    cmd.args(["-device", "virtio-scsi-pci,id=scsi0"])
-        .arg("-drive")
-        .arg(format!("if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={}", iso.display()))
-        .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0"]);
+    add_aarch64_cd(&mut cmd, iso);
     // The keyboard and mouse (`virt` has no PS/2 controller): what the
     // monitor's sendkey, mouse_move and mouse_button reach
     // (kernel/src/input/virtio.rs; `VirtioPace`).
@@ -13423,6 +13420,41 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     }
     cmd.args(extra.split_whitespace());
     Ok(cmd)
+}
+
+/// The image on a virtio-scsi CD, and the only device the firmware
+/// connects. `bootindex` puts a `bootorder` file in fw_cfg, and with one
+/// ArmVirtQemu's boot manager connects just the devices it names
+/// (QemuBootOrderLib's ConnectDevicesFromQemu) instead of every device
+/// (EfiBootManagerConnectAll). Without it, the firmware's own network
+/// stack drives a scenario's virtio-net card before the kernel does:
+/// DHCP, IPv6 duplicate-address checks and router solicitations, from
+/// timer events. One such send crashed the firmware's VirtioNetDxe
+/// (a data abort at address 8) in the middle of reading the CD, before
+/// the boot loader ran. With the boot order, the firmware sends nothing
+/// on the card (WORKFLOW "The aarch64 kernel's scenarios" says how to
+/// see that).
+fn add_aarch64_cd(cmd: &mut Command, iso: &Path) {
+    cmd.args(["-device", "virtio-scsi-pci,id=scsi0"])
+        .arg("-drive")
+        .arg(format!("if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={}", iso.display()))
+        .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0"]);
+}
+
+#[cfg(test)]
+mod aarch64_cd_tests {
+    use super::*;
+
+    /// The CD is the boot order's only entry, so the firmware connects
+    /// nothing else (no network card): see add_aarch64_cd.
+    #[test]
+    fn the_cd_is_the_boot_order() {
+        let mut cmd = Command::new("qemu-system-aarch64");
+        add_aarch64_cd(&mut cmd, Path::new("gala.iso"));
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let with_index: Vec<&String> = args.iter().filter(|a| a.contains("bootindex=")).collect();
+        assert_eq!(with_index, ["scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0"]);
+    }
 }
 
 fn find_ovmf() -> Result<Firmware> {
@@ -33001,7 +33033,7 @@ fn iso(release: bool, args: &[String]) -> Result {
             "xtask: QEMU: qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 1G -smp 2 \
              -bios <AAVMF/edk2-aarch64 code> -device virtio-gpu-pci -device virtio-keyboard-pci \
              -device virtio-mouse-pci -device virtio-scsi-pci -drive \
-             if=none,id=cd,media=cdrom,file={} -device scsi-cd,drive=cd",
+             if=none,id=cd,media=cdrom,file={} -device scsi-cd,drive=cd,bootindex=0",
             path.display()
         );
         return Ok(());

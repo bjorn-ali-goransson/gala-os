@@ -1291,7 +1291,7 @@ it with `qemu-system-aarch64 -machine virt` (`qemu_aarch64`): the pinned
 QEMU's own `edk2-aarch64-code.fd` (or Ubuntu's AAVMF, `qemu-efi-aarch64`,
 or `AAVMF_CODE`/`AAVMF_VARS`), the image on a virtio-scsi CD, semihosting
 on for the kernel's exit. Software emulation only (KVM would need an
-ARM64 host); about 8 s to the kernel, most of it the firmware.
+ARM64 host); about 4 s to the kernel, most of it the firmware.
 
 - The serial log and verdicts are as x86-64's. There is no event stream
   and no firmware or phase log (no ISA debug consoles on `virt`).
@@ -1303,6 +1303,18 @@ ARM64 host); about 8 s to the kernel, most of it the firmware.
   PATH. Binutils' x86-64 build cannot read an aarch64 ELF.
 - While a phase is unported, its scenario ends the boot just before it
   (`stop_after=<phase>`); porting the next phase moves that on.
+- The firmware connects only the CD: the `scsi-cd` device carries
+  `bootindex=0` (`add_aarch64_cd`), and with a boot order in fw_cfg
+  ArmVirtQemu's boot manager connects just the devices it names. Without
+  one it connects every device, and its own network stack drives a
+  scenario's virtio-net card before the kernel (DHCP, IPv6 duplicate
+  address checks, router solicitations), where a send once crashed the
+  firmware's VirtioNetDxe (data abort at address 8, the serial log ends
+  in its `Synchronous Exception` dump, no boot phases). To see what the
+  firmware sends on the card, boot the firmware alone with
+  `-netdev user,id=n0 -device virtio-net-pci,netdev=n0 -object
+  filter-dump,id=f0,netdev=n0,file=fw.pcap`: with the boot order the
+  capture holds no packet (24 bytes, the header).
 
 ### QEMU
 
