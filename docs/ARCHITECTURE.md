@@ -8405,7 +8405,17 @@ session's is shown by nothing unless GalaSession attaches a presenter
   then `flush`: the screen through `platform::screen_write_row`, a Test
   frame, or nothing: with no presenter nothing is composed). A desktop
   goes live lazily: its first use lays it out and draws it whole, as
-  does attaching a presenter.
+  does attaching a presenter. Composing every layer at every point
+  costs microseconds a pixel, under the desktop's lock with interrupts
+  off, so `redraw` first copies the client pixels nothing covers
+  (`Uncovered`: a shown window's client area away from its rounded
+  corners' rows, under no higher window or its shadow, the taskbar, the
+  start menu, the card or the pointer's box) straight from the window,
+  and composes only the rest with `pixel`. Invariant: what it writes is
+  `pixel`'s composition, point for point (host test
+  `windows_pixels_nothing_covers_are_copied_and_the_rest_composed`);
+  past 32 layers, the windows below are composed. `desktop::composed()`
+  counts areas, pixels and those copied, since boot.
 - **Drawing** (`paint.rs`): integer-only blending and gradients, an ARGB
   `Canvas` (rounded rectangles, outlines, tinted alpha masks, text in
   the baked Selawik sizes of `paint::Font`: proportional, advances in
