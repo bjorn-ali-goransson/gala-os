@@ -1670,6 +1670,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("olelink_test", "user32.dll", "Windows/System32"),
     ("olelink_test", "gdi32.dll", "Windows/System32"),
     ("olelink_test", "user/bin/olelink_test.exe", "gala"),
+    // urlmon_test: MkParseDisplayNameEx and the URL moniker it makes
+    // (user/urlmon_test/main.c, mingw); the names it does not know go to
+    // ole32's MkParseDisplayName, and a file moniker needs the temporary
+    // directory.
+    ("urlmon_test", "ntdll.dll", "Windows/System32"),
+    ("urlmon_test", "kernel32.dll", "Windows/System32"),
+    ("urlmon_test", "msvcrt.dll", "Windows/System32"),
+    ("urlmon_test", "urlmon.dll", "Windows/System32"),
+    ("urlmon_test", "ole32.dll", "Windows/System32"),
+    ("urlmon_test", "combase.dll", "Windows/System32"),
+    ("urlmon_test", "oleaut32.dll", "Windows/System32"),
+    ("urlmon_test", "advapi32.dll", "Windows/System32"),
+    ("urlmon_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("urlmon_test", "user32.dll", "Windows/System32"),
+    ("urlmon_test", "gdi32.dll", "Windows/System32"),
+    ("urlmon_test", "user/bin/urlmon_test.exe", "gala"),
     ("shell32_test", "ntdll.dll", "Windows/System32"),
     ("shell32_test", "kernel32.dll", "Windows/System32"),
     ("shell32_test", "msvcrt.dll", "Windows/System32"),
@@ -10278,6 +10294,20 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=olelink_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["olelink_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: urlmon's MkParseDisplayNameEx and the URL moniker it
+        // makes -- which schemes reach one, the canonical form of each
+        // name, the interfaces the moniker answers, everything it can
+        // answer without binding and the bytes its Save writes --
+        // against what Windows 11 answers, and that every other name
+        // still gets ole32's own answer unchanged. Word delay-loads
+        // MkParseDisplayNameEx after OleCreateLinkEx
+        // (user/urlmon_test/main.c, mingw).
+        name: "urlmon_test",
+        cmdline: "qemu_exit run=urlmon_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["urlmon_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the

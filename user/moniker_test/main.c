@@ -29,6 +29,10 @@
  *   that is not there, and a directory, are MK_E_CANTOPENFILE with
  *   nothing eaten; a bare word and a URL are MK_E_SYNTAX; a name
  *   beginning "@" is E_NOINTERFACE; "clsid:<guid>:" is a class moniker.
+ *   A drive-shaped name counts as a path only while that drive is
+ *   mounted: on a drive the machine has not got it is MK_E_SYNTAX, not
+ *   MK_E_CANTOPENFILE, and the error GetFileAttributesW leaves behind
+ *   plays no part in the difference.
  * - A file moniker keeps its path exactly as given (an empty one and a
  *   relative one too), compares and hashes without regard to case, and
  *   answers IsSystemMoniker MKSYS_FILEMONIKER, CLSID_FileMoniker,
@@ -43,7 +47,8 @@
  *   ("C:\a\b.txt" and "..\up.txt" make "C:\a\up.txt"), a leading
  *   "." before a separator dropped, and everything else appended as
  *   written. Climbing past the drive or the UNC share is MK_E_SYNTAX,
- *   and so is an absolute right-hand path or an empty left one. The
+ *   and so is an absolute right-hand path -- by its shape alone, an
+ *   unmounted drive included -- or an empty left one. The
  *   merge makes no composite, so it happens even when the caller says
  *   it will not take one.
  * - CreateGenericComposite is the left moniker's own ComposeWith with a
@@ -222,6 +227,16 @@ int main(void) {
     IMoniker *self_mk = NULL, *item = NULL, *anti = NULL, *comp = NULL;
     wchar_t self[MAX_PATH];
     wchar_t absent_path[MAX_PATH + 16];
+    wchar_t deep_absent[MAX_PATH + 32];
+    wchar_t gone_back[8] = L"_:\\x";
+    wchar_t gone_fwd[8] = L"_:/x";
+    wchar_t gone_rel[8] = L"_:x";
+    wchar_t gone_bare[4] = L"_:";
+    wchar_t gone_two[8] = L"__:\\x";
+    wchar_t gone_device[16] = L"\\\\?\\_:\\x";
+    wchar_t gone_appended[MAX_PATH + 16];
+    wchar_t gone_letter = 0;
+    DWORD drives;
     wchar_t upper[MAX_PATH];
     wchar_t with_item[MAX_PATH + 8];
     wchar_t directory[MAX_PATH];
@@ -249,6 +264,29 @@ int main(void) {
     wcscpy(absent_path, directory);
     wcscat(absent_path, L"\\nothing-is-here.docx");
     CHECK(GetFileAttributesW(absent_path) == INVALID_FILE_ATTRIBUTES);
+    wcscpy(deep_absent, directory);
+    wcscat(deep_absent, L"\\nothing-is-here\\x.docx");
+
+    /* A drive letter this machine has not got: the last one not in
+       GetLogicalDrives, so what follows holds on any machine and under
+       gala, which has only C:. */
+    drives = GetLogicalDrives();
+    for (i = 26; i > 0; i--) {
+        if (!(drives & (1u << (i - 1)))) {
+            gone_letter = (wchar_t)(L'A' + (i - 1));
+            break;
+        }
+    }
+    CHECK(gone_letter != 0);
+    gone_back[0] = gone_letter;
+    gone_fwd[0] = gone_letter;
+    gone_rel[0] = gone_letter;
+    gone_bare[0] = gone_letter;
+    gone_two[0] = gone_letter;
+    gone_two[1] = gone_letter;
+    gone_device[4] = gone_letter;
+    wcscpy(gone_appended, L"C:\\a\\b.txt\\");
+    wcscat(gone_appended, gone_two);
     wcscpy(upper, self);
     for (i = 0; upper[i]; i++) {
         upper[i] = (wchar_t)towupper(upper[i]);
@@ -314,6 +352,47 @@ int main(void) {
         out = NULL;
         hr = MkParseDisplayName(bc, L"@Word.Document.12", &eaten, &out);
         CHECK(hr == E_NOINTERFACE && out == NULL);
+
+        /* A drive-shaped name is a path only while the drive is mounted.
+           On a drive that is not there every shape of it -- either
+           separator, drive-relative, and the drive on its own -- is a
+           syntax error, and so is a two-letter prefix, which is no
+           drive. Two leading separators name no drive and are a path
+           whatever follows, so the same absent drive behind "\\?\" is
+           MK_E_CANTOPENFILE instead. */
+        eaten = 0xffffffff;
+        out = NULL;
+        hr = MkParseDisplayName(bc, gone_back, &eaten, &out);
+        CHECK(hr == MK_E_SYNTAX && out == NULL && eaten == 0);
+        eaten = 0xffffffff;
+        out = NULL;
+        hr = MkParseDisplayName(bc, gone_fwd, &eaten, &out);
+        CHECK(hr == MK_E_SYNTAX && out == NULL && eaten == 0);
+        eaten = 0xffffffff;
+        out = NULL;
+        hr = MkParseDisplayName(bc, gone_rel, &eaten, &out);
+        CHECK(hr == MK_E_SYNTAX && out == NULL && eaten == 0);
+        eaten = 0xffffffff;
+        out = NULL;
+        hr = MkParseDisplayName(bc, gone_bare, &eaten, &out);
+        CHECK(hr == MK_E_SYNTAX && out == NULL && eaten == 0);
+        eaten = 0xffffffff;
+        out = NULL;
+        hr = MkParseDisplayName(bc, gone_two, &eaten, &out);
+        CHECK(hr == MK_E_SYNTAX && out == NULL && eaten == 0);
+        eaten = 0xffffffff;
+        out = NULL;
+        hr = MkParseDisplayName(bc, gone_device, &eaten, &out);
+        CHECK(hr == MK_E_CANTOPENFILE && out == NULL && eaten == 0);
+
+        /* And a directory that is not there, on a drive that is: the
+           same ERROR_PATH_NOT_FOUND as the absent drive above, and the
+           other answer -- which is how the drive, not the error code, is
+           shown to be what decides. */
+        eaten = 0xffffffff;
+        out = NULL;
+        hr = MkParseDisplayName(bc, deep_absent, &eaten, &out);
+        CHECK(hr == MK_E_CANTOPENFILE && out == NULL && eaten == 0);
 
         /* A class moniker, which is the one name that is not a file. */
         eaten = 0;
@@ -578,7 +657,15 @@ int main(void) {
     merged(bc, L"C:\\a\\b.txt", L"d\\..\\x.txt", L"C:\\a\\b.txt\\d\\..\\x.txt");
     merged(bc, L"C:\\a\\b.txt", L"d\\.\\x.txt", L"C:\\a\\b.txt\\d\\.\\x.txt");
 
-    /* An absolute right-hand path is refused whatever the left is. */
+    /* An absolute right-hand path is refused whatever the left is, and
+       absolute here is the name's shape alone: a drive this machine has
+       not got is still absolute, where MkParseDisplayName calls such a
+       name no path at all. A drive-relative "<d>:x" is absolute too,
+       while two letters and a colon are no drive and are appended. */
+    merged(bc, L"C:\\a\\b.txt", gone_back, NULL);
+    merged(bc, L"C:\\a\\b.txt", gone_fwd, NULL);
+    merged(bc, L"C:\\a\\b.txt", gone_rel, NULL);
+    merged(bc, L"C:\\a\\b.txt", gone_two, gone_appended);
     merged(bc, L"C:\\a\\b.txt", L"C:\\c\\d.txt", NULL);
     merged(bc, L"C:\\a\\b.txt", L"\\\\server\\share\\x", NULL);
     merged(bc, L"c.txt", L"C:\\a\\b.txt", NULL);
