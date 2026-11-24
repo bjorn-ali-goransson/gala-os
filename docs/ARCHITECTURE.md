@@ -5737,6 +5737,82 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   handler, so a document whose embedded objects are not registered
   loses them rather than showing their last picture; the row names
   the class that went unanswered (ROADMAP OF).
+- **The standard link object** (`link.rs`, `olelink_test`, measured
+  against Windows 11): OleCreateLinkEx and OleCreateLink make the
+  object a container holds for a source it does not own, which is what
+  Word asks for after OleLoad. The arguments are refused in one pass
+  before anything is called: a NULL output pointer, moniker or storage,
+  a renderopt outside 0..3, OLERENDER_FORMAT without a format, the
+  format and advise-flag arrays required exactly when `cFormats` is
+  non-zero and refused when it is zero, an advise sink with anything
+  but OLERENDER_FORMAT, and OLERENDER_DRAW with a format as
+  DV_E_CLIPFORMAT rather than E_INVALIDARG (`rgdwConnection` is never
+  required and never refused). A NULL `riid` is E_INVALIDARG too, but
+  only after the bind -- the one argument check that costs the caller a
+  call. Then, in this order: the source is bound for IDataObject, whose
+  failure OLERENDER_NONE ignores and the other three turn into
+  OLE_E_CANT_BINDTOSOURCE; the object is made and asked for the
+  caller's interface, one it cannot give being E_NOINTERFACE with the
+  storage never touched; the storage is marked with CLSID_StdOleLink,
+  the one storage call whose refusal is fatal, its error the caller's
+  with nothing retained; Stat and OpenStream('CompObj') are made and
+  their answers ignored, the second whatever the first said; the client
+  site is asked for the container's moniker; and the source is asked
+  whether it is running. Nothing is written at create time and the
+  source moniker is never saved. The object holds one reference on the
+  moniker, one on the site and two on the storage -- its own and its
+  cache's -- and lets all of them go with itself; nothing is cached, so
+  two links on one storage are two objects. OleCreateLink is the same
+  call with the three argument slots left out.
+
+  The object is CLSID_StdOleLink and answers IUnknown, IOleObject,
+  IOleLink, IPersistStorage, IPersist, IDataObject, IViewObject,
+  IViewObject2, IOleCache, IOleCache2 and IRunnableObject; it refuses
+  IPersistStream, IMarshal, IOleWindow, IExternalConnection,
+  IStdMarshalInfo, IOleCacheControl and IClassFactory cleanly, with the
+  caller's pointer zeroed. An unbound link leans on three errors, and
+  which of them a method gives is its contract: MK_E_UNAVAILABLE for
+  anything that would have to bind (BindToSource, Update, IsUpToDate,
+  Run, DoVerb), OLE_E_NOTRUNNING for anything that would have to ask
+  the source for data (InitFromData, GetClipboardData, every
+  IDataObject getter, UpdateCache), and REGDB_E_CLASSNOTREG for
+  anything that would have to read the source's registration
+  (GetUserType, EnumVerbs, EnumFormatEtc, and GetMiscStatus, which
+  writes 0x50 all the same). What works without a source is the link's
+  own: the update option (OLEUPDATE_ALWAYS until set, and only ALWAYS
+  or ONCALL taken), the source moniker and its display name (fetched
+  from the moniker when asked, and set by parsing a name, so a file
+  that is not there is MK_E_CANTOPENFILE), the client site, the three
+  advise holders -- IOleObject::Advise, IDataObject::DAdvise and
+  IOleCache::Cache, each numbering its connections from one -- and the
+  view advise, which is read back whole. Two refusals differ in the
+  caller's pointer rather than the HRESULT, and both are measured:
+  IOleObject::GetExtent zeroes the size it refuses where
+  IViewObject2::GetExtent leaves it alone, and IOleObject::EnumAdvise
+  is E_FAIL with the pointer untouched before the first Advise has made
+  the holder and E_NOTIMPL with it zeroed once there is one.
+
+  IPersistStorage::Save writes one stream, 'Ole', of 96 + L bytes
+  around the L bytes the source moniker's own Save writes, and destroys
+  'OlePres000' after it; it asks the client site for the container's
+  moniker three times on the way, which is where a relative source
+  would come from, and leaves both moniker streams in the head empty
+  when the site has none. The layout is the OLEStream of MS-OLEDS, and
+  two fields are worth naming because the obvious reading is wrong:
+  `AbsoluteSourceMonikerStreamSize` counts itself, so it is 20 + L and
+  not 16 + L, and a moniker whose Save refuses leaves the stream
+  truncated at 44 bytes with that field still zero and returns the
+  moniker's error. A saved link stays dirty until SaveCompleted.
+
+  **Limit:** there is no cached presentation. A link whose source
+  binds, a Draw, a GetColorSet, an InitCache or an IOleCache::SetData
+  is past this module and records its own row
+  (`ole32.dll!IViewObject::Draw(no cached presentation)` and its
+  neighbours) rather than answering with a lie; a holder past eight
+  sinks is E_OUTOFMEMORY with a row where Windows has no limit; and the
+  two enumerators the link answers S_OK for, EnumDAdvise and EnumCache,
+  list nothing, which is right while they are empty and a row when they
+  are not (ROADMAP OF).
 - **Monikers and the running object table** (`moniker.rs`,
   `moniker_test`, measured against Windows 11): a moniker here is its
   kind and its display name, and every operation is on that name, which
