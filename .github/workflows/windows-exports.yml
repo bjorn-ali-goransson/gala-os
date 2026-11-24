@@ -1,0 +1,28 @@
+name: windows-exports
+# Windows' export lists (tools/windows_exports.py; WORKFLOW "API
+# coverage"): the named exports of System32's 64-bit DLLs on the
+# runner's Windows (Server 2025, build 26100, gala's pinned build).
+# Export tables only, never a binary (CLEAN_ROOM). The artifact is what
+# tools/windows-exports/ is refreshed from.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/windows-exports.yml
+      - tools/windows_exports.py
+permissions:
+  contents: read
+jobs:
+  exports:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export lists (metadata only)
+        shell: pwsh
+        run: python -I tools/windows_exports.py windows-exports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exports
+          path: windows-exports
+          retention-days: 30
