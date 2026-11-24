@@ -23,6 +23,7 @@ mod extra;
 mod foreign;
 mod hook;
 mod icon;
+mod input;
 mod keyboard;
 mod listbox;
 mod menu;

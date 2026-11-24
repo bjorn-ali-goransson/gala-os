@@ -1650,9 +1650,8 @@ became visible, which is before the program has painted it --
 `hook_test`'s fourth window is white in its own picture and the three
 before it are not -- and `hook=window=shot+1` catches a window the
 program has drawn. But the wait is time the window may not live through:
-WINWORD puts its splash up a few seconds in and ends ~31 s in on a
-delay load gala cannot resolve, and a picture taken after that is of the
-desktop that outlived it, which looks exactly like a hook that never fired. So the host takes
+WINWORD puts its splash up a few seconds in and gives up ~34 s in, and
+a picture taken after that is of the desktop that outlived it, which looks exactly like a hook that never fired. So the host takes
 both, at the request and when the wait is up:
 
 ```

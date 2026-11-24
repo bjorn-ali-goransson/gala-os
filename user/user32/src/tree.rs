@@ -19,7 +19,7 @@ use crate::window::{
     finish_create, hwnd_of, index_of, me, set_last_error, window, with,
 };
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI64, Ordering};
 
 #[cfg_attr(
     target_arch = "x86",
@@ -53,13 +53,13 @@ const WS_MINIMIZE: u32 = 0x2000_0000;
 const WS_DISABLED: u32 = 0x0800_0000;
 const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_TLW_WITH_WSCHILD: u32 = 1406;
 
 /// Z order: top-level windows go on top (ever smaller), children at the
 /// bottom (ever larger).
 static TOP: AtomicI64 = AtomicI64::new(0);
 static BOTTOM: AtomicI64 = AtomicI64::new(0);
-static FOCUS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn next_z(child: bool) -> i64 {
     if child {
@@ -339,7 +339,7 @@ pub fn show_child(hwnd: Hwnd, show: bool) -> i32 {
 /// A top-level window was shown: it gets the focus unless one of its
 /// windows has it.
 pub fn shown_top_level(top: Hwnd) {
-    let focus = FOCUS.load(Ordering::Relaxed);
+    let focus = crate::input::focus();
     let inside = focus != 0
         && index_of(focus)
             .is_some_and(|f| with(|s| s.windows[f].used && hwnd_of(root_of(s, f)) == top));
@@ -350,7 +350,7 @@ pub fn shown_top_level(top: Hwnd) {
 
 /// A window is going: nothing keeps it.
 pub fn forget(hwnd: Hwnd) {
-    let _ = FOCUS.compare_exchange(hwnd, 0, Ordering::Relaxed, Ordering::Relaxed);
+    crate::input::forget(hwnd);
     crate::window::release_capture_of(hwnd);
 }
 
@@ -374,7 +374,7 @@ pub fn moved_by_desktop(top: Hwnd, lparam: isize) {
 /// target's client coordinates for mouse messages.
 pub fn route(top: Hwnd, message: u32, lparam: isize) -> (Hwnd, isize) {
     if (0x0100..=0x0109).contains(&message) {
-        let focus = FOCUS.load(Ordering::Relaxed);
+        let focus = crate::input::focus();
         let ok = focus != 0
             && index_of(focus)
                 .is_some_and(|f| with(|s| s.windows[f].used && hwnd_of(root_of(s, f)) == top));
@@ -429,15 +429,29 @@ pub fn route(top: Hwnd, message: u32, lparam: isize) -> (Hwnd, isize) {
     (target, pack(x - ox, y - oy))
 }
 
-/// SetFocus: WM_KILLFOCUS to the old focus, WM_SETFOCUS to the new; the
-/// old one.
+/// SetFocus: WM_KILLFOCUS to the old focus, WM_SETFOCUS to the new. What
+/// it answers is the window the focus was taken from, or the window
+/// itself when the call had to activate its top-level window first
+/// (crate::input::take_focus). A window of a thread the caller shares no
+/// input state with cannot take the focus: 0 with ERROR_ACCESS_DENIED,
+/// which AttachThreadInput is a program's answer to.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetFocus(hwnd: Hwnd) -> Hwnd {
-    if hwnd != 0 && window(hwnd).is_none() {
-        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+    let owner = match window(hwnd) {
+        Some(w) => w.thread,
+        None if hwnd != 0 => {
+            set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        None => 0,
+    };
+    if !crate::input::shares(owner) {
+        set_last_error(ERROR_ACCESS_DENIED);
         return 0;
     }
-    let old = FOCUS.swap(hwnd, Ordering::Relaxed);
+    let top = if hwnd == 0 { 0 } else { GetAncestor(hwnd, 2) }; // GA_ROOT
+    let old = crate::input::focus();
+    let answer = crate::input::take_focus(hwnd, top);
     if old != hwnd {
         if old != 0 && window(old).is_some() {
             SendMessageW(old, WM_KILLFOCUS, hwnd, 0);
@@ -448,12 +462,14 @@ pub extern "system" fn SetFocus(hwnd: Hwnd) -> Hwnd {
             raise(EVENT_OBJECT_FOCUS, hwnd, OBJID_CLIENT, CHILDID_SELF);
         }
     }
-    old
+    answer
 }
 
+/// GetFocus: the focus of the calling thread's input state, which is
+/// nothing of ours until one of our windows takes it.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetFocus() -> Hwnd {
-    let f = FOCUS.load(Ordering::Relaxed);
+    let f = crate::input::focus();
     if window(f).is_some() { f } else { 0 }
 }
 

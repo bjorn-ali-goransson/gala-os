@@ -897,6 +897,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("presenter_test", "bcrypt.dll", "Windows/System32"),
     ("presenter_test", "user32.dll", "Windows/System32"),
     ("presenter_test", "gdi32.dll", "Windows/System32"),
+    ("threadinput_test", "ntdll.dll", "Windows/System32"),
+    ("threadinput_test", "kernel32.dll", "Windows/System32"),
+    ("threadinput_test", "user32.dll", "Windows/System32"),
     ("winsta_test", "ntdll.dll", "Windows/System32"),
     ("winsta_test", "kernel32.dll", "Windows/System32"),
     ("winsta_test", "user32.dll", "Windows/System32"),
@@ -3544,6 +3547,7 @@ const USER_PROGRAMS: &[&str] = &[
     "fpu_test",
     "sysinfo_test",
     "threadinfo_test",
+    "threadinput_test",
     "filemap_test",
     "cow_test",
     "async_test",
@@ -6571,6 +6575,7 @@ const ARM64_TWINS: &[&str] = &[
     "seh_test",
     "context_test",
     "threadinfo_test",
+    "threadinput_test",
     "timer_test",
     "clock_off",
     "smpmem_test",
@@ -8178,6 +8183,29 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "presenter_test: the console shows session 1 again",
             "presenter_test: a click reached session 1 again",
             "presenter_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The input state two threads share, and the calls that join and
+        // part it (user/threadinput_test, ROADMAP OF): Word's
+        // Mso40UIwin32client delay-loads AttachThreadInput and ends
+        // without it. The transcript is the one Windows 11 prints.
+        name: "threadinput_test",
+        cmdline: "qemu_exit run=threadinput_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            // A thread with no message queue cannot be attached to.
+            "threadinput_test: call to-queueless ret=0x00000000 err=87",
+            // Apart, a window of the other thread cannot take the focus.
+            "threadinput_test: call setfocus-other-apart ret=none (0x00000000) err=5",
+            // Attached, the state is the one attached to, and what one
+            // thread focuses the other sees.
+            "threadinput_test: state attached a-focus=WB a-active=WB b-focus=WB b-active=WB",
+            "threadinput_test: call setfocus-own-attached ret=WA",
+            // Detaching does not undo it.
+            "threadinput_test: state detached a-focus=WB a-active=WB b-focus=WB b-active=WB",
+            "threadinput_test: ok",
             "exited with status 0x00000000",
         ],
     },

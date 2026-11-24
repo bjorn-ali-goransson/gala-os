@@ -2604,6 +2604,12 @@ pub(crate) fn activate(hwnd: Hwnd, state: usize) {
     if old == hwnd {
         return;
     }
+    // The foreground window is the desktop's one notion; the active
+    // window is per input state, and the threads that share one see the
+    // same (crate::input, AttachThreadInput).
+    let (thread, old_thread) =
+        (window(hwnd).map_or(0, |w| w.thread), window(old).map_or(0, |w| w.thread));
+    crate::input::activated(thread, hwnd, old_thread, old);
     use crate::winevent::{CHILDID_SELF, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW, raise};
     raise(EVENT_SYSTEM_FOREGROUND, hwnd, OBJID_WINDOW, CHILDID_SELF);
     if let Some(w) = window(old) {
@@ -4096,16 +4102,14 @@ pub extern "system" fn GetDialogBaseUnits() -> i32 {
     8 | 16 << 16
 }
 
-/// GetActiveWindow: the foreground window, if it is the calling thread's
-/// (the active window is per thread; gala's desktop activates one window
-/// at a time).
+/// GetActiveWindow: the active window of the calling thread's input
+/// state (crate::input), which is not always the foreground window --
+/// another thread's window may be in front of it -- and which the
+/// threads that share one state see alike.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetActiveWindow() -> Hwnd {
-    let h = GetForegroundWindow();
-    match window(h) {
-        Some(w) if w.thread == me() => h,
-        _ => 0,
-    }
+    let h = crate::input::active();
+    if window(h).is_some() { h } else { 0 }
 }
 
 /// FlashWindowEx(info): whether the window's caption was active before
