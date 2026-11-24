@@ -4180,13 +4180,25 @@ in and a program's first window 30-60 s in.
 
 An entry that is not a number is a piece of a serial log line to wait
 for, with an optional `+<secs>` for a wait after it, and its file is
-named after the line (`office_word-desktop-shown-window-1s.png`):
+named after the line (`office_word-desktop-shown-window-1s.png`). A wait
+leaves two pictures, not one: the wait is time the thing waited for may
+not live through, so one is taken the moment the line came
+(`office_word-desktop-shown-window.png`) and one when the wait is up,
+and a window whose program dies inside the delay is in the first and in
+nothing else:
 
     XTASK_SHOTS='desktop: shown window+1' cargo xtask boot-test office_word
 
+Every picture is named in the run's own log as it is written
+(`xtask: wrote ...`), and so is every one the run did not reach: a line
+that never came, a second the run ended before, and a line that did come
+whose wait the run ended inside, which are three different gaps and not
+one missing file.
+
 The moments nobody can name in advance are the kernel's to ask for:
 `hook=window=shot` on the kernel command line takes a screendump as each
-top-level window becomes visible, `+<secs>` after it if asked, and
+top-level window becomes visible -- two of them when a `+<secs>` is
+asked for, the instant and the second -- and
 `hook=window/<text>:<n>=shot` only of the windows whose program or title
 holds the text, `n` at most. The files are named after the program and
 the window (`hook_test-hook-hook-test-exe-w4.png`), so a run with no idea

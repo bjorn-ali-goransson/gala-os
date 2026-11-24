@@ -7542,7 +7542,9 @@ among the slowest hand-offs.
 
    The screen's half of it is a hook: `hook=window=shot` takes a
    screendump of the desktop as each top-level window becomes visible,
-   a second or two later if asked (`+<secs>`), of the windows whose
+   a second or two later as well if asked (`+<secs>` leaves two
+   pictures, the instant and the second, a window that dies inside the
+   wait being in the first alone), of the windows whose
    program or title holds a text if asked (`/text`), four times by
    default. The kernel writes the request to the log as the window goes
    up and xtask takes the picture -- the kernel knows the moment and

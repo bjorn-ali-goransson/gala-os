@@ -3943,9 +3943,12 @@ commands:
                and the named DLLs into the resumed machine (docs/WORKFLOW.md,
                Hot swapping DLLs and the kernel);
                XTASK_SHOTS=<secs>|<serial log line>[+<secs>],...: screendumps
-               of the screen as the run goes, in target/screenshots/ (the
-               kernel asks for its own there too, at an event rather than a
-               second: hook=window=shot, docs/OBSERVABILITY.md, Hooks)
+               of the screen as the run goes, in target/screenshots/ (a
+               +<secs> leaves two, the moment the line came and the second
+               asked for, a window that dies in the wait being in the first
+               alone; the kernel asks for its own there too, at an event
+               rather than a second: hook=window=shot,
+               docs/OBSERVABILITY.md, Hooks)
   snapshots    list the machine snapshots (target/snapshots): what, when, size,
                build; snapshots rm <name> deletes one
   hotswap-diff what a hot swap would patch: hotswap-diff <old> <old.map>
@@ -10519,8 +10522,12 @@ const BASE_SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         // The same four windows, with a hook that wants only the ones
-        // whose name holds "three" and has one picture to give. Two of
-        // the four hold it, so the fourth window finds the count spent:
+        // whose name holds "three" and has one picture to give, a
+        // second after the window goes up. A wait is time the window
+        // may not live through, so that one request leaves two
+        // pictures: the instant it went up and the second asked for,
+        // both named in the log here. Two of the four windows hold the
+        // text, so the fourth finds the count spent:
         // the line that says so carries the number of windows the match
         // passed over, which is the only thing that can prove the match
         // chose rather than the count (an expectation is a line that
@@ -10536,6 +10543,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "hook: armed: window shown -> screendump, 1 shot, 1.000 s after each (hook=), only \
              those whose program or title holds \"three\" (either case)",
             "window 'hook_test three' shown by hook_test.exe (pid",
+            "hook_match_test-hook-hook-test-exe-w3.png",
+            "hook_match_test-hook-hook-test-exe-w3-1s.png",
             "hook: window: no shots left of the 1 asked for (2 windows passed over by the match)",
             "hook_test: ok",
             "exited with status 0x00000000",
@@ -17404,6 +17413,19 @@ fn fewer_cpus(got: u32, want: u32) -> String {
 /// 90 s run, and the run is as fast as the host is free), while
 /// `XTASK_SHOTS='desktop: shown window+1'` catches it on every run.
 ///
+/// A `+<secs>` asks for two pictures and not one. The wait is time the
+/// thing waited for may not live through -- Word's splash lives about 2 s
+/// of a 90 s run, and a process that dies inside the delay leaves a
+/// picture of the desktop that outlived it -- so the host takes one at
+/// the first poll after the trigger ([`take_due`] runs every 50 ms) and
+/// one when the wait is up, `<scenario>-<slug>.png` beside
+/// `<scenario>-<slug>-<secs>s.png`. The first is the only picture a
+/// window that does not survive its own delay leaves behind; the second
+/// is the one that was asked for, of a window that has settled. `+0`
+/// (or no `+` at all) is already that first one and stays single.
+///
+/// [`take_due`]: Shots::take_due
+///
 /// A line only works when the line is known in advance, which the first
 /// window of a run is and the ones after it are not. Those the kernel
 /// asks for itself (`hook=window=shot`, `nt::hooks`, OBSERVABILITY
@@ -17461,7 +17483,7 @@ impl Shots {
     fn parse(list: &str, scenario: &str) -> Result<Self> {
         let mut shots = Vec::new();
         for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-            shots.push(Shot::parse(entry, scenario)?);
+            shots.extend(Shot::parse(entry, scenario)?);
         }
         // The timed ones in their order, so their files are written in
         // it; the ones a line brings are taken when it comes.
@@ -17505,7 +17527,19 @@ impl Shots {
                 self.took += &note;
                 continue;
             };
-            if self.shots.len() >= MAX_HOOK_SHOTS {
+            // A window shown, hidden and shown again asks twice, and
+            // the second window's pictures must not write over the
+            // first's.
+            let base = self.free_base(&format!("{}-hook-{name}", self.scenario), after);
+            // A hook's delay is kept as the second it falls on and not
+            // as a wait, the request itself having started the wait.
+            let now = elapsed.as_secs_f64();
+            let mut asked = vec![Shot::new(When::At(now), 0.0, format!("{base}.png"))];
+            if after > 0.0 {
+                let file = format!("{base}-{after}s.png");
+                asked.push(Shot::new(When::At(now + after), 0.0, file));
+            }
+            if self.shots.len() + asked.len() > MAX_HOOK_SHOTS {
                 if !self.full {
                     self.full = true;
                     self.took += &format!(
@@ -17515,23 +17549,28 @@ impl Shots {
                 }
                 return;
             }
-            // A window shown, hidden and shown again asks twice, and the
-            // second picture must not write over the first.
-            let base = format!("{}-hook-{name}", self.scenario);
-            let mut png = format!("{base}.png");
-            let mut nth = 2;
-            while self.shots.iter().any(|s| s.file == png) {
-                png = format!("{base}-{nth}.png");
-                nth += 1;
-            }
-            self.shots.push(Shot {
-                when: When::At(elapsed.as_secs_f64() + after),
-                after: 0.0,
-                file: png,
-                seen: None,
-                taken: false,
-            });
+            self.shots.extend(asked);
         }
+    }
+
+    /// A name for a hook's window that no shot already carries, both
+    /// of the pair's, so that neither writes over a picture of an
+    /// earlier window of the same name.
+    fn free_base(&self, base: &str, after: f64) -> String {
+        let taken = |candidate: &str| {
+            let mut names = vec![format!("{candidate}.png")];
+            if after > 0.0 {
+                names.push(format!("{candidate}-{after}s.png"));
+            }
+            names.iter().any(|n| self.shots.iter().any(|s| &s.file == n))
+        };
+        let mut candidate = base.to_string();
+        let mut nth = 2;
+        while taken(&candidate) {
+            candidate = format!("{base}-{nth}");
+            nth += 1;
+        }
+        candidate
     }
 
     /// Takes the screendumps whose time has come; one that fails is
@@ -17588,9 +17627,21 @@ impl Shots {
     fn missed(&self) -> String {
         let mut note = String::new();
         for shot in self.shots.iter().filter(|s| !s.taken) {
-            note += &match &shot.when {
-                When::At(t) => format!("xtask: screenshot: the run ended before {t} s\n"),
-                When::Line(line) => {
+            note += &match (&shot.when, shot.seen) {
+                (When::At(t), _) => {
+                    format!("xtask: screenshot: {}: the run ended before {t} s\n", shot.file)
+                }
+                // A line the run did reach, whose wait it did not: the
+                // window went up and the picture of it did not, which
+                // is not the gap a line that never came leaves.
+                (When::Line(line), Some(seen)) => format!(
+                    "xtask: screenshot: {}: {line:?} came {:.0} s in, and the run ended before \
+                     its +{} s wait\n",
+                    shot.file,
+                    seen.as_secs_f64(),
+                    shot.after,
+                ),
+                (When::Line(line), None) => {
                     format!("xtask: screenshot: {line:?} never came in the serial log\n")
                 }
             };
@@ -17600,11 +17651,18 @@ impl Shots {
 }
 
 impl Shot {
-    /// `<secs>`, or a line with an optional `+<secs>` after it.
-    fn parse(entry: &str, scenario: &str) -> Result<Self> {
+    /// One screendump at `when`, `after` seconds later.
+    fn new(when: When, after: f64, file: String) -> Self {
+        Self { when, after, file, seen: None, taken: false }
+    }
+
+    /// `<secs>`, or a line with an optional `+<secs>` after it: a wait
+    /// makes two, the picture taken the instant the line comes and the
+    /// one that was asked for (see [`Shots`]).
+    fn parse(entry: &str, scenario: &str) -> Result<Vec<Self>> {
         if let Ok(t) = entry.parse::<f64>() {
             let file = format!("{scenario}-{t}s.png");
-            return Ok(Self { when: When::At(t), after: 0.0, file, seen: None, taken: false });
+            return Ok(vec![Self::new(When::At(t), 0.0, file)]);
         }
         // A `+` that is not followed by a number is part of the text.
         let (line, after) = match entry.rsplit_once('+') {
@@ -17620,11 +17678,19 @@ impl Shot {
         if slug.is_empty() {
             return Err(format!("XTASK_SHOTS: {entry:?} is neither a second nor a line"));
         }
-        let file = match after {
-            0.0 => format!("{scenario}-{slug}.png"),
-            _ => format!("{scenario}-{slug}-{after}s.png"),
-        };
-        Ok(Self { when: When::Line(line.to_string()), after, file, seen: None, taken: false })
+        let at_once =
+            Self::new(When::Line(line.to_string()), 0.0, format!("{scenario}-{slug}.png"));
+        if after == 0.0 {
+            return Ok(vec![at_once]);
+        }
+        // Both wait for the same line, so one poll gives both their
+        // time: the first is taken there, the second `after` later.
+        let waited = Self::new(
+            When::Line(line.to_string()),
+            after,
+            format!("{scenario}-{slug}-{after}s.png"),
+        );
+        Ok(vec![at_once, waited])
     }
 
     /// Where it falls among the timed ones (a line's time is unknown).
@@ -17679,13 +17745,65 @@ mod shots {
             [
                 "office_word-3s.png",
                 "office_word-49.5s.png",
+                "office_word-desktop-shown-window.png",
                 "office_word-desktop-shown-window-1s.png",
                 "office_word-word-was-unable.png",
             ]
         );
         let waits: Vec<(bool, f64)> =
             shots.shots.iter().map(|s| (matches!(s.when, When::Line(_)), s.after)).collect();
-        assert_eq!(waits, [(false, 0.0), (false, 0.0), (true, 1.0), (true, 0.0)]);
+        assert_eq!(waits, [(false, 0.0), (false, 0.0), (true, 0.0), (true, 1.0), (true, 0.0)]);
+    }
+
+    #[test]
+    fn a_wait_leaves_the_picture_taken_at_once_too() {
+        let shots = Shots::parse("desktop: shown window+2.5", "office_word").expect("parses");
+        let taken: Vec<(&str, f64)> =
+            shots.shots.iter().map(|s| (s.file.as_str(), s.after)).collect();
+        // The wait is time the window may not live through, so the pair
+        // is the moment the line came and the second that was asked for.
+        assert_eq!(
+            taken,
+            [
+                ("office_word-desktop-shown-window.png", 0.0),
+                ("office_word-desktop-shown-window-2.5s.png", 2.5)
+            ]
+        );
+        // Both wait for the same line, so both learn it in one poll.
+        for shot in &shots.shots {
+            assert!(matches!(&shot.when, When::Line(l) if l == "desktop: shown window"));
+        }
+    }
+
+    #[test]
+    fn a_hook_request_that_waits_is_two_pictures() {
+        let dir = std::env::temp_dir().join("gala-shots-at-once");
+        fs::create_dir_all(&dir).expect("a directory for the log");
+        let log = dir.join("serial.log");
+        let line = "hook: shot +1.000 w3: window 'Doc1' shown by WINWORD.EXE (pid 12)
+";
+        // The same window shown twice: four pictures, none over another.
+        fs::write(&log, format!("{line}{line}")).expect("the log");
+        let mut shots = Shots::parse("", "office_word").expect("empty");
+        shots.hook_requests(Duration::from_secs(5), &log);
+        let taken: Vec<(&str, f64)> = shots
+            .shots
+            .iter()
+            .map(|s| match s.when {
+                When::At(t) => (s.file.as_str(), t),
+                When::Line(_) => panic!("a hook's shot is timed"),
+            })
+            .collect();
+        assert_eq!(
+            taken,
+            [
+                ("office_word-hook-w3.png", 5.0),
+                ("office_word-hook-w3-1s.png", 6.0),
+                ("office_word-hook-w3-2.png", 5.0),
+                ("office_word-hook-w3-2-1s.png", 6.0)
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -17733,6 +17851,19 @@ mod shots {
         let missed = shots.missed();
         assert!(missed.contains("the run ended before 900 s"), "{missed}");
         assert!(missed.contains("\"desktop: shown window\" never came"), "{missed}");
+
+        // A line the run did reach, whose wait it did not: saying that
+        // line never came would send the next reader after the wrong
+        // thing (the window went up; the picture of it did not).
+        let mut shots = Shots::parse("desktop: shown window+5", "office_word").expect("parses");
+        for shot in &mut shots.shots {
+            shot.seen = Some(Duration::from_secs(30));
+        }
+        shots.shots[0].taken = true;
+        let missed = shots.missed();
+        assert!(missed.contains("came 30 s in"), "{missed}");
+        assert!(missed.contains("ended before its +5 s wait"), "{missed}");
+        assert!(!missed.contains("never came"), "{missed}");
     }
 }
 
