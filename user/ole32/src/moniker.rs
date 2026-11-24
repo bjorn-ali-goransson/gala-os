@@ -11,7 +11,8 @@
 //! - `MkParseDisplayName` takes a path to a file that exists (a file
 //!   moniker), `clsid:<guid>:` (a class moniker), and refuses everything
 //!   else the way Windows does: MK_E_CANTOPENFILE for a file that is not
-//!   there and for a directory, MK_E_SYNTAX for a bare word or a URL,
+//!   there and for a directory, MK_E_SYNTAX for a bare word, a URL or a
+//!   path on a drive this machine has not got,
 //!   E_NOINTERFACE for a `@ProgID`, E_INVALIDARG for a NULL argument or
 //!   an empty name. A file followed by an extension it cannot parse is
 //!   MK_E_INVALIDEXTENSION with the file part eaten *and* the file's
@@ -125,6 +126,7 @@ fn class_of(kind: u32) -> Guid {
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetFileAttributesW(name: *const u16) -> u32;
+    fn GetLogicalDrives() -> u32;
 }
 
 const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
@@ -572,13 +574,18 @@ extern "system" fn compose_with(
     if only_if_not_generic != 0 {
         return MK_E_NEEDGENERIC;
     }
+    composite_of(m.text(), &name[..len], out)
+}
+
+/// A generic composite of two display names, one after the other.
+fn composite_of(left: &[u16], right: &[u16], out: *mut *mut c_void) -> HResult {
     let mut joined = [0u16; NAME];
-    let Some(at) = push(&mut joined, 0, m.text()) else {
-        missing(b"ole32.dll!IMoniker::ComposeWith(name longer than 320)", 0);
+    let Some(at) = push(&mut joined, 0, left) else {
+        missing(b"ole32.dll!CreateGenericComposite(name longer than 320)", 0);
         return E_OUTOFMEMORY;
     };
-    let Some(end) = push(&mut joined, at, &name[..len]) else {
-        missing(b"ole32.dll!IMoniker::ComposeWith(name longer than 320)", 0);
+    let Some(end) = push(&mut joined, at, right) else {
+        missing(b"ole32.dll!CreateGenericComposite(name longer than 320)", 0);
         return E_OUTOFMEMORY;
     };
     handed(new_moniker(MKSYS_GENERICCOMPOSITE, [0; 16], &joined[..end]), out)
@@ -966,11 +973,13 @@ pub extern "system" fn CreateAntiMoniker(out: *mut *mut c_void) -> HResult {
     handed(new_moniker(MKSYS_ANTIMONIKER, [0; 16], &name[..end]), out)
 }
 
-/// `clsid:<guid>:`, the display name of a class moniker, in upper case
-/// as Windows writes it.
 /// CreateGenericComposite: the left moniker's own `ComposeWith` with a
-/// generic composite allowed, and a NULL on either side handing back the
-/// other moniker with a reference of its own (measured on Windows 11).
+/// composite refused, joined here into one when it answers
+/// MK_E_NEEDGENERIC, and a NULL on either side handing back the other
+/// moniker with a reference of its own (measured on Windows 11). Asking
+/// first is what lets a moniker from another DLL -- urlmon's URL
+/// moniker -- leave the composite to ole32 without calling back into
+/// its own ComposeWith.
 ///
 /// Windows reads `out` without checking it and faults on a NULL; gala
 /// answers E_POINTER, which is the one deliberate difference here.
@@ -999,9 +1008,18 @@ pub extern "system" fn CreateGenericComposite(
     if first.is_null() {
         return S_OK;
     }
-    com_call!(first, 11, fn(*mut c_void, i32, *mut *mut c_void) -> HResult, rest, 0, out)
+    let hr = com_call!(first, 11, fn(*mut c_void, i32, *mut *mut c_void) -> HResult, rest, 1, out);
+    if hr != MK_E_NEEDGENERIC {
+        return hr;
+    }
+    put(out, core::ptr::null_mut());
+    let Some((_, left, left_len)) = described(first) else { return E_INVALIDARG };
+    let Some((_, right, right_len)) = described(rest) else { return E_INVALIDARG };
+    composite_of(&left[..left_len], &right[..right_len], out)
 }
 
+/// `clsid:<guid>:`, the display name of a class moniker, in upper case
+/// as Windows writes it.
 fn class_name(clsid: &Guid, out: &mut [u16]) -> usize {
     let braced = super::guid_text(clsid);
     let at = push_ascii(out, 0, b"clsid:").unwrap_or(0);
@@ -1045,8 +1063,34 @@ fn attributes(path: &[u16]) -> Option<u32> {
     if a == INVALID_FILE_ATTRIBUTES { None } else { Some(a) }
 }
 
+/// Whether the drive a path-shaped name is on is one this machine has.
+///
+/// Windows takes a drive-shaped name whose drive is not mounted to be no
+/// path at all and refuses it for syntax, rather than trying to open it:
+/// with no `H:` drive, `H:\x` is MK_E_SYNTAX where `C:\nosuchdir\x` is
+/// MK_E_CANTOPENFILE. The error `GetFileAttributesW` leaves behind plays
+/// no part in that -- both of those are ERROR_PATH_NOT_FOUND, and
+/// `C:\a|b.txt` is ERROR_INVALID_NAME and still MK_E_CANTOPENFILE
+/// (measured). A name beginning with two separators names no drive and
+/// is a path whatever follows, `\\?\H:\x` included.
+///
+/// Only meaningful for a name `looks_like_a_path` has accepted, which is
+/// what makes the first character enough to tell the two shapes apart.
+fn drive_is_there(name: &[u16]) -> bool {
+    if is_separator(name[0]) {
+        return true;
+    }
+    let letter = u32::from(fold(name[0]) - u16::from(b'A'));
+    // SAFETY: no arguments and no out parameters; the answer is a bitmask.
+    let mounted = unsafe { GetLogicalDrives() };
+    mounted & (1u32 << letter) != 0
+}
+
 /// Whether `name` is shaped like a path: a drive letter and a colon, or
-/// a UNC `\\server\share`.
+/// a UNC `\\server\share`. The shape alone, which is what composing two
+/// file monikers goes by -- `H:\x` on the right of a composite is an
+/// absolute path and MK_E_SYNTAX whether or not `H:` is mounted, where
+/// `MkParseDisplayName` wants `drive_is_there` as well.
 fn looks_like_a_path(name: &[u16]) -> bool {
     if name.len() >= 2 && is_separator(name[0]) && is_separator(name[1]) {
         return true;
@@ -1086,6 +1130,10 @@ fn parse_class_name(name: &[u16]) -> Option<Guid> {
 /// followed by an extension that cannot be parsed is
 /// MK_E_INVALIDEXTENSION with the file part eaten and the file's moniker
 /// handed back -- a failure that still gives the caller an object.
+///
+/// A drive-shaped name is a path only while that drive is mounted
+/// (`drive_is_there`), so with no `H:` drive `H:\x`, `H:/x`, `H:x` and
+/// `H:` are all MK_E_SYNTAX.
 #[unsafe(no_mangle)]
 pub extern "system" fn MkParseDisplayName(
     bc: *mut c_void,
@@ -1130,7 +1178,7 @@ pub extern "system" fn MkParseDisplayName(
         return E_NOINTERFACE;
     }
 
-    if !looks_like_a_path(name) {
+    if !looks_like_a_path(name) || !drive_is_there(name) {
         missing(b"ole32.dll!MkParseDisplayName(not a path)", len as u64);
         return MK_E_SYNTAX;
     }

@@ -5823,9 +5823,20 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   MkParseDisplayName takes a path to a file that exists (a file moniker,
   the whole name eaten) and `clsid:<guid>:` (a class moniker), and
   refuses the rest as Windows does: MK_E_CANTOPENFILE for a file that is
-  not there and for a directory, MK_E_SYNTAX for a bare word or a URL,
-  E_NOINTERFACE for a `@ProgID`, E_INVALIDARG for a NULL argument or an
-  empty name. Three answers are Windows' and not the documentation's,
+  not there and for a directory, MK_E_SYNTAX for a bare word, a URL or a
+  path on a drive this machine has not got, E_NOINTERFACE for a
+  `@ProgID`, E_INVALIDARG for a NULL argument or an empty name. A
+  drive-shaped name is a path only while that drive is mounted
+  (`drive_is_there`), which is what tells those two refusals apart: with
+  no `H:` drive, `H:\x`, `H:/x`, `H:x` and `H:` are all MK_E_SYNTAX,
+  where `C:\nosuchdir\x` is MK_E_CANTOPENFILE. The error
+  GetFileAttributesW leaves behind plays no part in it -- both of those
+  are ERROR_PATH_NOT_FOUND, and a name with a character no file may
+  carry is ERROR_INVALID_NAME and still MK_E_CANTOPENFILE. A name
+  beginning with two separators names no drive and is a path whatever
+  follows, `\\?\H:\x` included. Absoluteness in a composite is the
+  shape alone, so an unmounted drive on the right of a ComposeWith is
+  MK_E_SYNTAX there like any other absolute path. Three answers are Windows' and not the documentation's,
   and programs depend on them: a file followed by an extension that
   cannot be parsed is MK_E_INVALIDEXTENSION with the file part eaten
   *and* the file's moniker handed back -- a failure that still gives the
@@ -5844,9 +5855,13 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   climb past the drive or the UNC share, for an absolute right-hand path
   and for an empty left one. That merge is no composite, so it happens
   even when the caller says it will not take one, where an item on the
-  right is MK_E_NEEDGENERIC. CreateGenericComposite is the left
-  moniker's own ComposeWith with a composite allowed, and a NULL on
-  either side hands back the other moniker with a reference of its own.
+  right is MK_E_NEEDGENERIC. CreateGenericComposite asks the left
+  moniker's own ComposeWith with a composite *refused* and joins the two
+  names itself when it answers MK_E_NEEDGENERIC, which is what lets a
+  moniker from another DLL -- urlmon's URL moniker -- leave the
+  composite to ole32 without ole32 calling back into its own
+  ComposeWith; a NULL on either side hands back the other moniker with
+  a reference of its own.
   Inverse of a file or an item is an anti moniker (whose hash is
   Windows' 0x80000001, which programs test for); CommonPrefixWith of two
   paths is their shared directory with its separator still on, and of a
@@ -12884,7 +12899,43 @@ dotted host, the Local Intranet zone for a plain one; other schemes the
 Internet zone; a relative URL E_INVALIDARG; the ID `scheme:host` or
 "file:" then the zone's DWORD), each zone asked recorded to the ledger
 ("other"); ProcessUrlAction, QueryCustomPolicy and the zone mappings
-are E_NOTIMPL, recorded; its IUri functions are still stubs. wldp.dll answers
+are E_NOTIMPL, recorded. It has the URL moniker as well
+(MkParseDisplayNameEx, CreateURLMoniker, CreateURLMonikerEx,
+`urlmk.rs`, `urlmon_test`), which is what Word parses every name it is
+given with: a name whose scheme is one of the fourteen urlmon claims
+(ftp, http, https, file, mailto, telnet, mk, about, res, javascript,
+vbscript, local, its, ms-its) becomes a URL moniker, and every other
+name is forwarded to ole32's MkParseDisplayName, so a path to a file is
+still a file moniker and a bare word still MK_E_SYNTAX. Its own
+arguments are refused more strictly than ole32's: each of the four
+NULLs and an empty name is E_INVALIDARG with *both* out parameters left
+untouched, where ole32's MkParseDisplayName zeroes them on every
+refusal but those. The name is canonicalised as Windows canonicalises
+it, measured case by case: the scheme matched whole, without regard to
+case and lowercased (`local:` alone kept as it was given), leading
+whitespace refused, a hierarchical scheme's empty path filled with `/`,
+its host lowercased and a default port dropped, dot segments resolved
+with Windows' trailing-slash rule, a `%XX` escape of an unreserved
+character decoded and nothing else touched, `file:` written in Windows'
+own shape (`file:///C:/x` becomes `file://C:\x`), and `its:` and
+`ms-its:` given the `::/` their store names end in. The moniker answers
+IUnknown, IMoniker, IPersist, IPersistStream and IAsyncMoniker as
+itself, IsSystemMoniker MKSYS_URLMONIKER, hashes and compares its whole
+name without regard to case, resolves a relative name against itself
+(ParseDisplayName, RelativePathTo, Reduce), composes with another URL
+moniker by taking the right-hand name and leaves every other composite
+to ole32 with MK_E_NEEDGENERIC -- which is why CreateGenericComposite
+asks before it joins -- inverts to MK_E_NOINVERSE, and saves itself in
+the stream Windows writes: a 4-byte length, the name with its NUL, and
+a fixed 24-byte tail. Limits, each with a ledger row where a program
+meets it: nothing is fetched, so BindToObject, BindToStorage and
+GetTimeOfLastChange are E_NOTIMPL with the URL in the row; IROTData,
+IUriContainer and IMarshal are refused cleanly (E_NOINTERFACE) after a
+row of their own; CommonPrefixWith is E_NOTIMPL; and a URL is at most
+1024 characters. The four ole32 entry points it needs are resolved
+lazily (LoadLibraryW and GetProcAddress, as `shlwapi` does), so loading
+urlmon does not pull ole32 into every program that loads it. Its IUri
+functions are still stubs. wldp.dll answers
 as an unlocked Windows without App Control: WldpQueryWindowsLockdownMode
 UNLOCKED (no S mode), WldpGetLockdownPolicy WLDP_LOCKDOWN_DEFINED_FLAG
 alone for every host, WldpIsDynamicCodePolicyEnabled FALSE. crypt32's own

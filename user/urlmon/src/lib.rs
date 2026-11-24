@@ -1,4 +1,6 @@
-//! gala's urlmon.dll (URL monikers), x64 and x86: the security manager
+//! gala's urlmon.dll (URL monikers), x64 and x86: the URL moniker
+//! itself (MkParseDisplayNameEx, CreateURLMoniker, `urlmk`), which Word
+//! parses every name it is given with, the security manager
 //! (CoInternetCreateSecurityManager, `secmgr`), which ODT's setup.exe asks
 //! for on its download's error path (ROADMAP OF), and the IUri functions
 //! SQL Server LocalDB imports (not implemented: each reports itself to the
@@ -10,6 +12,7 @@
 
 mod secmgr;
 mod unimplemented;
+mod urlmk;
 
 // The 32-bit build (SysWOW64) takes the memory routines, 64-bit
 // division helpers and unwind personality from ntrt's x86 runtime
