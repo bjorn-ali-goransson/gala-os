@@ -469,6 +469,41 @@ pub struct TextMetricW {
     pub char_set: u8,
 }
 
+/// DEFAULT_CHARSET asks the font mapper to choose a character set; no
+/// realized font keeps it.
+pub const DEFAULT_CHARSET: u8 = 1;
+/// The character set of the Latin code pages, which gala's faces cover.
+pub const ANSI_CHARSET: u8 = 0;
+
+/// The FONTSIGNATURE of a face that covers Latin 1 (bit 0 of the Unicode
+/// ranges) and code page 1252 (bit 0 of the ANSI code pages): the
+/// Unicode ranges' four words then the code pages' two. Selawik and Noto
+/// Sans Mono are both Latin, so it is the signature of every font gala
+/// realizes, and what EnumFontFamiliesExW reports for them.
+pub const LATIN_SIGNATURE: [u32; 6] = [1, 0, 0, 0, 1, 0];
+
+/// The character set the font is realized with, which GetTextCharsetInfo,
+/// GetTextCharset and GetTextMetricsW's tmCharSet all report. A LOGFONT
+/// asking for DEFAULT_CHARSET only asks the mapper to choose, so the
+/// answer is the face's own: ANSI_CHARSET, gala's faces being Latin.
+/// (Real Windows answers the character set of the machine's ANSI code
+/// page here -- 178 where GetACP is 1256 -- because its mapper picks a
+/// face to match it; gala has the one Latin family to pick.) A character
+/// set the LOGFONT names is kept, as real Windows keeps it by
+/// substituting a face that has it.
+pub fn realized_charset(f: &LogFont) -> u8 {
+    if f.char_set == DEFAULT_CHARSET { ANSI_CHARSET } else { f.char_set }
+}
+
+/// The Unicode ranges and code pages the font's face covers. A font
+/// realized with a character set gala's faces do not cover has no
+/// signature at all, which is how real Windows answers for a face that
+/// carries none (its System and Terminal among them): all six words
+/// zero.
+pub fn signature(f: &LogFont) -> [u32; 6] {
+    if realized_charset(f) == ANSI_CHARSET { LATIN_SIGNATURE } else { [0; 6] }
+}
+
 pub fn text_metrics(f: &LogFont) -> TextMetricW {
     let m = metrics(f);
     TextMetricW {
@@ -494,6 +529,6 @@ pub fn text_metrics(f: &LogFont) -> TextMetricW {
         // variable pitch, vector, TrueType (TMPF_FIXED_PITCH | TMPF_VECTOR
         // | TMPF_TRUETYPE), FF_SWISS.
         pitch_and_family: if m.fixed() { 0x30 } else { 0x27 },
-        char_set: f.char_set,
+        char_set: realized_charset(f),
     }
 }

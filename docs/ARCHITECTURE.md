@@ -4036,8 +4036,9 @@ reads like a gap in the DLL and not a gap in the list.
   (`kernel32_sys_test`, ROADMAP OF). Every row a load leaves names the
   library it was asked for, which is what a program stopped by one needs.
 - **GetProcAddress** with a null module searches the executable; an
-  export resolving into a `.gstub` section counts as absent ("Gaps are
-  never silent").
+  export resolving into a `.gstub` section counts as absent, leaving a
+  `stub refused` row that says the name is exported and unwritten
+  ("Gaps are never silent", "Exported but not implemented yet").
 - **Static TLS** (`tls.rs`): each image with a TLS directory gets an
   index at load; each thread has an array at
   TEB.ThreadLocalStoragePointer with a block per image (the template,
@@ -6857,8 +6858,13 @@ of their own, clients of it) is the yardstick.
   (`unimplemented_test`). The stubs live in a
   `.gstub` section: LdrGetProcedureAddress (GetProcAddress) treats an
   export resolving there as absent (by name STATUS_ENTRYPOINT_NOT_FOUND,
-  by ordinal STATUS_ORDINAL_NOT_FOUND, as a missing export), so programs probing for optional
+  by ordinal STATUS_ORDINAL_NOT_FOUND), so programs probing for optional
   functions keep their fallbacks; only static imports bind to them. The
+  refusal is a `stub refused` row and not a `missing export` one
+  (`loader_test`): the export table carries the name, so a reader of
+  the dump is told to write the body and not to add the export, and a
+  program that binds such a name by delay load -- which does not probe
+  at all, and dies 0xc06d007f -- has the row that explains it. The
   lists were generated from the import closures of SQL Server LocalDB and
   FileZilla (W3: FileZilla 3.69.3's and 3.71.0's imports across user32, gdi32, msvcrt,
   comctl32, shell32, ole32 and others); a function is implemented by
@@ -10493,7 +10499,25 @@ then riched20.dll).
     ExtTextOutW (ETO_OPAQUE, ETO_CLIPPED, lpDx); GetTextMetricsW,
     GetTextExtentPoint32W, GetTextExtentExPointW (fit and partial
     widths, with lpnFit only those of what fits, as documented) and
-    GetTextFaceW from the same metrics. The ANSI forms
+    GetTextFaceW from the same metrics. GetTextCharsetInfo,
+    GetTextCharset and GetTextMetricsW's tmCharSet report the character
+    set the font is *realized* with, which is never DEFAULT_CHARSET: a
+    LOGFONT asking for that only asks the font mapper to choose, and
+    gala's faces are Latin, so the answer is ANSI_CHARSET. (Real Windows
+    answers the character set of the machine's ANSI code page there --
+    178, ARABIC_CHARSET, where GetACP is 1256 -- because its mapper picks
+    a face to match it; gala has the one Latin family to pick, so a test
+    may pin the three calls' agreement but not the value.) A character
+    set the LOGFONT names is kept, as Windows keeps it by substituting a
+    face that has it. GetTextCharsetInfo's FONTSIGNATURE is the face's
+    coverage, Latin 1 and code page 1252 -- the signature
+    EnumFontFamiliesExW reports for the same faces, one constant for both
+    -- and all six words zero for a font realized with a character set
+    those faces do not cover, as Windows answers for a face carrying
+    none (its System and Terminal among them); without a DC the answer is
+    DEFAULT_CHARSET and ERROR_INVALID_HANDLE, the signature cleared
+    rather than left as it was. Its `dwFlags` is reserved and not used.
+    The ANSI forms
     (TextOutA, ExtTextOutA, GetTextExtentPoint32A, GetTextExtentExPointA,
     GetTextMetricsA) take UTF-8 (the ANSI code page) and call the wide
     ones; their per-character arrays (lpDx, the partial widths, the fit)

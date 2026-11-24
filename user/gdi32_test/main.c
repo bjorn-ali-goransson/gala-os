@@ -46,6 +46,19 @@
  *   same for ASCII text.
  *   GetObjectType says OBJ_FONT; GetCurrentObject(OBJ_FONT) is the font.
  *
+ * - Character sets: GetTextCharsetInfo, GetTextCharset and
+ *   GetTextMetricsW's tmCharSet agree on the selected font's set, which
+ *   is never DEFAULT_CHARSET; the value itself follows the machine's
+ *   ANSI code page (178 where GetACP is 1256, 0 where it is 1252), so
+ *   the checks pin the agreement and the sets a LOGFONT asks for by
+ *   name (ANSI_CHARSET, OEM_CHARSET) instead. A Latin TrueType face's
+ *   FONTSIGNATURE covers Latin 1 and code page 1252; dwFlags is not
+ *   used; no DC gives DEFAULT_CHARSET and ERROR_INVALID_HANDLE with the
+ *   signature's code pages cleared. Symbol faces (Symbol, Wingdings,
+ *   Marlett), which real Windows reports as SYMBOL_CHARSET whatever the
+ *   LOGFONT asks, are left out: gala maps every face to Selawik or Noto
+ *   and has none of them.
+ *
  * - CreateDIBitmap: a DDB of the reference DC's depth; CBM_INIT sets
  *   the DIB's bits as SetDIBits does (bottom-up rows).
  *
@@ -370,6 +383,80 @@ static void fonts(void) {
 // SetStretchBltMode does not check the mode: it keeps whatever it is
 // given and returns the previous one, the last error untouched; a new DC
 // starts at BLACKONWHITE (Windows 11 25H2, a DISPLAY DC and a memory DC).
+static void charsets(void) {
+    HDC dc = CreateCompatibleDC(NULL);
+    FONTSIGNATURE sig;
+    TEXTMETRICW tm;
+    LOGFONTW lf;
+    HFONT font, old;
+    DWORD cs;
+
+    /* The three ways of asking for the selected font's character set
+     * agree. Which one it is depends on the machine's ANSI code page --
+     * a Windows whose GetACP is 1256 answers 178 (ARABIC_CHARSET) where
+     * a 1252 one answers 0 (ANSI_CHARSET) -- so the value itself is not
+     * checked here, only that all three agree and that a realized font
+     * never reports DEFAULT_CHARSET, which only asks the font mapper to
+     * choose. */
+    cs = GetTextCharsetInfo(dc, NULL, 0);
+    CHECK(cs == GetTextCharset(dc));
+    CHECK(GetTextMetricsW(dc, &tm) != 0);
+    CHECK(cs == (DWORD)tm.tmCharSet);
+    CHECK(cs != DEFAULT_CHARSET);
+
+    /* dwFlags is not used: a 1 there changes nothing and is not an
+     * error. Success leaves the last error alone. */
+    SetLastError(0xdeadbeef);
+    CHECK(GetTextCharsetInfo(dc, &sig, 1) == cs);
+    CHECK(GetLastError() == 0xdeadbeef);
+
+    /* A character set the LOGFONT asks for by name is the one reported,
+     * and GetTextMetricsW agrees. */
+    memset(&lf, 0, sizeof lf);
+    lf.lfHeight = -12;
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = ANSI_CHARSET;
+    memcpy(lf.lfFaceName, L"Segoe UI", sizeof L"Segoe UI");
+    font = CreateFontIndirectW(&lf);
+    CHECK(font != NULL);
+    old = (HFONT)SelectObject(dc, font);
+    memset(&sig, 0xcd, sizeof sig);
+    CHECK(GetTextCharsetInfo(dc, &sig, 0) == ANSI_CHARSET);
+    CHECK(GetTextCharset(dc) == ANSI_CHARSET);
+    CHECK(GetTextMetricsW(dc, &tm) != 0);
+    CHECK(tm.tmCharSet == ANSI_CHARSET);
+    /* A Latin TrueType face's signature covers Latin 1 (bit 0 of the
+     * Unicode ranges) and code page 1252 (bit 0 of the ANSI code
+     * pages). Real Windows' Segoe UI sets more of both; the two bits
+     * every Latin face has are what is checked. */
+    CHECK((sig.fsUsb[0] & 1) != 0);
+    CHECK((sig.fsCsb[0] & 1) != 0);
+    SelectObject(dc, old);
+    DeleteObject(font);
+
+    lf.lfCharSet = OEM_CHARSET;
+    font = CreateFontIndirectW(&lf);
+    CHECK(font != NULL);
+    old = (HFONT)SelectObject(dc, font);
+    CHECK(GetTextCharsetInfo(dc, NULL, 0) == OEM_CHARSET);
+    CHECK(GetTextCharset(dc) == OEM_CHARSET);
+    SelectObject(dc, old);
+    DeleteObject(font);
+
+    /* No DC: DEFAULT_CHARSET, ERROR_INVALID_HANDLE, and the code page
+     * half of the signature cleared rather than left as it was. */
+    memset(&sig, 0xcd, sizeof sig);
+    SetLastError(0xdeadbeef);
+    CHECK(GetTextCharsetInfo(NULL, &sig, 0) == DEFAULT_CHARSET);
+    CHECK(GetLastError() == ERROR_INVALID_HANDLE);
+    CHECK(sig.fsCsb[0] == 0);
+    SetLastError(0xdeadbeef);
+    CHECK(GetTextCharset(NULL) == DEFAULT_CHARSET);
+    CHECK(GetLastError() == ERROR_INVALID_HANDLE);
+
+    DeleteDC(dc);
+}
+
 static void stretch_mode(HDC dc) {
     SetLastError(0xdead);
     CHECK(GetStretchBltMode(dc) == BLACKONWHITE);
@@ -1005,6 +1092,7 @@ int main(void) {
     display_dc();
     bitmaps();
     fonts();
+    charsets();
     stretch_mode(CreateDCW(L"DISPLAY", NULL, NULL, NULL));
     stretch_mode(CreateCompatibleDC(NULL));
     dibitmap();

@@ -2117,7 +2117,9 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   from that list.
 - GetProcAddress returns NULL for stubs, so a test that checks a
   function is *exported* imports it statically (a call in a branch never
-  taken).
+  taken). The refusal leaves a `stub refused` row, which is the one to
+  look for when a program asked for a name gala does export: a `missing
+  export` row would mean the DLL has not got it at all.
 - A static import Windows lacks keeps the whole test from loading
   there (exit 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND, in the windows
   job): import statically only what a real program imports (the Office
@@ -3893,10 +3895,11 @@ about a minute under TCG. Read, in order:
   CHROME_RESULT_CODE_PROFILE_IN_USE (the process singleton: its mutex and
   lock file).
 - `delay_load_failure_support.cc ... NOTREACHED`: a delay-loaded
-  function or DLL is missing; the ledger's `missing export` / `missing
-  dll` line names it. chrome.dll delay-loads most of what it uses, and
-  `gala_stubs` stubs are invisible to GetProcAddress, so a stubbed delay
-  import fails the same way. Rather than one function per run, list them
+  function or DLL is missing; the ledger's `missing export`, `stub
+  refused` or `missing dll` line names it. chrome.dll delay-loads most
+  of what it uses, and `gala_stubs` stubs are invisible to
+  GetProcAddress, so a stubbed delay import fails the same way -- under
+  `stub refused`, which says the export is there and the body is not. Rather than one function per run, list them
   all: `python3 -I tools/import_survey.py target/x86_64-pc-windows-msvc/release
   target/prebuilt/chromium/chrome-win/chrome.dll` prints every import
   (static and delay-loaded) gala's built DLLs lack or have only as stubs,
@@ -4180,13 +4183,25 @@ in and a program's first window 30-60 s in.
 
 An entry that is not a number is a piece of a serial log line to wait
 for, with an optional `+<secs>` for a wait after it, and its file is
-named after the line (`office_word-desktop-shown-window-1s.png`):
+named after the line (`office_word-desktop-shown-window-1s.png`). A wait
+leaves two pictures, not one: the wait is time the thing waited for may
+not live through, so one is taken the moment the line came
+(`office_word-desktop-shown-window.png`) and one when the wait is up,
+and a window whose program dies inside the delay is in the first and in
+nothing else:
 
     XTASK_SHOTS='desktop: shown window+1' cargo xtask boot-test office_word
 
+Every picture is named in the run's own log as it is written
+(`xtask: wrote ...`), and so is every one the run did not reach: a line
+that never came, a second the run ended before, and a line that did come
+whose wait the run ended inside, which are three different gaps and not
+one missing file.
+
 The moments nobody can name in advance are the kernel's to ask for:
 `hook=window=shot` on the kernel command line takes a screendump as each
-top-level window becomes visible, `+<secs>` after it if asked, and
+top-level window becomes visible -- two of them when a `+<secs>` is
+asked for, the instant and the second -- and
 `hook=window/<text>:<n>=shot` only of the windows whose program or title
 holds the text, `n` at most. The files are named after the program and
 the window (`hook_test-hook-hook-test-exe-w4.png`), so a run with no idea

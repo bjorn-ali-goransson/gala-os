@@ -544,7 +544,15 @@ that row is in the dump only when the filter freed the slot it took.
   about and lives with), `missing dll`, `load failed` (a DLL the loader
   found and could not load, its detail the status: what names the DLL
   behind a process that dies STATUS_DLL_INIT_FAILED), `stub` (an export
-  that only reports itself and ends the process, `gala_stubs`),
+  that only reports itself and ends the process, `gala_stubs`), `stub
+  refused` (that same unwritten body seen from the other side:
+  GetProcAddress refusing to hand out a `.gstub` address, so the asker
+  is told the name is absent and carries on -- or ends on 0xc06d007f if
+  it bound the name by delay load. It is told from `missing export`
+  because the export table does carry the name and only its body is
+  unwritten, which is the readiest of the three kinds of missing
+  function to answer, and from `stub` because no process ended;
+  `loader_test`),
   `reached` (not a gap at all: the first call that reached a method gala
   answers, so that a program stopping in the middle of a path leaves the
   path it took; it is told from a call answered S_OK, which `other`
@@ -555,10 +563,11 @@ that row is in the dump only when the filter freed the slot it took.
   holding it, or re-entered it -- `user/gala_lock`, what a DLL writes
   down instead of spinning silently, and the row that would have
   named the holder of the trace lock Word's main thread hung in) and
-  `other`. Both
-  `stub` and `not implemented` are also logged as they happen, because a
-  run cut short by a snapshot never dumps the ledger; only `stub`'s line
-  says the process ended. The Windows Runtime's:
+  `other`. `stub`,
+  `stub refused` and `not implemented` are also logged as they happen,
+  because a run cut short by a snapshot never dumps the ledger; only
+  `stub`'s line says the process ended, since the other two leave their
+  programs running. The Windows Runtime's:
   `ole32.dll!RoGetActivationFactory(<class>)` for a class it cannot
   activate, with a reason in the name when the registration was found
   (`(server DLL not found)`, `(no DllGetActivationFactory)`, `(the DLL
@@ -965,7 +974,16 @@ Out-of-space errors on the way get the same hint.
   scheduler's lock is free), then writes the crash record.
 - xtask symbolizes backtraces with `llvm-addr2line`/`addr2line`
   whenever it shows a failed boot's log; `cargo xtask symbolize <log>
-  [--release]` does it for any log.
+  [--release]` does it for any log. The sampling profiler and a
+  user-mode module's frames go through `llvm-symbolizer` instead, which
+  is a different tool and a different package: it is **not** part of
+  rustup's `llvm-tools` component (that ships llvm-ar, llvm-nm and
+  llvm-objdump), and a host without it has to install LLVM (`apt
+  install llvm`). Without it every frame is an address and no name,
+  which on the page cannot be told from a capture that walked no stack,
+  so the first frame that wants it says so in one line
+  (`xtask: profile: no llvm-symbolizer could be run`) rather than
+  letting the run look empty.
 - Fault injection's `failtrace` prints a backtrace at each injected
   failure, so the code that mishandled it is named even when the
   symptom comes much later (WORKFLOW "Fault injection").
@@ -1626,11 +1644,28 @@ own log (`xtask: wrote ...`), which is what a scenario's expectations are
 checked against. The kernel cannot encode a PNG and the host cannot know
 when to take one: this is the whole of why it is split.
 
-A delay is what the picture is usually worth taking after. `+0` is the
-instant the window became visible, which is before the program has
-painted it -- `hook_test`'s fourth window is white in its own picture and
-the three before it are not. `hook=window=shot+1` catches a window the
-program has drawn.
+A delay is what the picture is usually worth taking after, so a delayed
+request leaves two pictures and not one. `+0` is the instant the window
+became visible, which is before the program has painted it --
+`hook_test`'s fourth window is white in its own picture and the three
+before it are not -- and `hook=window=shot+1` catches a window the
+program has drawn. But the wait is time the window may not live through:
+Word's splash lives about 2 s and WINWORD ends on Office's own fail-fast
+at ~30 s, and a picture taken after that is of the desktop that outlived
+it, which looks exactly like a hook that never fired. So the host takes
+both, at the request and when the wait is up:
+
+```
+target/screenshots/<scenario>-hook-<name>.png        the instant it went up
+target/screenshots/<scenario>-hook-<name>-<secs>s.png   the second asked for
+```
+
+The first is certain and may be unpainted; the second is what the window
+settled into, if it lasted that long. `+0` is already the first and
+stays single. Both are named in the log as they are written, and both of
+a window's names are kept free of an earlier window's pair (`-2`, `-3`),
+so a comparison between two runs' pictures is a comparison of the same
+moment.
 
 Which windows, and how many:
 
@@ -1654,7 +1689,8 @@ hook: window: no shots left of the 1 asked for (2 windows passed over by the mat
   path of every window that goes up. Four hooks at most are armed in a
   boot (`hook=` may be written more than once), each at most 64 pictures,
   each picture about 3 MB of `target/screenshots`; the host takes 64 of
-  them in a run whatever the guest asks for. The kernel writes a request
+  them in a run whatever the guest asks for, a delayed window being two
+  of the 64. The kernel writes a request
   and never a file, and the name in it is reduced to letters, digits and
   dashes twice, once by the kernel and once by the host, because the text
   came from a guest.
