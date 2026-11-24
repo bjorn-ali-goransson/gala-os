@@ -1607,11 +1607,28 @@ own log (`xtask: wrote ...`), which is what a scenario's expectations are
 checked against. The kernel cannot encode a PNG and the host cannot know
 when to take one: this is the whole of why it is split.
 
-A delay is what the picture is usually worth taking after. `+0` is the
-instant the window became visible, which is before the program has
-painted it -- `hook_test`'s fourth window is white in its own picture and
-the three before it are not. `hook=window=shot+1` catches a window the
-program has drawn.
+A delay is what the picture is usually worth taking after, so a delayed
+request leaves two pictures and not one. `+0` is the instant the window
+became visible, which is before the program has painted it --
+`hook_test`'s fourth window is white in its own picture and the three
+before it are not -- and `hook=window=shot+1` catches a window the
+program has drawn. But the wait is time the window may not live through:
+Word's splash lives about 2 s and WINWORD ends on Office's own fail-fast
+at ~30 s, and a picture taken after that is of the desktop that outlived
+it, which looks exactly like a hook that never fired. So the host takes
+both, at the request and when the wait is up:
+
+```
+target/screenshots/<scenario>-hook-<name>.png        the instant it went up
+target/screenshots/<scenario>-hook-<name>-<secs>s.png   the second asked for
+```
+
+The first is certain and may be unpainted; the second is what the window
+settled into, if it lasted that long. `+0` is already the first and
+stays single. Both are named in the log as they are written, and both of
+a window's names are kept free of an earlier window's pair (`-2`, `-3`),
+so a comparison between two runs' pictures is a comparison of the same
+moment.
 
 Which windows, and how many:
 
@@ -1635,7 +1652,8 @@ hook: window: no shots left of the 1 asked for (2 windows passed over by the mat
   path of every window that goes up. Four hooks at most are armed in a
   boot (`hook=` may be written more than once), each at most 64 pictures,
   each picture about 3 MB of `target/screenshots`; the host takes 64 of
-  them in a run whatever the guest asks for. The kernel writes a request
+  them in a run whatever the guest asks for, a delayed window being two
+  of the 64. The kernel writes a request
   and never a file, and the name in it is reduced to letters, digits and
   dashes twice, once by the kernel and once by the host, because the text
   came from a guest.
