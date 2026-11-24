@@ -39,6 +39,8 @@ pub fn take_request() -> bool {
 /// Part 2: everything that needs locks, from a thread that may wait.
 pub fn full_dump() {
     info!("statedump: threads (NT, then scheduler), the ledger, the statistics:");
+    #[cfg(not(any(test, feature = "hosted")))]
+    ticks_since_nmi_part();
     #[cfg(not(feature = "hosted"))]
     if crate::hotswap::swapped() {
         info!("statedump: {}", crate::hotswap::Mark);
@@ -113,7 +115,7 @@ pub fn stats_line(heap: Option<crate::mm::heap::HeapStats>, frames: Option<(u64,
 }
 
 #[cfg(not(any(test, feature = "hosted")))]
-pub use nmi::{init, on_nmi, trace_cpu};
+pub use nmi::{init, on_nmi, ticks_since_nmi_part, trace_cpu};
 
 #[cfg(not(any(test, feature = "hosted")))]
 mod nmi {
@@ -152,6 +154,9 @@ mod nmi {
     /// When (ns) the last dump ended: an NMI just after it is a slow CPU's
     /// part of the same request, not a new one.
     static LAST_END: AtomicU64 = AtomicU64::new(0);
+    /// Each CPU's timer interrupts when the last NMI part ended
+    /// (`ticks_since_nmi_part`).
+    static BEATS_AT_END: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
     /// CPUs asked for their own backtrace only (`trace_cpu`), not a dump.
     static TRACE_ONLY: AtomicU64 = AtomicU64::new(0);
 
@@ -236,9 +241,44 @@ mod nmi {
         }
         let answered = ANSWERED.swap(0, Ordering::AcqRel);
         print(cpu, answered, online);
+        for (i, beats) in BEATS_AT_END.iter().enumerate() {
+            beats.store(crate::flight::heartbeat(i), Ordering::Relaxed);
+        }
         LAST_END.store(crate::time::raw_monotonic_ns().max(1), Ordering::Relaxed);
         DUMPING.store(0, Ordering::Release);
         super::request();
+    }
+
+    /// Whether every online CPU took timer interrupts after the last NMI
+    /// part (waiting until 20 ms have passed since it): an NMI must leave
+    /// the interrupted code's interrupt mask as it found it, and one that
+    /// left it off stops the CPU's ticks for good when it interrupted
+    /// user mode (aarch64's mask is the GIC's priority mask, which the
+    /// exception return does not restore). Says which CPU did not.
+    pub fn ticks_since_nmi_part() {
+        let end = LAST_END.load(Ordering::Relaxed);
+        if end == 0 {
+            return;
+        }
+        while crate::time::raw_monotonic_ns().saturating_sub(end) < 20_000_000 {
+            core::hint::spin_loop();
+        }
+        let ms = crate::time::raw_monotonic_ns().saturating_sub(end) / 1_000_000;
+        let mut stopped = 0u64;
+        for (cpu, _) in crate::arch::smp::online_cpus() {
+            let cpu = cpu as usize;
+            let Some(then) = BEATS_AT_END.get(cpu) else { continue };
+            if crate::flight::heartbeat(cpu) == then.load(Ordering::Relaxed) {
+                stopped |= 1 << cpu;
+                warn!(
+                    "statedump: CPU {cpu} took no timer interrupt in the {ms} ms since the NMI \
+                     part (its interrupt mask left off by the NMI?)"
+                );
+            }
+        }
+        if stopped == 0 {
+            info!("statedump: every CPU took timer interrupts since the NMI part ({ms} ms)");
+        }
     }
 
     /// One CPU's snapshot: `<prefix> N user|kernel rip .. rsp ..` (aarch64:

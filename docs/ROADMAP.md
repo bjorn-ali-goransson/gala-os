@@ -1370,19 +1370,13 @@ the kernel.
   Word draws with (ROADMAP OF).
 
 **Next**:
-1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
-   answering its monitor (no `x`, no `info registers`, no NMI) after the
-   guest started its program; not reproduced locally. A failed log now
-   carries every QEMU thread's stack when the monitor gives nothing:
-   the next occurrence says which thread holds QEMU, and whether the
-   device reset (`gpureset=`) is in it.
-2. G1's rest: shasha's pointer on the hardware cursor,
+1. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-3. G2's rest: a drawn triangle in `d3d11_test` (DXVK is in, but
+2. G2's rest: a drawn triangle in `d3d11_test` (DXVK is in, but
    nothing is drawn through the pipeline yet), then DXVK's d3d9 and
    d3d10core and its own tests, then vkd3d-proton 3.1 (d3d12,
    d3d12core) beside the program the same way. Drawing needs DXBC
@@ -1402,9 +1396,9 @@ the kernel.
    expects Windows' S_OK on Windows). It is replaced by a real compiler
    with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
    on it) behind this DLL's exports, PREBUILT.
-4. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
+3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
-5. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
+4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
    until there is spare capacity; hardware partitioning and passthrough
    are out of scope).
 
@@ -6058,19 +6052,11 @@ the next breakthroughs).
    GIO's mount monitor), inotify (`lx_inotify`: GIO's file monitors),
    setfsuid and setfsgid (`lx_fsid`), a process's name after execve in
    the log (`lx_gimp_batch`: `process gimp-console-3.2`), seccomp: strict
-   mode, filters enforced, the probes (`lx_seccomp`). Open: once, in a
-   full parallel run of the `lx_` scenarios, `lx_gimp_batch`'s file-png
-   plug-in (the load of in.png, its result right) printed "gimp_flush():
-   error: Broken pipe" at its end: it wrote after GIMP had closed its
-   pipe. Seen once more, in CI on a host at load 5.9 for 4 CPUs: that
-   time two plug-ins at once, file-png and script-fu, each of which had
-   taken far longer than on an idle host (521 ms and 1670 ms), while
-   gimp-console was still running (it exited 5.7 s later). A third
-   sighting, again in CI (host load 5.6 for 4 CPUs), was file-png alone,
-   so two plug-ins at once is not what it takes. Every sighting is a
-   slow plug-in on a loaded host, which puts the question at the
-   plug-in's last write and not at a reader that had gone; the cause is
-   not found yet.
+   mode, filters enforced, the probes (`lx_seccomp`). `lx_gimp_batch`'s
+   file-png plug-in sometimes ends with "gimp_flush(): error: Broken
+   pipe" on Linux too: GIMP 3.2 closes a plug-in's pipes when its
+   procedure returns, while the plug-in still writes GP_QUIT; the
+   comparison accepts that line (WORKFLOW "GIMP").
 10. Inkscape (the owner): Ubuntu 26.04's Inkscape 1.4.3 (LINUX_ROOTS
    "inkscape"), first in batch mode (`lx_inkscape_batch`: in.svg rendered
    to a PNG Ubuntu's byte for byte; WORKFLOW "Inkscape") and its window
@@ -6292,7 +6278,7 @@ on the seams item PT prepared: native ARM64 Windows programs
   (14: the handover, idle, busy and blocked programs, versions with
   the `handover_next` build for aarch64, sockets).
 - The event stream on aarch64: a host file written through semihosting
-  (`events_file=`); session_test runs there.
+  the host names per run (`events_host`); session_test runs there.
 - CI runs the aarch64 scenarios in its boot shards, under QEMU's
   emulation (TCG on GitHub's x86-64 runners).
 
@@ -7268,24 +7254,12 @@ among the slowest hand-offs.
    (the unwind tables of x64 images). Still open of OT1's gaps: an
    entry event for every system call; times on serial lines; the boot's
    wall-clock start.
-   The rings are now also what the measurement asks for. An event
-   costs its bytes' crossing out of the guest and nothing else, about
-   12 us a byte: 2.1 ms for a 162-byte `import` event, the figure
-   `user/import_cost_test` and the `import_cost` scenario measure
-   (OBSERVABILITY "What the stream costs"). It is the crossing and not
-   the device -- the same stream to a port with no device behind it
-   costs the same -- and not the instruction either: a line written in
-   one `rep outsb` costs what its bytes cost, KVM leaving the guest
-   once a byte for string I/O. So a traced Word run is ten to thirty
-   times its own length, its events 2 ms apart, and every question
-   asked of the stream is first a question about what one can afford to
-   write. The way out is to stop crossing a byte at a time: the rings
-   handed to the host by DMA (virtio-serial, which QEMU writes to the
-   same `<image>.events.jsonl`), one exit a line or a batch of lines
-   rather than one an event's every byte. The debug console already
-   holds whole lines (`arch::x86_64::debugcon::Line`, with the host
-   tests that count the writes a line costs), which is what a batched
-   transport needs.
+   The stream already leaves x86-64 by DMA, a line a notify, through
+   a virtio console (ARCHITECTURE "The event stream's transport"):
+   through port 0xe9 an event cost its bytes' crossing, about 12 us a
+   byte under KVM (OBSERVABILITY "What the stream costs"). What the
+   rings add is no shared lock between CPUs, and batching several
+   lines into one notify.
 2. OT3: trace context carried through ntdll/kernel32 (a TEB slot) and
    ALPC/RPC; sockets and events signaled across processes as links like
    pipes and completion ports.
@@ -8470,22 +8444,20 @@ Each entry: what, why it matters, the structural fix, the owning item.
   the whole kernel. Item R1 (invariants).
 
 ### Defects known, not yet fixed
+- **`arm_lx_gimp`'s key release came about 940 ms late** (open): GTK
+  took the late release for its autorepeat and typed a key twice. A
+  client's input waits while the Wayland server is in a round, so a
+  slow round holds it: the server warns when input waited more than
+  half the autorepeat delay (`wayland: pid N's input waited ...`, event
+  `wayland input late`), naming whether the server was busy and what
+  the round composed. Under TCG on the debug kernel, rounds of about
+  2 million composed pixels ran 0.5 to 1.4 s, nearly all of it lockdep
+  scanning every held-lock slot on each take; the compositor now copies
+  the pixels nothing covers straight from the window
+  (ARCHITECTURE "Compositor and look") and lockdep reads only the locks
+  held (R3), and `lx_gimp` then logged no late input. What is left is
+  to see the warning stay quiet on CI's `arm_lx_gimp`.
 
-- **CI caches keyed on what every branch changes**: every cache key in
-  `ci.yml` ends in `hashFiles('xtask/src/main.rs')`, and test-first makes
-  a new boot scenario change that file, so each branch writes its own
-  set -- six prebuilt caches of about 900 MiB and the Linux roots'
-  packages at 320 MiB, over 5 GiB of a repository limit of 10 GiB. The
-  limit is therefore always met and eviction always running: one
-  branch's caches push out the last branch's, and a rerun of a run's
-  failed jobs can find that the packages the `debs` job wrote are gone
-  (which is why the boot shards fetch for themselves what their restore
-  did not hold, instead of demanding the key). What the keys should name
-  is what decides the contents: the pins. They sit among the scenarios
-  in a file of 29 777 lines, so the fix is to move them to their own
-  module and hash that -- the packages' pins for `gala-debs-`, the
-  prebuilt programs' for `gala-prebuilt-` -- after which a branch that
-  adds a scenario shares both caches instead of replacing them.
 - **Three more tables scanned for a free slot**, the pattern the
   registry's arena no longer has (ARCHITECTURE "Registry"):
   `fs::ramfs`'s `slot`, `nt::object`'s handle tables and `net::tcp`'s
@@ -8510,30 +8482,31 @@ Each entry: what, why it matters, the structural fix, the owning item.
   wakeup. The state dump now lists each Linux process's children
   (running, zombies) and its wait4/waitid waiters with the pid each
   wants, so the next stall names what the threads waited for.
-- **`arm_lx_xdesktop` timed out once on CI** (its siblings
-  `arm_lx_gtk`, 27 s, and `arm_lx_xterm`, 29.8 s, passed in the same
-  job, as did the longer `arm_lx_inkscape` and `arm_lx_gimp_batch`):
-  after the desktop showed its window (`desktop: shown window
-  'Xwayland on :1'`), a shell forked a child that ran `/usr/bin/xkbcomp`
-  to exit 0 and did it again, three times over, and then the watchdog
-  said `thread 9 (sh) has been in the kernel for 20 s without blocking
-  or reaching user mode (CPU 1, rip 0xffffffff8030b608)`. The flight
-  recorder's last records are that process's `read` calls, one every
-  3 ms or so, to the end of the run. **That watchdog line was the
-  instrument's own fault**: the Linux dispatcher credited no progress
-  when a call ended, so a thread whose work is nearly all kernel time
-  -- and a `read` every 3 ms is a call ending every 3 ms -- was
-  reported as stuck, because the only other thing that counted was a
-  timer tick landing in user mode. A finished Linux call is progress
-  now (OBSERVABILITY "Hang watchdog"), and a watchdog report fails its
-  run, so a report here would be real. What is still unexplained is the
-  timeout itself, 300 s with both CPUs idle: the host was loaded (load
-  8.11 on 4 CPUs, 40.4 s of the run waiting for a host CPU), and what
-  the `read` answers in that loop -- a pipe whose writer is gone,
-  answering 0 forever -- is where to start.
+- **`arm_lx_xdesktop` hangs on CI** (3 of its runs on one day, none
+  of 8 locally): the X root shows with no twm frame and no xterm; xterm
+  has written a 16-byte request and waits in `ppoll` for the reply,
+  while Xwayland's `epoll_pwait`, both clients' connections in its set
+  (`EPOLLIN|EPOLLET`), never returns until the 300 s limit. Reading
+  `unix::Socket::send` and its wake, epoll's `collect` and
+  `Interest::report`, `poll::wait` and the scheduler's
+  `prepare_wait`/`wake` found no window for a lost wakeup. The state
+  dump now shows every connected unix fd (records and bytes queued each
+  way, the arrivals count) and each epoll entry's readiness and count
+  now beside its `seen`, so the next hang tells a lost wakeup (bytes
+  queued, the count past `seen`) from a request that never reached the
+  socket. A unix socket's EPOLLOUT edge was missing (a peer's read that
+  left room moved no count, so an EPOLLET writer waiting for room slept
+  on; `room` now counts it, epoll_test "EPOLLET|EPOLLOUT on a unix
+  stream socket"), but the hung entries asked for EPOLLIN only, so that
+  is not this hang's explanation.
+- **An inet socket has no EPOLLOUT edges** (open): `socket::arrivals`
+  counts bytes and connections received, not send-buffer room coming
+  back, so an EPOLLET writer on a full TCP socket is not woken again;
+  the unix socket's `room` count is the shape of the fix, with an
+  epoll_test case on a loopback TCP pair first.
 - **`arm_lx_gimp` failed its screen check once on CI** (shard 5; not a
-  timeout, and the same false watchdog report as `arm_lx_xdesktop`
-  above): the line named `thread 4294967304 (sh)`, which is
+  timeout, and a watchdog report from before a finished Linux call
+  counted as progress, OBSERVABILITY "Hang watchdog"): the line named `thread 4294967304 (sh)`, which is
   `0x1_0000_0008`, scheduler slot 8 generation 1, which the thread dump
   gives as `pid 20 tid 24 (gimp-3.2)` -- the scheduler's name is the
   shell's because an `execve` does not rename the thread. The flight
@@ -8546,7 +8519,23 @@ Each entry: what, why it matters, the structural fix, the owning item.
   cost two wrong turns, both of them the instruments': the log's
   addresses were symbolized against the x86-64 kernel (fixed,
   OBSERVABILITY "Symbolized backtraces") and a Linux thread's dump
-  names no system call (below).
+  naming no system call (fixed: the dump names the Linux call, its
+  arguments and how long the thread has been in it, OBSERVABILITY
+  "State dump").
+- **Input waits behind a commit's composition** (open; `arm_lx_gimp`'s
+  step 8): the Wayland server takes a client's input after the round's
+  requests are dispatched (`Connection::pump`), and a commit composes
+  the window's damage on that thread. With the guest slowed by a loaded
+  host, a round holding GIMP's full-window commit took 1.3 s; the key
+  release behind it reached GIMP after its client-side repeat's 500 ms
+  (`repeat_info`), so the typed search said "invvvv..." and Invert never
+  ran (statedump: `taken after 1188 ms`; every late key taken in one
+  round). Composition now skips what lies under an opaque window
+  (ARCHITECTURE "Invariants and limits": a full window 5x cheaper),
+  which makes such a round rare but does not bound it: a press and its
+  release are still as far apart as one round, however long. The cure
+  is input that does not queue behind drawing: taking it between a
+  round's requests, or composing off the server's thread.
 - **A starved vCPU cannot be told from one with interrupts off**
   (open): the hang watchdog's CPU report (`watchdog: CPU N has taken no
   timer interrupt for 5 s`) is the one of its two that cannot fail a
@@ -8559,18 +8548,6 @@ Each entry: what, why it matters, the structural fix, the owning item.
   told how much host time it was given -- KVM's steal-time page, which
   gala does not read -- and then the report could fail a run like the
   thread's (OBSERVABILITY "Hang watchdog", `xtask::WATCHDOG_REPORT`).
-- **A Linux thread's state dump names no system call** (open): the NT
-  thread lines say `in a system call false`, with no call name, no
-  arguments, no wait object and no handle detail, for every Linux
-  thread, because `lx/dispatch.rs` never calls
-  `nt::thread::set_in_syscall` and the detail those lines print is the
-  NT path's (`syscalls::service_name`, the handle tables, the keyed
-  events). A thread in the middle of a `read` therefore reads as a
-  thread doing nothing, which is how `arm_lx_gimp` above was misread
-  twice. The fix is to record the Linux call number and name it from
-  `lx`'s own table while skipping the NT-only detail; the scheduler's
-  `prepare_wait` caller is the only clue until then (OBSERVABILITY
-  "State dump").
 - **A lock can be marked held by a thread that is not running**
   (`sync::lockdep`): a held-lock slot belongs to the CPU and carries the
   thread that took it, and `none_held_at_switch` panics if a thread

@@ -13,6 +13,6 @@ NestedInstallerFiles:
 Installers:
 - Architecture: x64
   InstallerUrl: https://localhost:8443/releases/download/v1.0.0/pkhttps-1.0.0.zip
-  InstallerSha256: 32903BA1BC275B5352EE57D7C45A5495280C416D1BF0E88249AC3B1F6804F955
+  InstallerSha256: D73997D23A680F9EFB27DBB396DCEA305C6C8AB23718675687453925EDDD0AD1
 ManifestType: singleton
 ManifestVersion: 1.6.0

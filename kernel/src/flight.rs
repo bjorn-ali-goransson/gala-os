@@ -267,6 +267,12 @@ pub fn dump(_cpus: u64, _max: usize, _print: impl FnMut(core::fmt::Arguments)) {
 #[cfg(not(any(test, feature = "hosted")))]
 static HEARTBEAT: [AtomicU64; crate::arch::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
+/// CPU `cpu`'s timer interrupts so far (the state dump's check that every
+/// CPU still takes them after its NMI part).
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn heartbeat(cpu: usize) -> u64 {
+    HEARTBEAT.get(cpu).map_or(0, |b| b.load(Ordering::Relaxed))
+}
 #[cfg(not(any(test, feature = "hosted")))]
 static SEEN: [[AtomicU64; 3]; crate::arch::smp::MAX_CPUS] =
     [const { [const { AtomicU64::new(0) }; 3] }; crate::arch::smp::MAX_CPUS];

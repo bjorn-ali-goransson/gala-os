@@ -1115,6 +1115,10 @@ impl Desktop {
         self.s.has_input(owner)
     }
 
+    pub fn input_since(&self, owner: u64) -> Option<u64> {
+        self.s.input_since(owner)
+    }
+
     /// Who to tell when input arrives for `owner`.
     pub fn listen(&mut self, owner: u64, listener: Listener) -> Result<(), NtStatus> {
         self.s.listen(owner, listener)
@@ -2887,8 +2891,33 @@ impl Desktop {
 
     /// The colour of screen point (x, y), all layers composed.
     pub fn pixel(&self, x: i64, y: i64) -> u32 {
-        let mut c = self.wallpaper.as_ref().map_or(DESKTOP_COLOR, |w| w.pixel(x, y));
-        for w in self.s.windows.iter().filter(|w| w.shown()) {
+        self.compose(x, y, true)
+    }
+
+    /// Composes point (x, y) bottom up. With `from_opaque`, from the
+    /// topmost window that covers the point whole (coverage 255): what
+    /// lies under it cannot show, and `blend` at 255 is that window's
+    /// own colour whatever was under it, so the result is the same and
+    /// a window's commit pays for the layers that show (the wallpaper's
+    /// two square roots a point and every lower window's shape and
+    /// shadow were most of a whole window's composition). Without, every
+    /// layer (the tests' reference).
+    fn compose(&self, x: i64, y: i64, from_opaque: bool) -> u32 {
+        let windows = &self.s.windows;
+        let opaque = from_opaque
+            .then(|| {
+                windows.iter().rposition(|w| {
+                    w.shown()
+                        && w.rect().contains(x, y)
+                        && w.coverage(x - i64::from(w.x), y - i64::from(w.y)) == 255
+                })
+            })
+            .flatten();
+        let mut c = match opaque {
+            Some(_) => 0,
+            None => self.wallpaper.as_ref().map_or(DESKTOP_COLOR, |w| w.pixel(x, y)),
+        };
+        for w in windows[opaque.unwrap_or(0)..].iter().filter(|w| w.shown()) {
             if !w.bounds(SHADOW).contains(x, y) {
                 continue;
             }
@@ -3233,26 +3262,178 @@ pub fn choose_wallpaper(choice: Option<&str>) {
 }
 
 /// Composes area `r` of the desktop and hands it to its presenter
-/// (nothing is composed when nothing shows it).
-fn redraw(d: &mut Desktop, r: Rect) {
+/// (nothing is composed when nothing shows it); the pixels it copied
+/// straight from windows (`copy_uncovered`) rather than composed.
+fn redraw(d: &mut Desktop, r: Rect) -> usize {
     if d.presenter.kind() == Kind::None {
-        return;
+        return 0;
     }
-    let Some(r) = r.clip(d.s.screen.0, d.s.screen.1) else { return };
+    let Some(r) = r.clip(d.s.screen.0, d.s.screen.1) else { return 0 };
     let mut row = Vec::new();
     if row.try_reserve_exact(r.w as usize).is_err() {
-        return;
+        return 0;
     }
+    let plan = Uncovered::plan(d, r);
+    let mut copied = 0;
     // Out of the desktop while it composes from it (a move, no copy).
     let mut presenter = core::mem::take(&mut d.presenter);
     for y in r.y..r.y + r.h {
         row.clear();
-        row.extend((r.x..r.x + r.w).map(|x| d.pixel(x, y)));
+        row.resize(r.w as usize, NOT_YET);
+        copied += plan.copy_row(d, r.x, y, &mut row);
+        for (x, p) in (r.x..).zip(row.iter_mut()) {
+            if *p == NOT_YET {
+                *p = d.pixel(x, y);
+            }
+        }
         presenter.write_row(r.x as u32, y as u32, &row);
     }
     // A GPU shows the rows now (TRANSFER_TO_HOST_2D + RESOURCE_FLUSH).
     presenter.flush(r.x as u32, r.y as u32, r.w as u32, r.h as u32);
     d.presenter = presenter;
+    COMPOSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    COMPOSED.fetch_add((r.w * r.h) as u64, core::sync::atomic::Ordering::Relaxed);
+    COPIED.fetch_add(copied as u64, core::sync::atomic::Ordering::Relaxed);
+    copied
+}
+
+/// A row pixel `redraw` has not filled yet: no composed or copied pixel
+/// has bits in the fourth byte.
+const NOT_YET: u32 = 0xff00_0000;
+
+/// The most layers `Uncovered` tracks; windows below that many layers
+/// are composed pixel by pixel (correct, only slower).
+const UNCOVERED_MAX: usize = 32;
+
+/// Where, in an area `redraw` draws, a window's client pixels are the
+/// screen's as they are: inside its client area away from its rounded
+/// corners (coverage and the frame's inner coverage both 255, so
+/// `pixel`'s blend gives the client pixel itself), and under no other
+/// layer -- no higher window or its shadow, the taskbar, the start menu,
+/// the card or the pointer's box. `pixel` composes every layer at every
+/// point, which under the desktop's lock with interrupts off is what
+/// made a Wayland client's frame late (ROADMAP CI, arm_lx_gimp); this
+/// copies those pixels instead and leaves only the rest to `pixel`.
+struct Uncovered {
+    /// The layers over something, topmost first: the shell's, then each
+    /// shown window's bounds with its shadow.
+    over: [Rect; UNCOVERED_MAX],
+    /// Per window to copy from (topmost first): its index in the
+    /// window list, the screen rectangle whose pixels are its client's,
+    /// and how many of `over` lie above it.
+    windows: [(usize, Rect, usize); UNCOVERED_MAX],
+    n_over: usize,
+    n_windows: usize,
+}
+
+impl Uncovered {
+    fn plan(d: &Desktop, area: Rect) -> Uncovered {
+        let none = Rect { x: 0, y: 0, w: 0, h: 0 };
+        let mut u = Uncovered {
+            over: [none; UNCOVERED_MAX],
+            windows: [(0, none, 0); UNCOVERED_MAX],
+            n_over: 0,
+            n_windows: 0,
+        };
+        // The pointer's box with its shadow (`pixel`: 14 x 21 and one
+        // pixel more each way), the taskbar, the menu, the card.
+        let (px, py) = d.pointer;
+        u.push_over(Rect { x: px, y: py, w: 16, h: 24 });
+        if d.taskbar.is_some() {
+            u.push_over(d.taskbar_rect());
+        }
+        if d.menu.is_some() {
+            u.push_over(d.menu_bounds());
+        }
+        if let Some((r, _)) = &d.card {
+            u.push_over(shadow_bounds(*r));
+        }
+        for (i, w) in d.s.windows.iter().enumerate().rev().filter(|(_, w)| w.shown()) {
+            if let Some(direct) = Self::direct(w).intersect(area)
+                && u.n_windows < UNCOVERED_MAX
+            {
+                u.windows[u.n_windows] = (i, direct, u.n_over);
+                u.n_windows += 1;
+            }
+            if !u.push_over(w.bounds(SHADOW)) {
+                break;
+            }
+        }
+        u
+    }
+
+    /// Adds a layer; false when there is no room (nothing below it may
+    /// then be copied).
+    fn push_over(&mut self, r: Rect) -> bool {
+        if self.n_over == UNCOVERED_MAX {
+            return false;
+        }
+        self.over[self.n_over] = r;
+        self.n_over += 1;
+        true
+    }
+
+    /// The screen rectangle of window `w` whose points `pixel` shows as
+    /// its client pixels when nothing is over them.
+    fn direct(w: &Window<Chrome>) -> Rect {
+        let (b, top) = w.frame();
+        let (b, top) = (i64::from(b), i64::from(top));
+        let (ww, wh) = (i64::from(w.w), i64::from(w.h));
+        // The rows of rounded corners (the window's, and its frame's
+        // inner edge one border in) are composed.
+        let rounded = !(w.square() || w.popup);
+        let (above, below) = if rounded { (RADIUS + b, RADIUS_BOTTOM + b) } else { (0, 0) };
+        let y0 = top.max(above);
+        let y1 = (wh - b).min(wh - below);
+        Rect {
+            x: i64::from(w.x) + b,
+            y: i64::from(w.y) + y0,
+            w: (ww - 2 * b).max(0),
+            h: (y1 - y0).max(0),
+        }
+    }
+
+    /// Fills row `y`'s points from x0 that it can copy; how many.
+    fn copy_row(&self, d: &Desktop, x0: i64, y: i64, row: &mut [u32]) -> usize {
+        let mut copied = 0;
+        for &(i, r, n_over) in &self.windows[..self.n_windows] {
+            if y < r.y || y >= r.y + r.h {
+                continue;
+            }
+            let w = &d.s.windows[i];
+            let (cw, _) = w.client_size();
+            let (ox, oy) = w.client_origin();
+            let base = (y - oy) * i64::from(cw);
+            let over = &self.over[..n_over];
+            for x in r.x.max(x0)..(r.x + r.w).min(x0 + row.len() as i64) {
+                if over.iter().any(|o| o.contains(x, y)) {
+                    continue;
+                }
+                // As `Window::body`: missing pixels white, the fourth
+                // byte not the window's.
+                row[(x - x0) as usize] =
+                    w.client.get((base + x - ox) as usize).map_or(0x00ff_ffff, |p| p & 0x00ff_ffff);
+                copied += 1;
+            }
+        }
+        copied
+    }
+}
+
+/// Areas composed (`redraw` calls that drew) and their pixels, since
+/// boot, over every desktop: a caller that holds the desktop for long
+/// tells from the difference how much composing it did meanwhile (the
+/// Wayland server's late input notes).
+static COMPOSES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static COMPOSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Of COMPOSED, the pixels copied straight from windows (`Uncovered`).
+static COPIED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// (areas, pixels, of those copied straight from windows) composed
+/// since boot (see COMPOSED).
+pub fn composed() -> (u64, u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (COMPOSES.load(Relaxed), COMPOSED.load(Relaxed), COPIED.load(Relaxed))
 }
 
 fn redraw_damage(d: &mut Desktop) {
@@ -4719,6 +4900,14 @@ pub fn not_responding(shell: &Shell, owner: u64) -> bool {
 /// Takes input waiting for `owner`'s windows into `out`; how many.
 pub fn take_input(shell: &Shell, owner: u64, out: &mut [InputEvent]) -> usize {
     shell.d.lock().take_input(owner, out)
+}
+
+/// `take_input`, and since when (monotonic ns) the oldest of what it took
+/// had waited (under one hold of the desktop: nothing comes in between).
+pub fn take_input_timed(shell: &Shell, owner: u64, out: &mut [InputEvent]) -> (usize, Option<u64>) {
+    let mut d = shell.d.lock();
+    let since = d.input_since(owner);
+    (d.take_input(owner, out), since)
 }
 
 pub fn has_input(shell: &Shell, owner: u64) -> bool {

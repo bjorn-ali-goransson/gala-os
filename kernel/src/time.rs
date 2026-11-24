@@ -201,8 +201,14 @@ static RINGS: [SampleRing; crate::arch::smp::MAX_CPUS] = [const {
     }
 }; crate::arch::smp::MAX_CPUS];
 
-/// Per CPU: a sample was asked of it (set before the NMI is sent), so its
-/// NMI handler tells a profiler NMI from a state-dump request.
+/// Per CPU: a sample was asked of it (set before the NMI is sent, taken
+/// by its NMI handler), so the handler tells a profiler NMI from a
+/// state-dump request. **At most one sample NMI is in flight per CPU**:
+/// while the flag is set no other is sent (`sample_tick`). Two in flight
+/// against one flag made the second a "dump": under KVM an NMI can wait
+/// for its vCPU longer than a sample period, the first NMI took the flag
+/// and the second found it clear (`events_sample` then lost its probe
+/// to a half-second dump).
 static SAMPLE_ASKED: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS] =
     [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::smp::MAX_CPUS];
 
@@ -216,6 +222,9 @@ pub static SAMPLES_KERNEL: AtomicU64 = AtomicU64::new(0);
 /// Samples asked of another CPU (an NMI sent), and taken by this CPU from
 /// its own tick (one CPU online).
 pub static SAMPLES_ASKED: AtomicU64 = AtomicU64::new(0);
+/// Samples not asked because the CPU had not yet taken the last NMI
+/// sent to it (its vCPU not run in a sample period; the `events:` line).
+pub static SAMPLES_UNTAKEN: AtomicU64 = AtomicU64::new(0);
 
 /// `sampleprobe`: the boot thread spins with interrupts off for half a
 /// second and reports whether samples landed inside (the NMI sampler's
@@ -266,7 +275,10 @@ fn sample_tick(frame: &TrapFrame, idle: bool) {
     else {
         return;
     };
-    SAMPLE_ASKED[target].store(true, Ordering::Release);
+    if SAMPLE_ASKED[target].swap(true, Ordering::AcqRel) {
+        SAMPLES_UNTAKEN.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     SAMPLES_ASKED.fetch_add(1, Ordering::Relaxed);
     crate::arch::smp::send_nmi(hw_id);
 }

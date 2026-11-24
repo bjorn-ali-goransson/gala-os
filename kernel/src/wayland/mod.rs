@@ -83,7 +83,7 @@ pub mod xwm;
 
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::fs::ramfs::{
     Access, FsError, NodeId, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE, Share,
@@ -119,6 +119,24 @@ static TRACE: AtomicBool = AtomicBool::new(false);
 static NEXT_CLIENT: AtomicU32 = AtomicU32::new(1);
 /// Where new windows go (cascaded).
 static PLACED: AtomicU32 = AtomicU32::new(0);
+/// When (monotonic ns) the server's current round began, and when its
+/// last wait for work began and ended: what a late input's note says the
+/// server was doing while the input waited.
+static ROUND_BEGAN: AtomicU64 = AtomicU64::new(0);
+static WAIT_BEGAN: AtomicU64 = AtomicU64::new(0);
+static WAIT_ENDED: AtomicU64 = AtomicU64::new(0);
+/// The server thread's CPU time (ns) when its current round began: a
+/// round that took long on the clock but little CPU waited for a CPU.
+static ROUND_CPU: AtomicU64 = AtomicU64::new(0);
+/// `desktop::composed()` (areas, pixels, copied) when the round began.
+static ROUND_COMPOSES: AtomicU64 = AtomicU64::new(0);
+static ROUND_COMPOSED: AtomicU64 = AtomicU64::new(0);
+static ROUND_COPIED: AtomicU64 = AtomicU64::new(0);
+/// Input that waited this long for the server is noted (`wayland input
+/// late`): half the key repeat delay, beyond which a key's press and its
+/// release, read together from the device, can reach the client far
+/// enough apart that it repeats the key.
+const LATE_INPUT_NS: u64 = input::REPEAT_DELAY as u64 * 1_000_000 / 2;
 
 struct Connection {
     number: u32,
@@ -391,6 +409,12 @@ pub fn start(mode: &str, xwayland: bool) -> Result<(), StartError> {
 fn serve(_: usize) {
     let me = runtime::current();
     loop {
+        ROUND_BEGAN.store(runtime::monotonic_ns(), Ordering::Relaxed);
+        ROUND_CPU.store(crate::nt::platform::cpu_time_ns(me), Ordering::Relaxed);
+        let (areas, pixels, copied) = crate::nt::desktop::composed();
+        ROUND_COMPOSES.store(areas, Ordering::Relaxed);
+        ROUND_COMPOSED.store(pixels, Ordering::Relaxed);
+        ROUND_COPIED.store(copied, Ordering::Relaxed);
         let (more, refresh, launch) = match SERVER.lock().as_mut() {
             Some(s) => {
                 let more = s.round(me);
@@ -416,7 +440,9 @@ fn serve(_: usize) {
         if SERVER.lock().as_ref().is_some_and(Server::ready) {
             runtime::wake(me);
         }
+        WAIT_BEGAN.store(runtime::monotonic_ns(), Ordering::Relaxed);
         runtime::wait();
+        WAIT_ENDED.store(runtime::monotonic_ns(), Ordering::Relaxed);
     }
 }
 
@@ -637,8 +663,13 @@ impl Connection {
         let Some(process) = crate::nt::process::by_id(self.pid) else { return Ok(()) };
         let none = winstate::InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 };
         let mut taken = [none; INPUT_AT_ONCE];
+        let mut first = true;
         loop {
-            let n = desktop::take_input(&process.desk.shell, self.pid, &mut taken);
+            let (n, since) = desktop::take_input_timed(&process.desk.shell, self.pid, &mut taken);
+            if first && let Some(since) = since {
+                self.note_late(since);
+            }
+            first = false;
             for e in &taken[..n] {
                 if TRACE.load(Ordering::Relaxed) {
                     crate::info!(
@@ -658,6 +689,54 @@ impl Connection {
                 return Ok(());
             }
         }
+    }
+
+    /// Input taken now waited since `since` (monotonic ns): noted when it
+    /// waited LATE_INPUT_NS or more, with what the server did meanwhile:
+    /// woken late from a wait (the wake, or a CPU, came late), or busy in
+    /// a round that began before the input came (a slow request).
+    fn note_late(&self, since: u64) {
+        let now = runtime::monotonic_ns();
+        let waited = now.saturating_sub(since);
+        if waited < LATE_INPUT_NS {
+            return;
+        }
+        let round = ROUND_BEGAN.load(Ordering::Relaxed);
+        let (wait_began, wait_ended) =
+            (WAIT_BEGAN.load(Ordering::Relaxed), WAIT_ENDED.load(Ordering::Relaxed));
+        // Waiting when the input came: the wait ended after it.
+        let asleep = wait_ended > since && wait_began <= since;
+        let ms = |ns: u64| ns / 1_000_000;
+        let cpu = crate::nt::platform::cpu_time_ns(runtime::current())
+            .saturating_sub(ROUND_CPU.load(Ordering::Relaxed));
+        let (areas, pixels, copied) = crate::nt::desktop::composed();
+        let areas = areas.saturating_sub(ROUND_COMPOSES.load(Ordering::Relaxed));
+        let pixels = pixels.saturating_sub(ROUND_COMPOSED.load(Ordering::Relaxed));
+        let copied = copied.saturating_sub(ROUND_COPIED.load(Ordering::Relaxed));
+        crate::warn!(
+            "wayland: pid {}'s input waited {} ms for the server ({}; this round began {} ms ago and ran {} ms of it, composing {} areas of {} pixels in all, {} of them copied straight from windows)",
+            self.pid,
+            ms(waited),
+            if asleep { "it was waiting for work and ran again" } else { "it was busy" },
+            ms(now.saturating_sub(round)),
+            ms(cpu),
+            areas,
+            pixels,
+            copied
+        );
+        crate::events::emit(
+            crate::events::Category::Wayland,
+            "wayland input late",
+            format_args!(
+                r#""pid":{},"client":{},"waited_ms":{},"asleep":{asleep},"woke_after_ms":{},"round_ms":{},"round_cpu_ms":{},"round_composes":{areas},"round_composed_pixels":{pixels},"round_copied_pixels":{copied}"#,
+                self.pid,
+                self.number,
+                ms(waited),
+                if asleep { ms(wait_ended - since) } else { 0 },
+                ms(now.saturating_sub(round)),
+                ms(cpu)
+            ),
+        );
     }
 
     /// Writes what the socket takes of the events waiting, each event's
