@@ -4036,8 +4036,9 @@ reads like a gap in the DLL and not a gap in the list.
   (`kernel32_sys_test`, ROADMAP OF). Every row a load leaves names the
   library it was asked for, which is what a program stopped by one needs.
 - **GetProcAddress** with a null module searches the executable; an
-  export resolving into a `.gstub` section counts as absent ("Gaps are
-  never silent").
+  export resolving into a `.gstub` section counts as absent, leaving a
+  `stub refused` row that says the name is exported and unwritten
+  ("Gaps are never silent", "Exported but not implemented yet").
 - **Static TLS** (`tls.rs`): each image with a TLS directory gets an
   index at load; each thread has an array at
   TEB.ThreadLocalStoragePointer with a block per image (the template,
@@ -6782,8 +6783,13 @@ of their own, clients of it) is the yardstick.
   (`unimplemented_test`). The stubs live in a
   `.gstub` section: LdrGetProcedureAddress (GetProcAddress) treats an
   export resolving there as absent (by name STATUS_ENTRYPOINT_NOT_FOUND,
-  by ordinal STATUS_ORDINAL_NOT_FOUND, as a missing export), so programs probing for optional
+  by ordinal STATUS_ORDINAL_NOT_FOUND), so programs probing for optional
   functions keep their fallbacks; only static imports bind to them. The
+  refusal is a `stub refused` row and not a `missing export` one
+  (`loader_test`): the export table carries the name, so a reader of
+  the dump is told to write the body and not to add the export, and a
+  program that binds such a name by delay load -- which does not probe
+  at all, and dies 0xc06d007f -- has the row that explains it. The
   lists were generated from the import closures of SQL Server LocalDB and
   FileZilla (W3: FileZilla 3.69.3's and 3.71.0's imports across user32, gdi32, msvcrt,
   comctl32, shell32, ole32 and others); a function is implemented by

@@ -170,19 +170,23 @@ fn ledger(serial: &str) -> Vec<(u64, String)> {
     v
 }
 
-/// Every `missing export` and `missing import` the ledger holds:
-/// (hits, service), busiest first. These are named in full, however few
-/// hits each has, because they are not like the other gaps: a missing
-/// function is always one gala should have, never the program's own
-/// doing, and a single hit is enough to end a program -- the delay load
-/// of `wtsapi32.dll!WTSRegisterSessionNotificationEx` ended Word's
-/// startup with one hit, nowhere near `ledger`'s top five by hits
-/// (ROADMAP OF).
+/// Every `missing export`, `missing import` and `stub refused` the
+/// ledger holds: (hits, service), busiest first. These are named in full,
+/// however few hits each has, because they are not like the other gaps:
+/// a missing function is always one gala should have, never the
+/// program's own doing, and a single hit is enough to end a program --
+/// the delay load of `wtsapi32.dll!WTSRegisterSessionNotificationEx`
+/// ended Word's startup with one hit, nowhere near `ledger`'s top five
+/// by hits (ROADMAP OF). A `stub refused` is the same want with the
+/// export already written (`gala_stubs`), which is the readiest work of
+/// the three, so it belongs on this line and not among the gaps a
+/// program lives with. A plain `stub` does not: its process is already
+/// over and the crash says so.
 fn missing_functions(serial: &str) -> Vec<(u64, String)> {
     let mut merged: BTreeMap<String, u64> = BTreeMap::new();
     for line in gaps(serial) {
         let what = field(line, "what").unwrap_or("");
-        if what != "missing export" && what != "missing import" {
+        if !matches!(what, "missing export" | "missing import" | "stub refused") {
             continue;
         }
         let hits = field(line, "hits").and_then(|h| h.parse().ok()).unwrap_or(1);
@@ -683,13 +687,19 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
 [info ] ledger: {\"service\":\"NtOpenFile\",\"what\":\"unsupported\",\"detail\":\"0x1\",\"hits\":5000,\"first\":1,\"last\":2}
 [info ] ledger: {\"service\":\"wtsapi32.dll!WTSRegisterSessionNotificationEx\",\"what\":\"missing export\",\"detail\":0,\"hits\":1,\"first\":40190,\"last\":40190}
 [info ] ledger: {\"service\":\"gdi32.dll!Bar(imported by WWLIB.DLL)\",\"what\":\"missing import\",\"detail\":0,\"hits\":1,\"first\":5,\"last\":5}
+[info ] ledger: {\"service\":\"xmllite.dll!CreateXmlReader\",\"what\":\"stub refused\",\"detail\":0,\"hits\":1,\"first\":37229,\"last\":37229}
 ";
         let t = triage(log, None, &Facts::default());
         // The one hit at 40 s is named beside the one hit 900 times, and
-        // a gap of another kind is not.
+        // a gap of another kind is not. The stub is on the line too: it
+        // is a function gala lacks whose export is already written, and
+        // leaving it off would hide the readiest of the three (Word's
+        // delay load of xmllite.dll!CreateXmlReader ended a run on its
+        // single hit, and the row read "missing export" at the time,
+        // which says the opposite of what was true).
         assert!(
             t.contains(
-                "triage: functions gala lacks (ledger, all 3): user32.dll!Foo x900; gdi32.dll!Bar(imported by WWLIB.DLL) x1; wtsapi32.dll!WTSRegisterSessionNotificationEx x1"
+                "triage: functions gala lacks (ledger, all 4): user32.dll!Foo x900; gdi32.dll!Bar(imported by WWLIB.DLL) x1; wtsapi32.dll!WTSRegisterSessionNotificationEx x1; xmllite.dll!CreateXmlReader x1"
             ),
             "{t}"
         );

@@ -2117,7 +2117,9 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   from that list.
 - GetProcAddress returns NULL for stubs, so a test that checks a
   function is *exported* imports it statically (a call in a branch never
-  taken).
+  taken). The refusal leaves a `stub refused` row, which is the one to
+  look for when a program asked for a name gala does export: a `missing
+  export` row would mean the DLL has not got it at all.
 - A static import Windows lacks keeps the whole test from loading
   there (exit 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND, in the windows
   job): import statically only what a real program imports (the Office
@@ -3893,10 +3895,11 @@ about a minute under TCG. Read, in order:
   CHROME_RESULT_CODE_PROFILE_IN_USE (the process singleton: its mutex and
   lock file).
 - `delay_load_failure_support.cc ... NOTREACHED`: a delay-loaded
-  function or DLL is missing; the ledger's `missing export` / `missing
-  dll` line names it. chrome.dll delay-loads most of what it uses, and
-  `gala_stubs` stubs are invisible to GetProcAddress, so a stubbed delay
-  import fails the same way. Rather than one function per run, list them
+  function or DLL is missing; the ledger's `missing export`, `stub
+  refused` or `missing dll` line names it. chrome.dll delay-loads most
+  of what it uses, and `gala_stubs` stubs are invisible to
+  GetProcAddress, so a stubbed delay import fails the same way -- under
+  `stub refused`, which says the export is there and the body is not. Rather than one function per run, list them
   all: `python3 -I tools/import_survey.py target/x86_64-pc-windows-msvc/release
   target/prebuilt/chromium/chrome-win/chrome.dll` prints every import
   (static and delay-loaded) gala's built DLLs lack or have only as stubs,

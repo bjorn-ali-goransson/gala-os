@@ -25,6 +25,15 @@
 //! array holds both (base, image size, name), testdll's sequence after
 //! testdll2's.
 //!
+//! An export gala ships only as an unimplemented stub (`gala_stubs`'
+//! `.gstub` section) is refused although the name is in the export
+//! table, so that a program probing for an optional function takes its
+//! fallback; the ledger records it as a "stub refused" and not as a
+//! missing export, because the two ask for different work (write the
+//! body, or add the export) and a program that binds the name by delay
+//! load does not probe at all. Asked of gala only: the xmllite.dll beside the
+//! exe is gala's, whose CreateXmlReader is such a stub.
+//!
 //! A DLL loaded by path takes its dependencies from the usual places, or
 //! with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR from its own directory first
 //! (the program copies both DLLs to %TEMP%\gala_loader\sub, and removes
@@ -780,6 +789,25 @@ fn run() -> Result<(), u32> {
     );
     c.eq(s.into(), STATUS_INVALID_FILE_FOR_SECTION.into())?;
     remove_path(&empty, false);
+
+    // An export that is there and has no body: gala's xmllite.dll
+    // exports CreateXmlReader as a `.gstub` stub. The export table
+    // carries the name, and GetProcAddress still answers
+    // STATUS_ENTRYPOINT_NOT_FOUND, so that a program probing for an
+    // optional function keeps its fallback (`gala_stubs`). The scenario
+    // checks that the ledger calls the row a "stub refused": a
+    // `missing export` row would say gala has never heard of the name,
+    // which is the opposite of what is true, and a delay load of it
+    // ends a process with 0xc06d007f and nothing else to read.
+    if on_gala() {
+        let (s, stubs) = api.load(&wide!("xmllite.dll"));
+        c.eq(s.into(), STATUS_SUCCESS.into())?;
+        c.ok(find_export(stubs, b"CreateXmlReader").is_some(), stubs as u64)?;
+        let (s, address) = api.proc(stubs, b"CreateXmlReader");
+        c.eq(s.into(), STATUS_ENTRYPOINT_NOT_FOUND.into())?;
+        c.eq(address as u64, 0)?;
+        (api.unload)(stubs);
+    }
 
     // No leftovers (an earlier round's moved later checks).
     for name in ["\\testdll.dll", "\\testdll2.dll"] {

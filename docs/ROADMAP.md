@@ -2155,7 +2155,12 @@ need gala's.
    (`user/gala_stubs/src/lib.rs`). A `missing export` line is therefore
    weaker evidence than it looks -- **except when the program binds it
    by delay load**, where the same absent export ends the process with
-   0xc06d007f and the crash report names it.
+   0xc06d007f and the crash report names it. Which of the two a row is
+   no longer has to be guessed: a name gala exports and has not
+   written is a `stub refused` row and a name gala has not got is a
+   `missing export` one (`loader_test`). Both are on triage's
+   "functions gala lacks" line, since each is a function to write; the
+   first says the export is already there.
 
    Which is what the run before this one did. With the same scenario
    and the fail-fast absent, Word ran 2 s further and died at 35479 ms

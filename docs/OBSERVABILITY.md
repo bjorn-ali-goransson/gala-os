@@ -544,7 +544,15 @@ that row is in the dump only when the filter freed the slot it took.
   about and lives with), `missing dll`, `load failed` (a DLL the loader
   found and could not load, its detail the status: what names the DLL
   behind a process that dies STATUS_DLL_INIT_FAILED), `stub` (an export
-  that only reports itself and ends the process, `gala_stubs`),
+  that only reports itself and ends the process, `gala_stubs`), `stub
+  refused` (that same unwritten body seen from the other side:
+  GetProcAddress refusing to hand out a `.gstub` address, so the asker
+  is told the name is absent and carries on -- or ends on 0xc06d007f if
+  it bound the name by delay load. It is told from `missing export`
+  because the export table does carry the name and only its body is
+  unwritten, which is the readiest of the three kinds of missing
+  function to answer, and from `stub` because no process ended;
+  `loader_test`),
   `reached` (not a gap at all: the first call that reached a method gala
   answers, so that a program stopping in the middle of a path leaves the
   path it took; it is told from a call answered S_OK, which `other`
@@ -555,10 +563,11 @@ that row is in the dump only when the filter freed the slot it took.
   holding it, or re-entered it -- `user/gala_lock`, what a DLL writes
   down instead of spinning silently, and the row that would have
   named the holder of the trace lock Word's main thread hung in) and
-  `other`. Both
-  `stub` and `not implemented` are also logged as they happen, because a
-  run cut short by a snapshot never dumps the ledger; only `stub`'s line
-  says the process ended. The Windows Runtime's:
+  `other`. `stub`,
+  `stub refused` and `not implemented` are also logged as they happen,
+  because a run cut short by a snapshot never dumps the ledger; only
+  `stub`'s line says the process ended, since the other two leave their
+  programs running. The Windows Runtime's:
   `ole32.dll!RoGetActivationFactory(<class>)` for a class it cannot
   activate, with a reason in the name when the registration was found
   (`(server DLL not found)`, `(no DllGetActivationFactory)`, `(the DLL
