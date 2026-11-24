@@ -1967,6 +1967,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
                         name,
                         ordinal,
                         Some(&who[..who_len]),
+                        MISSING_IMPORT,
                     );
                     missing.get_or_insert(if name.is_empty() {
                         STATUS_ORDINAL_NOT_FOUND
@@ -1996,7 +1997,24 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
 /// it is an import that did not bind, which ends the load and is named
 /// with the module whose import it is; without, a program's own lookup at
 /// run time, which the program is told about and lives with.
-fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32, importer: Option<&[u8]>) {
+/// The ledger kinds the loader reports under (`ledger::user_what`):
+/// a name the DLL does not have and the program lives without, one the
+/// loader could not bind (which ends the load), and one the DLL exports
+/// and gala has not implemented, whose address is refused.
+const MISSING_EXPORT: u32 = 1;
+const MISSING_IMPORT: u32 = 8;
+const STUB_REFUSED: u32 = 11;
+
+/// Counts a gap in `dll`'s exports in the missing-features ledger under
+/// `what`, as `dll!name` (or `dll!#ordinal`), naming the module whose
+/// import it is when it is an import.
+fn report_missing_export(
+    dll: &[u8],
+    name: &[u8],
+    ordinal: u32,
+    importer: Option<&[u8]>,
+    what: u32,
+) {
     let mut text = [0u8; 128];
     let mut n = import_name(dll, name, ordinal, &mut text);
     if let Some(importer) = importer {
@@ -2009,7 +2027,6 @@ fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32, importer: Option
             }
         }
     }
-    let what = if importer.is_some() { 8 } else { 1 };
     GalaRecordMissing(text.as_ptr(), n, what, u64::from(ordinal));
 }
 
@@ -2430,13 +2447,28 @@ unsafe extern "system" fn ldr_get_procedure_address(
             _ => export(module, name, 0).ok_or(STATUS_ENTRYPOINT_NOT_FOUND),
         }
     };
+    // An export whose body is a `.gstub` stub is refused like an absent
+    // one, so that a program probing for an optional function takes its
+    // fallback (`gala_stubs`). It is not the same gap, though, and the
+    // ledger must not spell it the same: the name is in the export table
+    // and only its body is unwritten, which is the difference between
+    // implementing a function and adding an export. A program that binds
+    // such a name by delay load does not probe at all -- it ends on
+    // 0xc06d007f -- and then the row is the whole explanation.
+    let mut stub = false;
     let found = found.and_then(|target| {
         let missing =
             if name.is_null() { STATUS_ORDINAL_NOT_FOUND } else { STATUS_ENTRYPOINT_NOT_FOUND };
-        if is_unimplemented_stub(target) { Err(missing) } else { Ok(target) }
+        if is_unimplemented_stub(target) {
+            stub = true;
+            Err(missing)
+        } else {
+            Ok(target)
+        }
     });
     // Programs probe for optional functions this way: every miss goes to
-    // the missing-features ledger (`dll!name`).
+    // the missing-features ledger (`dll!name`), under the kind that says
+    // which miss it was.
     if found.is_err() {
         let mut dll = [0u8; MAX_NAME];
         let len = with_modules(|m| {
@@ -2451,7 +2483,13 @@ unsafe extern "system" fn ldr_get_procedure_address(
             // SAFETY: the caller passes a valid ANSI_STRING.
             unsafe { core::slice::from_raw_parts((*name).buffer, usize::from((*name).length)) }
         };
-        report_missing_export(&dll[..len], wanted, ordinal, None);
+        report_missing_export(
+            &dll[..len],
+            wanted,
+            ordinal,
+            None,
+            if stub { STUB_REFUSED } else { MISSING_EXPORT },
+        );
     }
     match found {
         Ok(target) => {

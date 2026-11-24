@@ -339,10 +339,17 @@ pub fn record(service: &'static str, what: &'static str, detail: u64) {
 /// the loader could not bind, which ends the load, and is named with the
 /// module whose import it is (`<dll>!<export>(imported by <module>)`), so
 /// that a program's probes and the gaps that stop it are told apart.
-/// "reached" is not a gap at all: it is the first call that reached a
-/// method gala answers, recorded so that a program which stops in the
-/// middle of a path leaves the path it took (OBSERVABILITY
-/// "Missing-features ledger").
+/// A "stub refused" is that same unwritten body seen from the other
+/// side: GetProcAddress refusing to hand out a `.gstub` address, so the
+/// asking program is told the name is absent and carries on (or, if it
+/// bound the name by delay load, ends on 0xc06d007f). It is neither a
+/// "stub", which says the body ran and the process is over, nor a
+/// "missing export", which says the DLL has not got the name -- here the
+/// export table carries it and only the body is unwritten, which is the
+/// readiest work of the three. "reached" is not a gap at all: it is the
+/// first call that reached a method gala answers, recorded so that a
+/// program which stops in the middle of a path leaves the path it took
+/// (OBSERVABILITY "Missing-features ledger").
 pub fn user_what(code: u32) -> &'static str {
     match code {
         1 => "missing export",
@@ -350,6 +357,7 @@ pub fn user_what(code: u32) -> &'static str {
         3 => "not implemented",
         4 => "missing dll",
         6 => "stub",
+        11 => "stub refused",
         7 => "load failed",
         8 => "missing import",
         9 => "reached",

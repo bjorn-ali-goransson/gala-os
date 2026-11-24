@@ -601,6 +601,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("loader_test", "testdll.dll", "gala"),
     ("loader_test", "testdll2.dll", "gala"),
     ("loader_test", "testdll_gap.dll", "gala"),
+    ("loader_test", "xmllite.dll", "gala"),
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
     ("smpcow_test", "ntdll.dll", "Windows/System32"),
@@ -7345,6 +7346,15 @@ const BASE_SCENARIOS: &[Scenario] = &[
             r#"ledger: {"service":"testdll.dll!#2","what":"missing export""#,
             r#"ledger: {"service":"testdll.dll!#2(imported by testdll_gap.dll)","what":"missing import""#,
             r#"ledger: {"service":"testdll_gap.dll","what":"load failed","detail":3221225784"#,
+            // A third kind: a name the DLL does export, whose body is a
+            // `.gstub` stub. GetProcAddress refuses it like an absent
+            // one, and the row must not read "missing export" -- that
+            // would say gala has never heard of the name, sending a
+            // reader after an export table that is right. Nor "stub",
+            // which says the body ran and the process is over. "stub
+            // refused" says the body is unwritten and the asker was
+            // told the name is absent, which is the work.
+            r#"ledger: {"service":"xmllite.dll!CreateXmlReader","what":"stub refused""#,
             "loader_test: ok",
             "exited with status 0x00000000",
         ],
