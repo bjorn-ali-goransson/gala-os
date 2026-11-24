@@ -13166,7 +13166,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // and closes it with Alt+F4, and consolerun ends with Word's own
         // status, 0. ROADMAP OF has where gala's run stops instead.
         name: "office_word",
-        cmdline: "qemu_exit persist as=system run=consolerun.exe \
+        cmdline: "qemu_exit persist as=system hook=window/winword:12=shot+2 \
+                  run=consolerun.exe \
                   args=%22C:\\Program%20Files\\Microsoft%20Office\\root\\Office16\\\
                   WINWORD.EXE%22%20/t%22C:\\Program%20Files\\Microsoft%20Office\\root\\\
                   Office16\\1033\\QuickStyles\\Default.dotx%22 \
@@ -13176,6 +13177,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
+            // The hook is armed before Word runs, so a run that comes
+            // back with no picture of Word's windows is a run where no
+            // window went up -- not one where nobody asked.
+            "hook: armed: window shown -> screendump",
             "xtask: screen ok",
             "consolerun.exe (pid 4) exited with status 0x00000000",
         ],
@@ -13186,7 +13191,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // Explorer's "New > Microsoft Excel Worksheet" copies), with
         // OFFICE_EXCEL_SCREEN for its window, as office_word.
         name: "office_excel",
-        cmdline: "qemu_exit persist as=system run=consolerun.exe \
+        cmdline: "qemu_exit persist as=system hook=window/excel:12=shot+2 \
+                  run=consolerun.exe \
                   args=%22C:\\Program%20Files\\Microsoft%20Office\\root\\Office16\\\
                   EXCEL.EXE%22%20%22C:\\Program%20Files\\Microsoft%20Office\\root\\vfs\\\
                   Windows\\SHELLNEW\\EXCEL12.XLSX%22 \

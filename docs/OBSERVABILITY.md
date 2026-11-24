@@ -1650,9 +1650,9 @@ became visible, which is before the program has painted it --
 `hook_test`'s fourth window is white in its own picture and the three
 before it are not -- and `hook=window=shot+1` catches a window the
 program has drawn. But the wait is time the window may not live through:
-Word's splash lives about 2 s and WINWORD ends on Office's own fail-fast
-at ~30 s, and a picture taken after that is of the desktop that outlived
-it, which looks exactly like a hook that never fired. So the host takes
+WINWORD puts its splash up a few seconds in and ends ~31 s in on a
+delay load gala cannot resolve, and a picture taken after that is of the
+desktop that outlived it, which looks exactly like a hook that never fired. So the host takes
 both, at the request and when the wait is up:
 
 ```
@@ -1661,7 +1661,9 @@ target/screenshots/<scenario>-hook-<name>-<secs>s.png   the second asked for
 ```
 
 The first is certain and may be unpainted; the second is what the window
-settled into, if it lasted that long. `+0` is already the first and
+settled into, if it lasted that long. `office_word`'s pair is the two
+halves of that: at the instant, a window-shaped band of nothing; two
+seconds later, Office's splash with "Word" and "Starting..." in it. `+0` is already the first and
 stays single. Both are named in the log as they are written, and both of
 a window's names are kept free of an earlier window's pair (`-2`, `-3`),
 so a comparison between two runs' pictures is a comparison of the same

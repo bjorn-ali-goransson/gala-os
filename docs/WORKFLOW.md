@@ -4208,7 +4208,7 @@ the window (`hook_test-hook-hook-test-exe-w4.png`), so a run with no idea
 when its windows go up still comes back with a picture of each
 (OBSERVABILITY "Hooks"; scenarios `hook_test`, `hook_match_test`):
 
-    cargo xtask boot-test office_word   # with hook=window=shot+1 in its cmdline
+    cargo xtask boot-test office_word   # hook=window/winword:12=shot+2 is in its cmdline
 
 A second guessed from the outside is missed as often as it is caught --
 Word's splash lives about 2 s of a 90 s run, and the run is as fast as
