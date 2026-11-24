@@ -25,7 +25,12 @@
 //!   in the running object table is found whatever case it was written
 //!   in. Composing a file with an item gives a generic composite whose
 //!   name is the two joined; composing anything with an anti moniker
-//!   annihilates it, which is S_OK with a NULL moniker.
+//!   annihilates it, which is S_OK with a NULL moniker. Two file
+//!   monikers make no composite at all: a relative right-hand path
+//!   merges into the left as one file moniker, each of its leading `..`
+//!   taking a component, and an absolute one is MK_E_SYNTAX.
+//! - `CreateGenericComposite` is `ComposeWith` with the ends handled: a
+//!   NULL on either side hands back the other moniker, referenced.
 //! - `Inverse` of a file or an item is an anti moniker;
 //!   `CommonPrefixWith` of two paths is their shared directory with its
 //!   separator still on (and of a moniker with itself, MK_S_US);
@@ -443,10 +448,95 @@ extern "system" fn reduce(
     E_NOTIMPL
 }
 
+/// The part of a path no `..` may climb out of: the drive and its
+/// separator, or a UNC `\\server\share\`, and nothing at all for a
+/// relative path.
+fn root_of(path: &[u16]) -> usize {
+    if path.len() >= 2 && is_separator(path[0]) && is_separator(path[1]) {
+        let mut i = 2;
+        // the server, then the share, each with its separator
+        for _ in 0..2 {
+            while i < path.len() && !is_separator(path[i]) {
+                i += 1;
+            }
+            if i < path.len() {
+                i += 1;
+            }
+        }
+        return i;
+    }
+    if path.len() >= 2
+        && path[1] == u16::from(b':')
+        && (u16::from(b'A')..=u16::from(b'Z')).contains(&fold(path[0]))
+    {
+        return if path.len() >= 3 && is_separator(path[2]) { 3 } else { 2 };
+    }
+    0
+}
+
+/// A relative path merged into the one it is composed onto, as Windows'
+/// file moniker does it (measured by `user/moniker_test`).
+///
+/// Each leading `..` of `right` takes one component of `left` and leaves
+/// the separator behind it, so `C:\a\b.txt` and `..\up.txt` make
+/// `C:\a\up.txt`; a leading `.` followed by a separator is dropped and
+/// everything else is appended as written, inner `..` and `.` included.
+/// Asking for more components than the path has above its root is
+/// MK_E_SYNTAX -- `C:\` and `..` have nowhere to go -- and so is any
+/// right-hand path at all when the left is empty.
+fn merge_paths(left: &[u16], right: &[u16], out: &mut [u16; NAME]) -> Result<usize, HResult> {
+    if left.is_empty() && !right.is_empty() {
+        return Err(MK_E_SYNTAX);
+    }
+    let root = root_of(left);
+    let mut cut = left.len();
+    let mut rest = right;
+    loop {
+        let dots = rest.iter().take_while(|&&c| c == u16::from(b'.')).count();
+        if dots == 0 || dots > 2 {
+            break;
+        }
+        let ends = dots == rest.len();
+        // ".." is a segment at the end of the name as well; a lone "."
+        // there is kept, as Windows keeps it
+        if (ends && dots == 1) || (!ends && !is_separator(rest[dots])) {
+            break;
+        }
+        if dots == 2 {
+            if cut <= root {
+                return Err(MK_E_SYNTAX);
+            }
+            let end = if is_separator(left[cut - 1]) { cut - 1 } else { cut };
+            cut = if end <= root {
+                root
+            } else {
+                match left[root..end].iter().rposition(|&c| is_separator(c)) {
+                    Some(i) => root + i + 1,
+                    None => root,
+                }
+            };
+        }
+        rest = &rest[dots..];
+        if !rest.is_empty() {
+            rest = &rest[1..];
+        }
+    }
+    let mut at = push(out, 0, &left[..cut]).ok_or(E_OUTOFMEMORY)?;
+    if !rest.is_empty() && at > 0 && !is_separator(out[at - 1]) {
+        at = push_ascii(out, at, b"\\").ok_or(E_OUTOFMEMORY)?;
+    }
+    push(out, at, rest).ok_or(E_OUTOFMEMORY)
+}
+
 /// ComposeWith: an anti moniker annihilates what it is composed onto,
 /// which is S_OK with no moniker at all; otherwise the two names joined
 /// in a generic composite, refused with MK_E_NEEDGENERIC when the caller
 /// said it would not take one.
+///
+/// Two file monikers are the exception: they make no composite, so the
+/// right path merges into the left (`merge_paths`) whether or not the
+/// caller allows one, and an absolute right-hand path -- a drive or a
+/// UNC share -- is MK_E_SYNTAX.
 extern "system" fn compose_with(
     this: *mut Moniker,
     right: *mut c_void,
@@ -464,10 +554,24 @@ extern "system" fn compose_with(
     if kind == MKSYS_ANTIMONIKER {
         return S_OK;
     }
+    let m = mk(this);
+    if m.kind == MKSYS_FILEMONIKER && kind == MKSYS_FILEMONIKER {
+        if looks_like_a_path(&name[..len]) {
+            return MK_E_SYNTAX;
+        }
+        let mut merged = [0u16; NAME];
+        return match merge_paths(m.text(), &name[..len], &mut merged) {
+            Ok(end) => handed(new_moniker(MKSYS_FILEMONIKER, [0; 16], &merged[..end]), out),
+            Err(E_OUTOFMEMORY) => {
+                missing(b"ole32.dll!IMoniker::ComposeWith(name longer than 320)", 0);
+                E_OUTOFMEMORY
+            }
+            Err(e) => e,
+        };
+    }
     if only_if_not_generic != 0 {
         return MK_E_NEEDGENERIC;
     }
-    let m = mk(this);
     let mut joined = [0u16; NAME];
     let Some(at) = push(&mut joined, 0, m.text()) else {
         missing(b"ole32.dll!IMoniker::ComposeWith(name longer than 320)", 0);
@@ -864,6 +968,40 @@ pub extern "system" fn CreateAntiMoniker(out: *mut *mut c_void) -> HResult {
 
 /// `clsid:<guid>:`, the display name of a class moniker, in upper case
 /// as Windows writes it.
+/// CreateGenericComposite: the left moniker's own `ComposeWith` with a
+/// generic composite allowed, and a NULL on either side handing back the
+/// other moniker with a reference of its own (measured on Windows 11).
+///
+/// Windows reads `out` without checking it and faults on a NULL; gala
+/// answers E_POINTER, which is the one deliberate difference here.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateGenericComposite(
+    first: *mut c_void,
+    rest: *mut c_void,
+    out: *mut *mut c_void,
+) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    let only = if first.is_null() {
+        rest
+    } else if rest.is_null() {
+        first
+    } else {
+        core::ptr::null_mut()
+    };
+    if !only.is_null() {
+        add_ref(only);
+        put(out, only);
+        return S_OK;
+    }
+    if first.is_null() {
+        return S_OK;
+    }
+    com_call!(first, 11, fn(*mut c_void, i32, *mut *mut c_void) -> HResult, rest, 0, out)
+}
+
 fn class_name(clsid: &Guid, out: &mut [u16]) -> usize {
     let braced = super::guid_text(clsid);
     let at = push_ascii(out, 0, b"clsid:").unwrap_or(0);

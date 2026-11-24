@@ -37,6 +37,18 @@
  * - An item moniker is "<delimiter><name>", also case-insensitive; an
  *   anti moniker is "\..", hashing to 0x80000001; a file composed with
  *   an item is a generic composite whose display name is the two joined.
+ * - Two file monikers make no composite at all. The right-hand path
+ *   merges into the left as one file moniker, each of its leading ".."
+ *   taking a component of the left and leaving the separator behind it
+ *   ("C:\a\b.txt" and "..\up.txt" make "C:\a\up.txt"), a leading
+ *   "." before a separator dropped, and everything else appended as
+ *   written. Climbing past the drive or the UNC share is MK_E_SYNTAX,
+ *   and so is an absolute right-hand path or an empty left one. The
+ *   merge makes no composite, so it happens even when the caller says
+ *   it will not take one.
+ * - CreateGenericComposite is the left moniker's own ComposeWith with a
+ *   generic composite allowed; a NULL on either side hands back the
+ *   other moniker with a reference of its own.
  * - Inverse of a file or an item is an anti moniker; Enum on anything
  *   that is not a composite is S_OK with NULL; CommonPrefixWith itself
  *   is MK_S_US, with a sibling it is the common directory including its
@@ -52,14 +64,15 @@
  *   S_FALSE, GetObject is MK_E_UNAVAILABLE and revoking that key again
  *   is E_INVALIDARG.
  *
- * Two calls are deliberately not checked: CreateFileMoniker(path, NULL)
- * and GetRunningObjectTable(1, NULL). Real ole32 does not refuse a NULL
- * out pointer there, it faults (0xC0000005, measured), and this program
- * runs on Windows too. gala refuses them with E_INVALIDARG instead,
- * which ARCHITECTURE records as a place gala is deliberately kinder.
+ * Three calls are deliberately not checked: CreateFileMoniker(path,
+ * NULL), GetRunningObjectTable(1, NULL) and CreateGenericComposite(a, b,
+ * NULL). Real ole32 does not refuse a NULL out pointer there, it faults
+ * (0xC0000005, measured), and this program runs on Windows too. gala
+ * refuses them with E_INVALIDARG or E_POINTER instead, which
+ * ARCHITECTURE records as a place gala is deliberately kinder.
  *
- * Prints "moniker_test: ok" or exits with the number of the failing
- * check. */
+ * Prints "moniker_test: ok (<n> checks)" or exits with the number of
+ * the failing check. */
 #define COBJMACROS
 #include <windows.h>
 #include <ole2.h>
@@ -175,6 +188,32 @@ static int named(IMoniker *mk, IBindCtx *bc, const wchar_t *want) {
     same = wcscmp(got, want) == 0;
     CoTaskMemFree(got);
     return same;
+}
+
+/* Two file monikers composed: the right-hand path merged into the left.
+   `want` is the display name the one file moniker should have, or NULL
+   for MK_E_SYNTAX and no moniker at all. */
+static void merged(IBindCtx *bc, const wchar_t *left, const wchar_t *right, const wchar_t *want) {
+    IMoniker *a = NULL, *b = NULL, *out = NULL;
+    DWORD sys = 0xdead;
+    HRESULT hr;
+
+    CHECK(CreateFileMoniker(left, &a) == S_OK && a != NULL);
+    CHECK(CreateFileMoniker(right, &b) == S_OK && b != NULL);
+    hr = IMoniker_ComposeWith(a, b, FALSE, &out);
+    if (!want) {
+        CHECK(hr == MK_E_SYNTAX);
+        CHECK(out == NULL);
+    } else {
+        CHECK(hr == S_OK && out != NULL);
+        CHECK(IMoniker_IsSystemMoniker(out, &sys) == S_OK && sys == MKSYS_FILEMONIKER);
+        CHECK(named(out, bc, want));
+    }
+    if (out) {
+        IMoniker_Release(out);
+    }
+    IMoniker_Release(b);
+    IMoniker_Release(a);
 }
 
 int main(void) {
@@ -491,6 +530,143 @@ int main(void) {
         CHECK(hr == S_OK && left == NULL);
     }
 
+    /* Two file monikers are the exception: no composite at all, the
+       right-hand path merged into the left as one file moniker. */
+    merged(bc, L"C:\\a\\b.txt", L"c.txt", L"C:\\a\\b.txt\\c.txt");
+    merged(bc, L"C:\\a\\b.txt", L"d\\e.txt", L"C:\\a\\b.txt\\d\\e.txt");
+    merged(bc, L"c.txt", L"d\\e.txt", L"c.txt\\d\\e.txt");
+    merged(bc, L"C:\\a\\", L"x.txt", L"C:\\a\\x.txt");
+    merged(bc, L"C:\\a", L"b\\c.txt", L"C:\\a\\b\\c.txt");
+    merged(bc, L"C:\\a\\b.txt", L"x\\", L"C:\\a\\b.txt\\x\\");
+    merged(bc, L"C:\\a\\b.txt", L"", L"C:\\a\\b.txt");
+    merged(bc, L"", L"", L"");
+    merged(bc, L"", L"c.txt", NULL);
+
+    /* A leading ".." takes one component of the left and leaves the
+       separator behind it; the walk works with either separator. */
+    merged(bc, L"C:\\a\\b.txt", L"..\\up.txt", L"C:\\a\\up.txt");
+    merged(bc, L"C:\\a\\b\\c.txt", L"..\\..\\up.txt", L"C:\\a\\up.txt");
+    merged(bc, L"C:\\a\\b.txt", L"..\\..\\up.txt", L"C:\\up.txt");
+    merged(bc, L"C:\\a\\b.txt", L"..", L"C:\\a\\");
+    merged(bc, L"C:\\a\\b.txt", L"..\\", L"C:\\a\\");
+    merged(bc, L"C:\\a\\b.txt", L"..\\..", L"C:\\");
+    merged(bc, L"C:\\a\\", L"..\\x.txt", L"C:\\x.txt");
+    merged(bc, L"C:\\a\\b\\", L"..\\..\\x.txt", L"C:\\x.txt");
+    merged(bc, L"C:\\a", L"..\\x.txt", L"C:\\x.txt");
+    merged(bc, L"c.txt", L"..\\x.txt", L"x.txt");
+    merged(bc, L"d\\c.txt", L"..\\x.txt", L"d\\x.txt");
+    merged(bc, L"C:\\a\\b.txt", L"../x.txt", L"C:\\a\\x.txt");
+    merged(bc, L"\\\\server\\share\\x\\y", L"..\\z", L"\\\\server\\share\\x\\z");
+
+    /* The drive and the UNC share are the floor the walk stops at. */
+    merged(bc, L"C:\\a\\b.txt", L"..\\..\\..\\up.txt", NULL);
+    merged(bc, L"C:\\a\\b.txt", L"..\\..\\..", NULL);
+    merged(bc, L"C:\\a\\b.txt", L"..\\..\\..\\..\\up.txt", NULL);
+    merged(bc, L"C:\\", L"..\\x.txt", NULL);
+    merged(bc, L"\\\\server\\share\\x", L"..\\..\\z", NULL);
+    merged(bc, L"\\\\server\\share\\x", L"..\\..\\..\\z", NULL);
+
+    /* A leading "." before a separator is dropped. Everything else is
+       appended as written: an inner ".." or ".", a name that merely
+       begins with dots, and a lone "." at the very end of the name. */
+    merged(bc, L"C:\\a\\b.txt", L".\\x.txt", L"C:\\a\\b.txt\\x.txt");
+    merged(bc, L"C:\\a\\b.txt", L".\\.\\x.txt", L"C:\\a\\b.txt\\x.txt");
+    merged(bc, L"C:\\a\\b.txt", L".\\..\\x.txt", L"C:\\a\\x.txt");
+    merged(bc, L"C:\\a\\b.txt", L".", L"C:\\a\\b.txt\\.");
+    merged(bc, L"C:\\a\\b.txt", L"..x.txt", L"C:\\a\\b.txt\\..x.txt");
+    merged(bc, L"C:\\a\\b.txt", L"...\\x.txt", L"C:\\a\\b.txt\\...\\x.txt");
+    merged(bc, L"C:\\a\\b.txt", L"d\\..\\x.txt", L"C:\\a\\b.txt\\d\\..\\x.txt");
+    merged(bc, L"C:\\a\\b.txt", L"d\\.\\x.txt", L"C:\\a\\b.txt\\d\\.\\x.txt");
+
+    /* An absolute right-hand path is refused whatever the left is. */
+    merged(bc, L"C:\\a\\b.txt", L"C:\\c\\d.txt", NULL);
+    merged(bc, L"C:\\a\\b.txt", L"\\\\server\\share\\x", NULL);
+    merged(bc, L"c.txt", L"C:\\a\\b.txt", NULL);
+
+    /* The merge is no composite, so it happens even when the caller says
+       it will not take one -- where an item moniker on the right is
+       MK_E_NEEDGENERIC and an anti moniker still annihilates. */
+    {
+        IMoniker *a = NULL, *b = NULL, *out = NULL;
+
+        CHECK(CreateFileMoniker(L"C:\\a\\b.txt", &a) == S_OK && a != NULL);
+        CHECK(CreateFileMoniker(L"c.txt", &b) == S_OK && b != NULL);
+        out = NULL;
+        CHECK(IMoniker_ComposeWith(a, b, TRUE, &out) == S_OK && out != NULL);
+        if (out) {
+            CHECK(named(out, bc, L"C:\\a\\b.txt\\c.txt"));
+            IMoniker_Release(out);
+        }
+        out = NULL;
+        CHECK(IMoniker_ComposeWith(a, item, TRUE, &out) == MK_E_NEEDGENERIC);
+        CHECK(out == NULL);
+        out = NULL;
+        CHECK(IMoniker_ComposeWith(a, anti, TRUE, &out) == S_OK && out == NULL);
+        IMoniker_Release(b);
+        IMoniker_Release(a);
+    }
+
+    /* CreateGenericComposite: the left moniker's ComposeWith with a
+       composite allowed, and a NULL on either side handing back the
+       other moniker with a reference of its own. */
+    {
+        IMoniker *out = NULL;
+        wchar_t want[MAX_PATH + 8];
+
+        out = NULL;
+        CHECK(CreateGenericComposite(NULL, NULL, &out) == S_OK);
+        CHECK(out == NULL);
+
+        out = NULL;
+        CHECK(CreateGenericComposite(self_mk, NULL, &out) == S_OK);
+        CHECK(out == self_mk);
+        if (out) {
+            IMoniker_Release(out);
+        }
+
+        out = NULL;
+        CHECK(CreateGenericComposite(NULL, item, &out) == S_OK);
+        CHECK(out == item);
+        if (out) {
+            IMoniker_Release(out);
+        }
+
+        out = NULL;
+        CHECK(CreateGenericComposite(self_mk, item, &out) == S_OK && out != NULL);
+        if (out) {
+            common(out, bc, MKSYS_GENERICCOMPOSITE, &clsid_composite);
+            wcscpy(want, self);
+            wcscat(want, L"!Item");
+            CHECK(named(out, bc, want));
+            IMoniker_Release(out);
+        }
+
+        out = NULL;
+        CHECK(CreateGenericComposite(self_mk, anti, &out) == S_OK);
+        CHECK(out == NULL);
+
+        /* And the file-to-file rule again, through the export. */
+        {
+            IMoniker *a = NULL, *b = NULL;
+
+            CHECK(CreateFileMoniker(L"C:\\a\\b.txt", &a) == S_OK && a != NULL);
+            CHECK(CreateFileMoniker(L"..\\up.txt", &b) == S_OK && b != NULL);
+            out = NULL;
+            CHECK(CreateGenericComposite(a, b, &out) == S_OK && out != NULL);
+            if (out) {
+                CHECK(named(out, bc, L"C:\\a\\up.txt"));
+                IMoniker_Release(out);
+            }
+            IMoniker_Release(b);
+            CHECK(CreateFileMoniker(L"C:\\c\\d.txt", &b) == S_OK && b != NULL);
+            out = NULL;
+            CHECK(CreateGenericComposite(a, b, &out) == MK_E_SYNTAX);
+            CHECK(out == NULL);
+            IMoniker_Release(b);
+            IMoniker_Release(a);
+        }
+    }
+
     /* The running object table. */
     {
         IRunningObjectTable *rot = NULL, *again = NULL, *from_bc = NULL;
@@ -597,7 +773,7 @@ int main(void) {
     IBindCtx_Release(bc);
     CoUninitialize();
 
-    printf("moniker_test: ok\n");
+    printf("moniker_test: ok (%d checks)\n", check);
     fflush(stdout);
     return 0;
 }
