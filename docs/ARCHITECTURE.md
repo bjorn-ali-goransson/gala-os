@@ -5835,7 +5835,18 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   anti moniker is S_OK with a NULL moniker, so S_OK does not promise
   one. Names compare and hash without regard to case, so a moniker
   reaches its table entry whatever case it was written in; a file and an
-  item compose into a generic composite whose name is the two joined;
+  item compose into a generic composite whose name is the two joined.
+  Two file monikers make no composite at all: the right-hand path merges
+  into the left as one file moniker, each of its leading `..` taking a
+  component of the left and leaving the separator behind it (`C:\a\b.txt`
+  and `..\up.txt` make `C:\a\up.txt`), a leading `.` before a separator
+  dropped, everything else appended as written, and MK_E_SYNTAX for a
+  climb past the drive or the UNC share, for an absolute right-hand path
+  and for an empty left one. That merge is no composite, so it happens
+  even when the caller says it will not take one, where an item on the
+  right is MK_E_NEEDGENERIC. CreateGenericComposite is the left
+  moniker's own ComposeWith with a composite allowed, and a NULL on
+  either side hands back the other moniker with a reference of its own.
   Inverse of a file or an item is an anti moniker (whose hash is
   Windows' 0x80000001, which programs test for); CommonPrefixWith of two
   paths is their shared directory with its separator still on, and of a
@@ -5864,10 +5875,18 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   fail, the table is this process's where Windows keeps one per logon
   session in RPCSS, GetSizeMax and Hash are gala's own numbers (only
   their consistency is promised), case folding is ASCII, names are at
-  most 320 characters and the table holds at most 64 entries.
-  CreateFileMoniker and GetRunningObjectTable do not check the caller's
-  out pointer on Windows -- they fault on a NULL one, measured -- and
-  gala refuses it with E_INVALIDARG instead.
+  most 320 characters and the table holds at most 64 entries. Two
+  divergences are named here rather than tested, because gala's answer
+  is the one it can give: a file moniker keeps the path exactly as
+  given, where Windows canonicalises a drive-rooted one as it makes it
+  (`C:/a/b.txt` becomes `C:\a\b.txt`) and resolves a drive-relative
+  `C:a\b` against the current directory; and composing a composite with
+  an anti moniker drops the composite's last component on Windows, where
+  a name that is one flat string has no last component to drop and the
+  whole thing annihilates. CreateFileMoniker, GetRunningObjectTable and
+  CreateGenericComposite do not check the caller's out pointer on
+  Windows -- they fault on a NULL one, measured -- and gala refuses it
+  with E_INVALIDARG or E_POINTER instead.
 - **Marshaling** (`marshal.rs`): gala has no proxies, so marshaling is
   within the process: the data for MSHCTX_INPROC/CROSSCTX is gala's own
   record (a magic, the MSHLFLAGS, the interface pointer, its IID), and
