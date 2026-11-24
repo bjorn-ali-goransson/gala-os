@@ -299,7 +299,12 @@ impl Reader {
                     self.node = Some(Node::End);
                     return S_OK;
                 }
-                Ok(Event::Text(text)) => {
+                // A CDATA section is character data to this reader's
+                // caller, which has no node kind of its own for it (and
+                // `settle` drops a text node that is only white space,
+                // so the white space outside the root is no node here
+                // either).
+                Ok(Event::Text(text) | Event::CData(text)) => {
                     self.node = Some(Node::Text(text));
                     return S_OK;
                 }

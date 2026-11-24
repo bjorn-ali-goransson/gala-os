@@ -3399,6 +3399,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msxml_test", "ole32.dll", "Windows/System32"),
     ("msxml_test", "oleaut32.dll", "Windows/System32"),
     ("msxml_test", "msxml6.dll", "Windows/System32"),
+    // XmlLite's reader (user/xmllite_test).
+    ("xmllite_test", "ntdll.dll", "Windows/System32"),
+    ("xmllite_test", "kernel32.dll", "Windows/System32"),
+    ("xmllite_test", "xmllite.dll", "Windows/System32"),
     // The Known Folder Manager through COM (user/knownfolder_test), x64
     // and x86.
     ("knownfolder_test", "ntdll.dll", "Windows/System32"),
@@ -3701,6 +3705,7 @@ const USER_PROGRAMS: &[&str] = &[
     "svc_test",
     "svcrun_test",
     "msxml_test",
+    "xmllite_test",
     "knownfolder_test",
     "windowscodecs_test",
     "d2d1_test",
@@ -6673,6 +6678,7 @@ const ARM64_TWINS: &[&str] = &[
     "svc_test",
     "svcrun_test",
     "msxml_test",
+    "xmllite_test",
     "d2d1_test",
     "knownfolder_test",
     "ucrt_test",
@@ -9866,6 +9872,21 @@ const BASE_SCENARIOS: &[Scenario] = &[
             r#"ledger: {"service":"msxml6.dll!IXMLDOMDocument2::setProperty(SelectionLanguage: not a string)","what":"other""#,
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // XmlLite's reader (user/xmllite_test): CreateXmlReader, an
+        // IStream of the program's own as the input, and the whole
+        // document node by node -- the declaration, white space, a
+        // comment, elements in a default and a prefixed namespace with
+        // their attributes (the namespace declarations among them),
+        // text, an empty element, CDATA, a processing instruction and
+        // end tags -- then end of file and a document that is not well
+        // formed. Word delay-loads CreateXmlReader and ends on
+        // 0xc06d007f without it (ROADMAP OF).
+        name: "xmllite_test",
+        cmdline: "qemu_exit run=xmllite_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["xmllite_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The Windows Imaging Component (user/windowscodecs_test): the

@@ -790,6 +790,25 @@ that row is in the dump only when the filter freed the slot it took.
   detail). Each QueryInterface
   msxml6 does not answer: `msxml6.dll!QI? <node|list|map|error|cache|
   XSLTemplate|XSLProcessor> {<the whole IID>}`, "other", its first dword as detail.
+  XmlLite's reader (xmllite, ARCHITECTURE "xmllite"): every document
+  refused, `xmllite.dll!IXmlReader::Read <what the reader was looking
+  for>`, "other", with the line as detail -- and
+  `xmllite.dll!IXmlReader::SetInput <reason>` for bytes that are not
+  the encoding they are taken for, which is refused before any node.
+  The program sees only an HRESULT, so this is where a document Word or
+  LocalDB could not read names its own gap. What such a program asks
+  for and gala has not: `CreateXmlReader(iid)` and
+  `IXmlReader::QueryInterface(iid)` (unsupported, the IID's first dword
+  as detail), `CreateXmlReader(IMalloc)` (unsupported: the allocator is
+  ignored), `IXmlReader::SetInput(not a stream)` (unsupported: the
+  input answers neither IStream nor ISequentialStream),
+  `IXmlReader::SetInput(stream read)` ("other", the stream's HRESULT as
+  detail), `IXmlReader::SetProperty(property)` (unsupported, the
+  property << 32 | the value) and `GetProperty(property)` (not
+  implemented, the property), `IXmlReader::ReadValueChunk` and
+  `IXmlReader::GetBaseUri` (not implemented). A panic in the reader is
+  `xmllite.dll!panic <file>` with the line as detail, and ends the
+  process with 0xc0000409.
   The RPC runtime (rpcrt4): `rpcrt4.dll!NdrClientCall2 raised`, "other",
   for every status a client call raises (detail: the procedure number
   << 32 | the status: a program that fails over RPC names the call);

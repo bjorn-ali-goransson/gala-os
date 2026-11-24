@@ -3644,7 +3644,16 @@ dependencies = [
 name = "xmllite"
 version = "0.1.0"
 dependencies = [
+ "gala_heap",
  "gala_stubs",
+ "gala_xml",
+]
+
+[[package]]
+name = "xmllite_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
 ]
 
 [[package]]
