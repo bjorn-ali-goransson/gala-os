@@ -238,16 +238,24 @@ extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> ! {
     // Snapshots, so that handlers may (un)register handlers themselves.
     let (exception, continue_) = with_handlers(|t| (t.exception, t.continue_));
     let mut walk = crate::Walk::default();
-    let handled =
-        call_handlers(&exception, &mut pointers) || dispatch_frames(record, context, &mut walk);
-    if call_handlers(&continue_, &mut pointers) || handled {
+    let mut vectored = 0;
+    let handled = call_handlers(&exception, &mut pointers, &mut vectored)
+        || dispatch_frames(record, context, &mut walk);
+    walk.vectored = vectored;
+    let continued = call_handlers(&continue_, &mut pointers, &mut walk.continued);
+    // The top-level filter, read here because it is asked only below,
+    // after the report has been written: so the report says that there
+    // is one, which is the difference between an exception that had
+    // nowhere left to go and one whose last chance declined it.
+    let filter = TOP_FILTER.load(core::sync::atomic::Ordering::Acquire);
+    walk.filter = u32::from(filter != 0);
+    if continued || handled {
         NtContinue(context, 0);
     }
     // Unhandled: the kernel keeps it for the crash report (wow64.dll
     // passes it on with the 32-bit registers); the top-level filter may
     // continue execution; otherwise the process ends.
     crate::GalaUnhandledException(record, context, &raw const walk);
-    let filter = TOP_FILTER.load(core::sync::atomic::Ordering::Acquire);
     if filter != 0 {
         // SAFETY: a filter registered with RtlSetUnhandledExceptionFilter.
         let f: extern "system" fn(*mut ExceptionPointers) -> i32 =

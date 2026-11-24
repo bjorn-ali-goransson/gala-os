@@ -1298,6 +1298,17 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
   as 12 frames to the stack's end with four of WWLIB's own handlers
   asked and declining, which is what moved ROADMAP OF's blocker from
   "our unwinder" to "what MSO decided to raise".
+- `vectored handlers: none registered; no top-level filter is set`, or
+  `vectored handlers: 2 asked before the frames, 1 after, none taking
+  it; a top-level filter is set (asked after this report)`: the handlers
+  outside the frames. A program that registered none leaves the same
+  frames behind as one whose handlers all declined, and which of the two
+  it is decides where to look -- whether to read the frames' own code or
+  to look for a handler somewhere else entirely. The filter is asked
+  only after this report is written, so the line says there is one, not
+  what it did. Scenarios `crash_raise` (nothing registered anywhere) and
+  `crash_vectored` (two vectored handlers, a continue handler, each
+  passing it on).
 - The exception's parameters, when nothing below explains them (an
   access violation, a delay load and a C++ throw have lines of their
   own saying what theirs mean): `3 parameters: 0x8007000e, 0x140001060

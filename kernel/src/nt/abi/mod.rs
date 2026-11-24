@@ -10,7 +10,7 @@
 
 /// gala's ntdll's record of how the search for a handler went, as
 /// `GalaUnhandledException` passes it: the frames it walked and then
-/// seven u32s, the same layout whatever the word size. None when the
+/// ten u32s, the same layout whatever the word size. None when the
 /// pointer is null or unreadable: a report without the lines says
 /// nothing instead of guessing (`Walk` in user/testntdll and in
 /// `nt::crashreport`, which this fills).
@@ -22,7 +22,7 @@ pub(in crate::nt) fn walk_of(
     if at == 0 {
         return None;
     }
-    let mut bytes = [0u8; WALK_FRAMES * 8 + 28];
+    let mut bytes = [0u8; WALK_FRAMES * 8 + 40];
     call.process.read(at, &mut bytes).ok()?;
     let mut walk = Walk::default();
     for (i, ip) in walk.ips.iter_mut().enumerate() {
@@ -39,6 +39,9 @@ pub(in crate::nt) fn walk_of(
     walk.no_data = word(4);
     walk.asked = word(5);
     walk.ended = word(6);
+    walk.vectored = word(7);
+    walk.continued = word(8);
+    walk.filter = word(9);
     Some(walk)
 }
 
