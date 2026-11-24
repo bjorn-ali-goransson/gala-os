@@ -33,6 +33,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 mod absent;
 mod bindctx;
 mod class;
+mod link;
 mod marshal;
 mod moniker;
 mod persist;

@@ -1659,6 +1659,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("oleload_test", "user32.dll", "Windows/System32"),
     ("oleload_test", "gdi32.dll", "Windows/System32"),
     ("oleload_test", "user/bin/oleload_test.exe", "gala"),
+    ("olelink_test", "ntdll.dll", "Windows/System32"),
+    ("olelink_test", "kernel32.dll", "Windows/System32"),
+    ("olelink_test", "msvcrt.dll", "Windows/System32"),
+    ("olelink_test", "ole32.dll", "Windows/System32"),
+    ("olelink_test", "combase.dll", "Windows/System32"),
+    ("olelink_test", "oleaut32.dll", "Windows/System32"),
+    ("olelink_test", "advapi32.dll", "Windows/System32"),
+    ("olelink_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("olelink_test", "user32.dll", "Windows/System32"),
+    ("olelink_test", "gdi32.dll", "Windows/System32"),
+    ("olelink_test", "user/bin/olelink_test.exe", "gala"),
     ("shell32_test", "ntdll.dll", "Windows/System32"),
     ("shell32_test", "kernel32.dll", "Windows/System32"),
     ("shell32_test", "msvcrt.dll", "Windows/System32"),
@@ -10254,6 +10265,19 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=oleload_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["oleload_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: OleCreateLinkEx and ole32's standard link object --
+        // the link a container makes for a source it does not own --
+        // against what Windows 11 answers: which argument is refused
+        // when, the order of the calls on the moniker, the storage
+        // and the client site, the interfaces the object answers and
+        // the bytes its Save writes. Word reaches OleCreateLinkEx
+        // after OleLoad (user/olelink_test/main.c, mingw).
+        name: "olelink_test",
+        cmdline: "qemu_exit run=olelink_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["olelink_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the
