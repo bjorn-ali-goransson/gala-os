@@ -11,6 +11,7 @@ test = false
 bench = false
 
 [dependencies]
+gala_lock = { path = "../gala_lock" }
 gala_stubs = { path = "../gala_stubs" }
 
 [target.'cfg(target_arch = "x86")'.dependencies]

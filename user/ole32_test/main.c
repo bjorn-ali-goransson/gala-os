@@ -231,6 +231,727 @@ static void time_and_numbers(void) {
     CHECK(theirs != 0 && theirs != mine);
 }
 
+/* ---- OLE persistence and the class objects a process answers for:
+   WriteClassStm, ReadClassStm, OleSaveToStream, OleLoadFromStream,
+   CoRegisterClassObject and CoRevokeClassObject, which Word asks ole32
+   for (ROADMAP OF). Almost nothing below is documented: the order of
+   the calls each one makes on the object, where it leaves the stream,
+   what it does to the reference counts, which of two registrations of
+   one class serves, and what the contexts mean are all what this
+   machine's Windows 11 answered.
+
+   The one surprise is the context: a registration is found by an
+   activation that names an in-process context and by no other, whatever
+   context the registration itself named. A class registered for
+   CLSCTX_LOCAL_SERVER is handed to a CLSCTX_INPROC_SERVER activation,
+   and one registered for CLSCTX_INPROC_SERVER is not handed to a
+   CLSCTX_LOCAL_SERVER one -- the table belongs to the process, and a
+   local activation goes to the service control manager instead of
+   reading it. */
+
+/* The answer a process the service control manager did not start as a
+   server gets from CoResumeClassObjects, which is every process here:
+   Win32 error 1734 as an HRESULT ("the array bounds are invalid", which
+   has nothing to do with anything). The suspension stands. */
+#define CO_E_RESUME_NOT_A_SERVER ((HRESULT)0x800706C6L)
+
+/* An object implementing IPersistStream, recording what it was asked
+   and in which order, and answering what the case wants it to. */
+enum { P_CLASS = 1, P_DIRTY, P_LOAD, P_SAVE, P_SIZEMAX, P_QI_PERSIST, P_QI_OTHER };
+
+typedef struct {
+    IPersistStreamVtbl *vtbl;
+    LONG refs;
+    CLSID id;
+    HRESULT class_hr, save_hr, load_hr;
+    unsigned long long seq;   /* the calls, 4 bits each, oldest lowest */
+    int ncalls;
+    IStream *saw;             /* the stream Save or Load was given */
+    BOOL saw_clear;           /* fClearDirty */
+    ULONG at;                 /* the position the stream was at then */
+    int persist;              /* answers QI for IPersistStream */
+} Pers;
+
+static void pers_said(Pers *p, int what) {
+    if (p->ncalls < 16) {
+        p->seq |= (unsigned long long)what << (4 * p->ncalls);
+    }
+    p->ncalls++;
+}
+
+/* The calls as `seq` holds them: oldest in the lowest nibble. */
+#define SEQ1(a) ((unsigned long long)(a))
+#define SEQ2(a, b) (SEQ1(a) | ((unsigned long long)(b) << 4))
+#define SEQ3(a, b, c) (SEQ2(a, b) | ((unsigned long long)(c) << 8))
+#define SEQ4(a, b, c, d) (SEQ3(a, b, c) | ((unsigned long long)(d) << 12))
+
+static ULONG stream_at(IStream *s) {
+    LARGE_INTEGER zero = {{0, 0}};
+    ULARGE_INTEGER at;
+    at.QuadPart = 0;
+    CHECK(IStream_Seek(s, zero, STREAM_SEEK_CUR, &at) == S_OK);
+    return (ULONG)at.QuadPart;
+}
+
+static ULONG stream_size(IStream *s) {
+    STATSTG st;
+    memset(&st, 0, sizeof st);
+    CHECK(IStream_Stat(s, &st, STATFLAG_NONAME) == S_OK);
+    return (ULONG)st.cbSize.QuadPart;
+}
+
+static HRESULT WINAPI pers_qi(IPersistStream *this, REFIID iid, void **out) {
+    Pers *p = (Pers *)this;
+    if (IsEqualIID(iid, &IID_IUnknown)
+        || (p->persist
+            && (IsEqualIID(iid, &IID_IPersistStream) || IsEqualIID(iid, &IID_IPersist)))) {
+        pers_said(p, P_QI_PERSIST);
+        *out = this;
+        p->refs++;
+        return S_OK;
+    }
+    pers_said(p, P_QI_OTHER);
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI pers_addref(IPersistStream *this) { return ++((Pers *)this)->refs; }
+static ULONG WINAPI pers_release(IPersistStream *this) { return --((Pers *)this)->refs; }
+static HRESULT WINAPI pers_class(IPersistStream *this, CLSID *id) {
+    Pers *p = (Pers *)this;
+    pers_said(p, P_CLASS);
+    if (p->class_hr != S_OK) {
+        return p->class_hr;
+    }
+    *id = p->id;
+    return S_OK;
+}
+static HRESULT WINAPI pers_dirty(IPersistStream *this) {
+    pers_said((Pers *)this, P_DIRTY);
+    return S_OK;
+}
+static HRESULT WINAPI pers_load(IPersistStream *this, IStream *s) {
+    Pers *p = (Pers *)this;
+    pers_said(p, P_LOAD);
+    p->saw = s;
+    p->at = stream_at(s);
+    return p->load_hr;
+}
+static HRESULT WINAPI pers_save(IPersistStream *this, IStream *s, BOOL clear) {
+    Pers *p = (Pers *)this;
+    ULONG n = 0;
+    pers_said(p, P_SAVE);
+    p->saw = s;
+    p->saw_clear = clear;
+    p->at = stream_at(s);
+    if (p->save_hr != S_OK) {
+        return p->save_hr;
+    }
+    CHECK(IStream_Write(s, "SAVE", 4, &n) == S_OK && n == 4);
+    return S_OK;
+}
+static HRESULT WINAPI pers_sizemax(IPersistStream *this, ULARGE_INTEGER *size) {
+    pers_said((Pers *)this, P_SIZEMAX);
+    size->QuadPart = 64;
+    return S_OK;
+}
+static IPersistStreamVtbl pers_vtbl = {pers_qi,    pers_addref, pers_release, pers_class,
+                                       pers_dirty, pers_load,   pers_save,    pers_sizemax};
+
+static const CLSID clsid_test = {0x11223344, 0x5566, 0x7788,
+                                 {0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01}};
+static const CLSID clsid_none = {0x9e5d1f4b, 0x1c3a, 0x4ab7,
+                                 {0x8f, 0x2d, 0x6b, 0x44, 0x19, 0x7c, 0x05, 0xe3}};
+/* CLSID_CUIAutomation, which is registered and has no IPersistStream,
+   on Windows and on gala alike (user/uiautomationcore). */
+static const CLSID clsid_uia = {0xff48dba4, 0x60ef, 0x4201,
+                                {0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e}};
+
+static void pers_make(Pers *p, int persist) {
+    memset(p, 0, sizeof *p);
+    p->vtbl = &pers_vtbl;
+    p->refs = 1;
+    p->id = clsid_test;
+    p->persist = persist;
+}
+
+static BOOL clsid_is_zero(const CLSID *id) {
+    CLSID zero;
+    memset(&zero, 0, sizeof zero);
+    return memcmp(id, &zero, sizeof zero) == 0;
+}
+
+/* A stream holding one CLSID and nothing else, rewound. */
+static IStream *stream_of_class(const CLSID *id) {
+    IStream *s;
+    LARGE_INTEGER zero = {{0, 0}};
+    CHECK(CreateStreamOnHGlobal(NULL, TRUE, &s) == S_OK);
+    if (id != NULL) {
+        CHECK(WriteClassStm(s, id) == S_OK);
+    }
+    CHECK(IStream_Seek(s, zero, STREAM_SEEK_SET, NULL) == S_OK);
+    return s;
+}
+
+/* A class factory handing out Pers objects, for CoRegisterClassObject
+   and so for the whole of OleLoadFromStream. */
+typedef struct {
+    IClassFactoryVtbl *vtbl;
+    LONG refs;
+    int made, locked;
+    IID asked;
+    Pers *give;
+    HRESULT make_hr;
+} Fact;
+
+static HRESULT WINAPI fact_qi(IClassFactory *this, REFIID iid, void **out) {
+    Fact *f = (Fact *)this;
+    if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IClassFactory)) {
+        *out = this;
+        f->refs++;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI fact_addref(IClassFactory *this) { return ++((Fact *)this)->refs; }
+static ULONG WINAPI fact_release(IClassFactory *this) { return --((Fact *)this)->refs; }
+static HRESULT WINAPI fact_make(IClassFactory *this, IUnknown *outer, REFIID iid, void **out) {
+    Fact *f = (Fact *)this;
+    f->made++;
+    f->asked = *iid;
+    if (f->make_hr != S_OK) {
+        *out = NULL;
+        return f->make_hr;
+    }
+    if (outer != NULL) {
+        *out = NULL;
+        return CLASS_E_NOAGGREGATION;
+    }
+    return pers_qi((IPersistStream *)f->give, iid, out);
+}
+static HRESULT WINAPI fact_lock(IClassFactory *this, BOOL lock) {
+    ((Fact *)this)->locked += lock ? 1 : -1;
+    return S_OK;
+}
+static IClassFactoryVtbl fact_vtbl = {fact_qi, fact_addref, fact_release, fact_make, fact_lock};
+
+static void fact_make_it(Fact *f, Pers *gives) {
+    memset(f, 0, sizeof *f);
+    f->vtbl = &fact_vtbl;
+    f->refs = 1;
+    f->give = gives;
+}
+
+/* Makes one instance of clsid_test from whatever answers for it, and
+   releases it: the count of a factory an activation found, and the
+   activation's own result, are what the cases ask about. */
+static HRESULT made_one(DWORD context, void **out) {
+    void *obj = NULL;
+    HRESULT hr = CoCreateInstance(&clsid_test, NULL, context, &IID_IPersistStream, &obj);
+    if (out != NULL) {
+        *out = obj;
+    }
+    if (obj != NULL) {
+        IUnknown_Release((IUnknown *)obj);
+    }
+    return hr;
+}
+
+static void persist_streams(void) {
+    IStream *s;
+    LARGE_INTEGER zero = {{0, 0}}, eight = {{8, 0}};
+    CLSID got, null_id;
+    ULONG n;
+    char buf[32];
+    Pers p;
+    void *out;
+
+    memset(&null_id, 0, sizeof null_id);
+
+    /* WriteClassStm writes the sixteen bytes of the CLSID as it sits in
+       memory, at the stream's position, and leaves the stream after
+       them. */
+    CHECK(CreateStreamOnHGlobal(NULL, TRUE, &s) == S_OK);
+    CHECK(WriteClassStm(s, &clsid_test) == S_OK);
+    CHECK(stream_at(s) == 16 && stream_size(s) == 16);
+    CHECK(IStream_Seek(s, zero, STREAM_SEEK_SET, NULL) == S_OK);
+    memset(buf, 0x55, sizeof buf);
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 16);
+    CHECK(memcmp(buf, &clsid_test, 16) == 0);
+
+    /* ReadClassStm reads it back. At the end of the stream, and with
+       half a CLSID left, it is STG_E_READFAULT with the caller's CLSID
+       zeroed and the stream left where the read stopped -- at the end
+       in both cases, so a short read has consumed what there was. */
+    CHECK(IStream_Seek(s, zero, STREAM_SEEK_SET, NULL) == S_OK);
+    memset(&got, 0x55, sizeof got);
+    CHECK(ReadClassStm(s, &got) == S_OK && IsEqualCLSID(&got, &clsid_test));
+    CHECK(stream_at(s) == 16);
+    memset(&got, 0x55, sizeof got);
+    CHECK(ReadClassStm(s, &got) == STG_E_READFAULT && clsid_is_zero(&got));
+    CHECK(stream_at(s) == 16);
+    CHECK(IStream_Seek(s, eight, STREAM_SEEK_SET, NULL) == S_OK);
+    memset(&got, 0x55, sizeof got);
+    CHECK(ReadClassStm(s, &got) == STG_E_READFAULT && clsid_is_zero(&got));
+    CHECK(stream_at(s) == 16);
+    IStream_Release(s);
+
+    /* OleSaveToStream asks the object for its class id, writes that,
+       and calls Save(stream, TRUE): two calls and no others. It does
+       not ask IsDirty, does not ask GetSizeMax, asks the object for no
+       interface and holds no reference on it, and Save sees the stream
+       after the class id. */
+    CHECK(CreateStreamOnHGlobal(NULL, TRUE, &s) == S_OK);
+    pers_make(&p, 1);
+    CHECK(OleSaveToStream((IPersistStream *)&p, s) == S_OK);
+    CHECK(p.ncalls == 2 && p.seq == SEQ2(P_CLASS, P_SAVE));
+    CHECK(p.saw == s && p.saw_clear == TRUE && p.at == 16);
+    CHECK(p.refs == 1 && stream_at(s) == 20 && stream_size(s) == 20);
+    CHECK(IStream_Seek(s, zero, STREAM_SEEK_SET, NULL) == S_OK);
+    memset(buf, 0x55, sizeof buf);
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 20);
+    CHECK(memcmp(buf, &clsid_test, 16) == 0 && memcmp(buf + 16, "SAVE", 4) == 0);
+    IStream_Release(s);
+
+    /* GetClassID refusing: that error, with nothing written and Save
+       never called. */
+    CHECK(CreateStreamOnHGlobal(NULL, TRUE, &s) == S_OK);
+    pers_make(&p, 1);
+    p.class_hr = E_FAIL;
+    CHECK(OleSaveToStream((IPersistStream *)&p, s) == E_FAIL);
+    CHECK(p.ncalls == 1 && p.seq == SEQ1(P_CLASS) && stream_size(s) == 0);
+    IStream_Release(s);
+
+    /* Save refusing: that error, with the class id left in the stream
+       (nothing is undone). */
+    CHECK(CreateStreamOnHGlobal(NULL, TRUE, &s) == S_OK);
+    pers_make(&p, 1);
+    p.save_hr = E_OUTOFMEMORY;
+    CHECK(OleSaveToStream((IPersistStream *)&p, s) == E_OUTOFMEMORY);
+    CHECK(p.seq == SEQ2(P_CLASS, P_SAVE) && stream_size(s) == 16);
+    IStream_Release(s);
+
+    /* A class id of CLSID_NULL is written and saved like any other. */
+    CHECK(CreateStreamOnHGlobal(NULL, TRUE, &s) == S_OK);
+    pers_make(&p, 1);
+    p.id = null_id;
+    CHECK(OleSaveToStream((IPersistStream *)&p, s) == S_OK);
+    CHECK(p.seq == SEQ2(P_CLASS, P_SAVE) && stream_size(s) == 20);
+    IStream_Release(s);
+
+    /* OleLoadFromStream reads the class id first: an empty stream is
+       STG_E_READFAULT with the caller's pointer zeroed and the stream
+       untouched. */
+    s = stream_of_class(NULL);
+    out = (void *)(ULONG_PTR)0x5555;
+    CHECK(OleLoadFromStream(s, &IID_IUnknown, &out) == STG_E_READFAULT);
+    CHECK(out == NULL && stream_at(s) == 0);
+    IStream_Release(s);
+
+    /* CLSID_NULL and a class no machine has are both
+       REGDB_E_CLASSNOTREG, and a class that is registered but has no
+       IPersistStream is E_NOINTERFACE: each has read the class id, so
+       the stream sits after it. */
+    s = stream_of_class(&null_id);
+    out = (void *)(ULONG_PTR)0x5555;
+    CHECK(OleLoadFromStream(s, &IID_IUnknown, &out) == REGDB_E_CLASSNOTREG);
+    CHECK(out == NULL && stream_at(s) == 16);
+    IStream_Release(s);
+
+    s = stream_of_class(&clsid_none);
+    out = (void *)(ULONG_PTR)0x5555;
+    CHECK(OleLoadFromStream(s, &IID_IUnknown, &out) == REGDB_E_CLASSNOTREG);
+    CHECK(out == NULL && stream_at(s) == 16);
+    IStream_Release(s);
+
+    s = stream_of_class(&clsid_uia);
+    out = (void *)(ULONG_PTR)0x5555;
+    CHECK(OleLoadFromStream(s, &IID_IUnknown, &out) == E_NOINTERFACE);
+    CHECK(out == NULL && stream_at(s) == 16);
+    IStream_Release(s);
+}
+
+/* CoRegisterClassObject, and the whole of OleLoadFromStream over a
+   class this process answers for -- which is the only way to see the
+   calls it makes, since every class in the registry here is one whose
+   code we do not control. */
+static void class_objects(void) {
+    Fact f;
+    Pers p;
+    DWORD key = 0x5555, key2 = 0x5555;
+    IStream *s;
+    void *out;
+
+    /* The registration takes one reference on the class object and
+       hands back a key that is neither zero nor the caller's old
+       value. */
+    pers_make(&p, 1);
+    fact_make_it(&f, &p);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &key)
+          == S_OK);
+    CHECK(key != 0 && key != 0x5555 && f.refs == 2);
+
+    /* The class is activated from here now, and not from the registry
+       (which has nothing for it). */
+    out = NULL;
+    CHECK(made_one(CLSCTX_INPROC_SERVER, &out) == S_OK);
+    CHECK(out == (void *)&p && f.made == 1);
+
+    /* The same class may be registered a second time, for another key
+       and another reference. */
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &key2)
+          == S_OK);
+    CHECK(key2 != key && f.refs == 3);
+    CHECK(CoRevokeClassObject(key2) == S_OK && f.refs == 2);
+
+    /* And a registration beats the registry: CUIAutomation is
+       registered on this machine, and this process answers for it. */
+    CHECK(CoRegisterClassObject(&clsid_uia, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &key2)
+          == S_OK);
+    out = NULL;
+    CHECK(CoCreateInstance(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, &IID_IUnknown, &out) == S_OK);
+    CHECK(out == (void *)&p);
+    IUnknown_Release((IUnknown *)out);
+    CHECK(CoRevokeClassObject(key2) == S_OK);
+
+    /* The whole of OleLoadFromStream, in order: the factory is asked to
+       make the caller's own interface, the object is then asked for
+       IPersistStream, Load is given the stream after the class id, and
+       the caller's interface is asked for once more at the end. Four
+       calls; the object is left holding the reference it was made with
+       and the caller's. */
+    p.seq = 0;
+    p.ncalls = 0;
+    p.saw = NULL;
+    p.at = 0;
+    f.made = 0;
+    s = stream_of_class(&clsid_test);
+    out = NULL;
+    CHECK(OleLoadFromStream(s, &IID_IPersistStream, &out) == S_OK);
+    CHECK(out == (void *)&p && f.made == 1);
+    CHECK(p.ncalls == 4 && p.seq == SEQ4(P_QI_PERSIST, P_QI_PERSIST, P_LOAD, P_QI_PERSIST));
+    CHECK(p.saw == s && p.at == 16 && stream_at(s) == 16);
+    CHECK(p.refs == 2);
+    IUnknown_Release((IUnknown *)out);
+    IStream_Release(s);
+
+    /* An interface the object does not have: the one asking is the
+       factory's, so Load never runs -- but the class id has been read,
+       which is what says the refusal came after it. */
+    pers_make(&p, 1);
+    f.made = 0;
+    s = stream_of_class(&clsid_test);
+    out = (void *)(ULONG_PTR)0x5555;
+    CHECK(OleLoadFromStream(s, &IID_IDataObject, &out) == E_NOINTERFACE);
+    CHECK(out == NULL && p.ncalls == 1 && p.seq == SEQ1(P_QI_OTHER));
+    CHECK(p.at == 0 && stream_at(s) == 16 && p.refs == 1);
+    IStream_Release(s);
+
+    /* Load refusing: its own code, the caller's pointer zeroed and the
+       object released. */
+    pers_make(&p, 1);
+    p.load_hr = STG_E_INVALIDHEADER;
+    s = stream_of_class(&clsid_test);
+    out = (void *)(ULONG_PTR)0x5555;
+    CHECK(OleLoadFromStream(s, &IID_IPersistStream, &out) == STG_E_INVALIDHEADER);
+    CHECK(out == NULL && p.refs == 1);
+    IStream_Release(s);
+
+    /* The factory refusing to make one: its own code. */
+    pers_make(&p, 1);
+    f.make_hr = E_OUTOFMEMORY;
+    s = stream_of_class(&clsid_test);
+    out = (void *)(ULONG_PTR)0x5555;
+    CHECK(OleLoadFromStream(s, &IID_IPersistStream, &out) == E_OUTOFMEMORY);
+    CHECK(out == NULL && stream_at(s) == 16);
+    IStream_Release(s);
+    f.make_hr = S_OK;
+
+    /* Revoking gives the reference back and the class to the registry
+       again. The key is then a stale one, and revoking a stale or an
+       unknown key is S_OK. */
+    CHECK(CoRevokeClassObject(key) == S_OK && f.refs == 1);
+    out = (void *)(ULONG_PTR)0x5555;
+    CHECK(made_one(CLSCTX_INPROC_SERVER, &out) == REGDB_E_CLASSNOTREG && out == NULL);
+    CHECK(CoRevokeClassObject(key) == S_OK);
+    CHECK(CoRevokeClassObject(0x1234) == S_OK);
+}
+
+/* What a registration does to the count, which of two registrations of
+   one class serves, what REGCLS_SINGLEUSE leaves behind, and what
+   suspending does. */
+static void class_object_counts(void) {
+    Fact f, g;
+    Pers p, q;
+    DWORD key = 0, key2 = 0, k = 0;
+    int before;
+
+    pers_make(&p, 1);
+    pers_make(&q, 1);
+    fact_make_it(&f, &p);
+    fact_make_it(&g, &q);
+
+    /* One reference for the registration, given back by the revoke, and
+       an activation that leaves the count where it found it (the
+       factory is handed out with a reference and released). */
+    CHECK(f.refs == 1);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &key)
+          == S_OK);
+    CHECK(f.refs == 2);
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == S_OK && f.refs == 2);
+    CHECK(CoRevokeClassObject(key) == S_OK && f.refs == 1);
+
+    /* Two registrations of one class: the newer serves, and the older
+       serves again once the newer is revoked. */
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &key)
+          == S_OK);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&g, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &key2)
+          == S_OK);
+    f.made = 0;
+    g.made = 0;
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == S_OK);
+    CHECK(f.made == 0 && g.made == 1);
+    CHECK(CoRevokeClassObject(key2) == S_OK);
+    f.made = 0;
+    g.made = 0;
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == S_OK);
+    CHECK(f.made == 1 && g.made == 0);
+    CHECK(CoRevokeClassObject(key) == S_OK);
+
+    /* REGCLS_SINGLEUSE serves once; the next activation is
+       REGDB_E_CLASSNOTREG, and the registration is still holding its
+       reference on the class object until it is revoked. */
+    pers_make(&p, 1);
+    fact_make_it(&f, &p);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_SINGLEUSE, &k)
+          == S_OK);
+    before = f.refs;
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == S_OK);
+    CHECK(f.refs == before && f.refs == 2);
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == REGDB_E_CLASSNOTREG);
+    CHECK(CoRevokeClassObject(k) == S_OK && f.refs == 1);
+
+    /* REGCLS_SUSPENDED registers and does not serve, and
+       CoResumeClassObjects does not change that here: it is
+       CO_E_RESUME_NOT_A_SERVER and the registration stays suspended.
+       CoSuspendClassObjects is S_OK and suspends the rest. */
+    pers_make(&p, 1);
+    fact_make_it(&f, &p);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE | REGCLS_SUSPENDED, &k)
+          == S_OK);
+    CHECK(CoResumeClassObjects() == CO_E_RESUME_NOT_A_SERVER);
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == REGDB_E_CLASSNOTREG);
+    CHECK(CoSuspendClassObjects() == S_OK);
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == REGDB_E_CLASSNOTREG);
+    CHECK(CoResumeClassObjects() == CO_E_RESUME_NOT_A_SERVER);
+    CHECK(CoRevokeClassObject(k) == S_OK);
+
+    /* The same with nothing suspended at all, and with a plain
+       registration standing: the answer is that error either way. */
+    CHECK(CoResumeClassObjects() == CO_E_RESUME_NOT_A_SERVER);
+    pers_make(&p, 1);
+    fact_make_it(&f, &p);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &k)
+          == S_OK);
+    CHECK(CoResumeClassObjects() == CO_E_RESUME_NOT_A_SERVER);
+    CHECK(CoRevokeClassObject(k) == S_OK);
+}
+
+/* The four that decide what an implementation has to keep: whether an
+   apartment or a thread owns a registration, what the server process
+   count reaching zero does to one, what an interface the class object
+   does not have gives, and what the contexts mean. */
+static HRESULT mta_hr;
+static DWORD WINAPI mta_sees(void *unused) {
+    HRESULT init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    (void)unused;
+    mta_hr = made_one(CLSCTX_INPROC_SERVER, NULL);
+    if (init == S_OK || init == S_FALSE) {
+        CoUninitialize();
+    }
+    return 0;
+}
+
+static void class_object_more(void) {
+    Fact f;
+    Pers p;
+    DWORD k = 0, k2 = 0x5555;
+    HANDLE t;
+    void *cf, *out;
+
+    /* This thread is the MTA, and another MTA thread is in the same
+       apartment: it finds the registration and the factory serves it.
+       An apartment owns a registration, not a thread. */
+    pers_make(&p, 1);
+    fact_make_it(&f, &p);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &k)
+          == S_OK);
+    f.made = 0;
+    mta_hr = 0x5555;
+    t = CreateThread(NULL, 0, mta_sees, NULL, 0, NULL);
+    CHECK(t != NULL && WaitForSingleObject(t, 10000) == WAIT_OBJECT_0);
+    CloseHandle(t);
+    CHECK(mta_hr == S_OK && f.made == 1);
+
+    /* An interface the class object does not have: E_NOINTERFACE with
+       the caller's pointer zeroed, and nothing made. */
+    f.made = 0;
+    cf = (void *)(ULONG_PTR)0x5555;
+    CHECK(CoGetClassObject(&clsid_test, CLSCTX_INPROC_SERVER, NULL, &IID_IPersistStream, &cf)
+          == E_NOINTERFACE);
+    CHECK(cf == NULL && f.made == 0);
+
+    /* The server process count reaching zero suspends the class objects
+       the service control manager knows about, which is none of these:
+       this registration goes on serving, and the resume that the
+       documentation pairs with it is the same error as ever. */
+    CHECK(CoAddRefServerProcess() == 1);
+    CHECK(CoReleaseServerProcess() == 0);
+    out = NULL;
+    CHECK(made_one(CLSCTX_INPROC_SERVER, &out) == S_OK && out == (void *)&p);
+    CHECK(CoResumeClassObjects() == CO_E_RESUME_NOT_A_SERVER);
+    out = NULL;
+    CHECK(made_one(CLSCTX_INPROC_SERVER, &out) == S_OK && out == (void *)&p);
+    CHECK(CoRevokeClassObject(k) == S_OK);
+
+    /* A registration that named the local server is handed to an
+       in-process activation all the same, and a local activation finds
+       nothing: what decides is the context the activation asks for, not
+       the one the registration named. */
+    pers_make(&p, 1);
+    fact_make_it(&f, &p);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_LOCAL_SERVER,
+                                REGCLS_MULTIPLEUSE, &k)
+          == S_OK);
+    out = NULL;
+    CHECK(made_one(CLSCTX_INPROC_SERVER, &out) == S_OK && out == (void *)&p && f.made == 1);
+    CHECK(made_one(CLSCTX_LOCAL_SERVER, NULL) == REGDB_E_CLASSNOTREG && f.made == 1);
+    CHECK(CoRevokeClassObject(k) == S_OK);
+
+    /* No class object at all: E_INVALIDARG, with the caller's key
+       zeroed (the apartment was there, so it got that far). */
+    CHECK(CoRegisterClassObject(&clsid_test, NULL, CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, &k2)
+          == E_INVALIDARG);
+    CHECK(k2 == 0);
+}
+
+/* What CoRegisterClassObject refuses, what another apartment sees of a
+   registration, and what CoUninitialize does to one. */
+static DWORD WINAPI reg_from_thread(void *out) {
+    HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    *(HRESULT *)out = made_one(CLSCTX_INPROC_SERVER, NULL);
+    if (init == S_OK || init == S_FALSE) {
+        CoUninitialize();
+    }
+    return 0;
+}
+
+static void class_object_edges(void) {
+    Fact f;
+    Pers p;
+    DWORD key = 0, k2;
+    HRESULT other = 0;
+    HANDLE t;
+    void *cf;
+    int before;
+
+    pers_make(&p, 1);
+    fact_make_it(&f, &p);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &key)
+          == S_OK);
+
+    /* The factory is asked for the interface the caller asked for, and
+       not for IUnknown. */
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == S_OK);
+    CHECK(IsEqualIID(&f.asked, &IID_IPersistStream) && !IsEqualIID(&f.asked, &IID_IUnknown));
+
+    /* CoGetClassObject of a class this process answers for hands back
+       the class object itself, with one reference for the caller. */
+    before = f.refs;
+    cf = NULL;
+    CHECK(CoGetClassObject(&clsid_test, CLSCTX_INPROC_SERVER, NULL, &IID_IClassFactory, &cf)
+          == S_OK);
+    CHECK(cf == (void *)&f && f.refs == before + 1);
+    IClassFactory_Release((IClassFactory *)cf);
+
+    /* A local activation does not read this table; CLSCTX_ALL does,
+       because it names the in-process contexts too. */
+    CHECK(made_one(CLSCTX_LOCAL_SERVER, NULL) == REGDB_E_CLASSNOTREG);
+    CHECK(made_one(CLSCTX_ALL, NULL) == S_OK);
+
+    /* Another apartment: a single-threaded one of its own sees nothing
+       of a registration made in the MTA. */
+    f.made = 0;
+    t = CreateThread(NULL, 0, reg_from_thread, &other, 0, NULL);
+    CHECK(t != NULL && WaitForSingleObject(t, 10000) == WAIT_OBJECT_0);
+    CloseHandle(t);
+    CHECK(other == REGDB_E_CLASSNOTREG && f.made == 0);
+
+    /* What it refuses. A NULL key is E_INVALIDARG; a flag that is not a
+       flag is E_INVALIDARG with the key zeroed; a context of none at
+       all is taken, and found by CLSCTX_ALL. */
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, NULL)
+          == E_INVALIDARG);
+    k2 = 0x5555;
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER, 0x40, &k2)
+          == E_INVALIDARG);
+    CHECK(k2 == 0);
+    CHECK(CoRevokeClassObject(key) == S_OK);
+
+    k2 = 0x5555;
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, 0, REGCLS_MULTIPLEUSE, &k2) == S_OK);
+    CHECK(k2 != 0 && k2 != 0x5555);
+    CHECK(made_one(CLSCTX_ALL, NULL) == S_OK);
+    CHECK(CoRevokeClassObject(k2) == S_OK);
+
+    /* REGCLS_SUSPENDED: registered, with a key, and serving nothing. */
+    k2 = 0x5555;
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE | REGCLS_SUSPENDED, &k2)
+          == S_OK);
+    CHECK(k2 != 0 && k2 != 0x5555);
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == REGDB_E_CLASSNOTREG);
+    CHECK(CoRevokeClassObject(k2) == S_OK);
+
+    /* CoUninitialize with a registration standing revokes it and
+       releases the class object: the apartment is what held it. The key
+       is then a stale one, and revoking it is S_OK. */
+    pers_make(&p, 1);
+    fact_make_it(&f, &p);
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &key)
+          == S_OK);
+    before = f.refs;
+    CoUninitialize();
+    CHECK(f.refs == before - 1 && f.refs == 1);
+    CHECK(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK);
+    CHECK(made_one(CLSCTX_INPROC_SERVER, NULL) == REGDB_E_CLASSNOTREG);
+    CHECK(CoRevokeClassObject(key) == S_OK);
+
+    /* And with no apartment at all: CO_E_NOTINITIALIZED, with the
+       caller's key untouched -- that check comes before everything,
+       zeroing included. */
+    CoUninitialize();
+    k2 = 0x5555;
+    CHECK(CoRegisterClassObject(&clsid_test, (IUnknown *)&f, CLSCTX_INPROC_SERVER,
+                                REGCLS_MULTIPLEUSE, &k2)
+          == CO_E_NOTINITIALIZED);
+    CHECK(k2 == 0x5555);
+    CHECK(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK);
+}
+
 static void hglobal_streams(void) {
     static const char text[] = "this is a test string";
     static const char hello[] = "Hello World!";
@@ -856,6 +1577,11 @@ int main(void) {
     }
 
     hglobal_streams();
+    persist_streams();
+    class_objects();
+    class_object_counts();
+    class_object_more();
+    class_object_edges();
     time_and_numbers();
 
     CoUninitialize();

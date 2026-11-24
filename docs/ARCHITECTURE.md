@@ -5611,9 +5611,10 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   CoGetCurrentProcess (a
   per-thread number from a count, never reused), a server process's
   reference count (CoAddRefServerProcess/CoReleaseServerProcess: the
-  new count; at 0 the class objects are suspended, as
-  CoSuspendClassObjects does until CoResumeClassObjects; with no local
-  servers nothing is refused while suspended), an aggregatable
+  new count, and nothing more -- the suspension the documentation pairs
+  with it is the service control manager's, and measured on Windows a
+  count reaching 0 leaves this process's own class objects serving),
+  an aggregatable
   free-threaded marshaler whose IMarshal methods are E_NOTIMPL, and
   CoWaitForMultipleHandles (no message pumping). In-process classes
   registered under HKCR\CLSID are created from their DLLs ("UI
@@ -5636,6 +5637,70 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   E_INVALIDARG and unregisters nothing. Limit, gala's and not Windows's,
   where the chain is unbounded: a filter that keeps naming new classes
   is stopped after eight replacements and the row recorded.
+- **The class objects a process answers for** (`class.rs`):
+  CoRegisterClassObject puts a class object in a table of up to 128
+  (gala's limit, not Windows's: one past it is E_OUTOFMEMORY with the
+  row `ole32.dll!CoRegisterClassObject(no room for another)`), which
+  CoGetClassObject reads before the registry -- so a program that
+  registers its own class is handed its own object back, which is how
+  Word loads what it saved. Measured on Windows (`ole32_test`), where
+  the documentation says little of it: the registration takes one
+  reference and gives it back when revoked, while an activation leaves
+  the count where it found it; the class object is asked for the
+  caller's own IID, and one it does not have is E_NOINTERFACE with a
+  NULL pointer; the same class may be registered twice and the newest
+  serves, the older serving again when the newer is revoked; a
+  registration beats the registry. An apartment owns a registration:
+  every thread of the MTA (the implicit one included) shares one, a
+  single-threaded apartment has its own and sees nothing of another's,
+  and CoUninitialize's last reference takes the apartment's
+  registrations with it. REGCLS_SINGLEUSE serves one activation and
+  then holds its reference without serving; REGCLS_SUSPENDED registers,
+  with a key of its own, and never serves. The refusals, in the order
+  Windows makes them: a NULL CLSID or key is E_INVALIDARG; no apartment
+  at all is CO_E_NOTINITIALIZED with the caller's key untouched; a flag
+  outside REGCLS, or no class object, is E_INVALIDARG with the key
+  zeroed. CoRevokeClassObject is S_OK for a key that was revoked
+  already or was never one. Invariant: a registration is read by an
+  activation that names an in-process context and by no other, whatever
+  context the registration itself named (measured both ways round), so
+  the table needs no context of its own -- a local activation goes to
+  the service control manager, which gala has none of, and a class
+  object registered for out-of-process use alone is recorded and then
+  registered like any other. CoSuspendClassObjects suspends the
+  registrations and nothing lifts it: CoResumeClassObjects is
+  CO_E_RESUME_NOT_A_SERVER (0x800706c6) in a process the service
+  control manager did not start as a server, which is every process
+  here, measured in every state an apartment can be in. Keys only rise,
+  so a stale key names nothing. The table is a `gala_lock::Lock`, and
+  nothing is held across a call into a program's code: the reference an
+  activation takes is taken outside the lock, and a borrow count on the
+  registration keeps the object alive until it has (a revoke meanwhile
+  puts the registration out of reach and leaves its reference for the
+  borrow to give back).
+- **Objects in streams** (`persist.rs`): a persisted object is its
+  class id and then whatever the object writes. WriteClassStm writes
+  the CLSID's sixteen bytes as they sit in memory, at the stream's
+  position; ReadClassStm zeroes the caller's CLSID first, so a stream
+  with less than sixteen bytes left is STG_E_READFAULT with it left
+  zeroed and the stream after what there was. OleSaveToStream makes two
+  calls on the object and no others -- GetClassID, then Save with
+  fClearDirty TRUE, which sees the stream after the class id -- with no
+  IsDirty, no GetSizeMax, no QueryInterface and no reference held;
+  GetClassID refusing is that error with nothing written, Save refusing
+  that error with the class id left in the stream, and CLSID_NULL is
+  saved like any other. OleLoadFromStream makes four: the class object
+  is asked for the caller's own interface, that object for
+  IPersistStream, Load is given the stream after the class id, and the
+  caller's interface is asked for once more -- that last reference is
+  the caller's, the two of ours go back. An empty stream is
+  STG_E_READFAULT, a class that is not registered REGDB_E_CLASSNOTREG,
+  one with no IPersistStream E_NOINTERFACE
+  (`ole32.dll!OleLoadFromStream(no IPersistStream)`), and Load refusing
+  is its own error with the object released and the caller's pointer
+  zeroed (all measured, `ole32_test`). Monikers are not here: gala has
+  no CreateFileMoniker, so OleSaveToStream and OleLoadFromStream over
+  one are untested.
 - **Marshaling** (`marshal.rs`): gala has no proxies, so marshaling is
   within the process: the data for MSHCTX_INPROC/CROSSCTX is gala's own
   record (a magic, the MSHLFLAGS, the interface pointer, its IID), and
