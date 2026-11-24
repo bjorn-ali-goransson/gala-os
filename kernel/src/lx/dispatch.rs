@@ -113,6 +113,17 @@ fn dispatch(frame: &mut SyscallFrame) {
     let ObjectBody::Thread(t) = &me.body else { unreachable!("thread objects are threads") };
     let process = t.process.clone();
     let tid = t.id;
+    // The call the thread is in, for the state dump (cleared below when
+    // it returns; a call that never returns, exit, leaves it named).
+    thread::set_in_linux_call(
+        &me,
+        Some(thread::LxCall {
+            number,
+            args: core::array::from_fn(|i| super::machine::syscall_arg(frame, i)),
+            ip: frame.return_regs().ip(),
+            since_ns: platform::monotonic_ns(),
+        }),
+    );
     drop(me);
     crate::flight::record(
         crate::flight::Kind::Syscall,
@@ -176,6 +187,9 @@ fn dispatch(frame: &mut SyscallFrame) {
     // otherwise reported as a thread stuck in the kernel, because the only
     // other thing that counts is a timer tick that lands in user mode.
     crate::flight::progress(crate::sched::current().as_usize());
+    if let Some(me) = thread::current() {
+        thread::set_in_linux_call(&me, None);
+    }
     let Call { process, lx, resume, .. } = call;
     frame.set_result(rax);
     let resume = resume.take();

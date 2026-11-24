@@ -280,6 +280,14 @@ impl Rect {
         (x1 > x0 && y1 > y0).then_some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
     }
 
+    /// The part inside `other`, if any.
+    pub fn intersect(self, other: Rect) -> Option<Rect> {
+        let (x0, y0) = (self.x.max(other.x), self.y.max(other.y));
+        let (x1, y1) =
+            ((self.x + self.w).min(other.x + other.w), (self.y + self.h).min(other.y + other.h));
+        (x1 > x0 && y1 > y0).then_some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    }
+
     pub fn offset(self, dx: i64, dy: i64) -> Rect {
         Rect { x: self.x + dx, y: self.y + dy, ..self }
     }
@@ -1007,6 +1015,12 @@ impl<X: Default> State<X> {
 
     pub fn has_input(&self, owner: u64) -> bool {
         self.input.iter().any(|e| e.owner == owner)
+    }
+
+    /// Since when (monotonic ns) `owner`'s input has waited untaken (see
+    /// `waiting`), if any waits.
+    pub fn input_since(&self, owner: u64) -> Option<u64> {
+        self.waiting.iter().find(|(o, _)| *o == owner).map(|&(_, since)| since)
     }
 
     /// Queues a message for window `window`'s program (a move replaces the

@@ -1057,6 +1057,16 @@ pub fn dump() {
                     crate::info!("lx: pid {} fd {i}: windows {:?}", p.pid, n.kind);
                 }
                 Object::Pty(end) => super::pty::describe(p.pid, i, end),
+                // Connected ones too (`unix::dump` lists only the named):
+                // an X or Wayland client's connection, its bytes queued
+                // each way and the threads on it.
+                Object::Unix(u) => {
+                    crate::info!(
+                        "lx: pid {} fd {i}: unix {}",
+                        p.pid,
+                        crate::unix::described(&u.core)
+                    );
+                }
                 _ => {}
             }
         }
