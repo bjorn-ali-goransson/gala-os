@@ -7534,7 +7534,12 @@ among the slowest hand-offs.
    that points into a loaded image named `<module>+<offset>`, and
    `stack_from=<module>` keeps the captures to the calls that module is
    on the stack of -- without it a service another thread reaches in a
-   loop spends any count before the call in question
+   loop spends any count before the call in question. A capture says
+   what the call was made with as well as who made it: its first eight
+   arguments, and each of them that points at text a second time as
+   that text -- `NtWriteFile`'s buffer being its sixth, and
+   `GalaRecordMissing`'s name of a gap its first -- which is what tells
+   twenty-four captures of the same service apart from one another
    (`kernel/src/nt/stack_at.rs`, scenarios `stack_at_test` and
    `stack_at_from_test`, OBSERVABILITY "Stack captures"). The wrappers
    say what happened inside a DLL gala wrote; this says who called, in

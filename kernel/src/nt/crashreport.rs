@@ -511,8 +511,9 @@ fn read_c_string(addr: u64, out: &mut [u8], read: &dyn Fn(u64, &mut [u8]) -> boo
 
 /// The text at `addr` into `out`: printable ASCII, or UTF-16 whose
 /// characters are printable ASCII (narrowed), up to a NUL or the first
-/// other character; its length (0: no text there).
-fn read_text(addr: u64, out: &mut [u8], read: &dyn Fn(u64, &mut [u8]) -> bool) -> usize {
+/// other character; its length (0: no text there). A stack capture
+/// quotes a call's arguments with it (`super::stack_at`).
+pub(super) fn read_text(addr: u64, out: &mut [u8], read: &dyn Fn(u64, &mut [u8]) -> bool) -> usize {
     let mut raw = [0u8; 2 * CXX_NAME];
     // As much as is readable: the whole buffer, else up to the page's end.
     let room = (0x1000 - (addr & 0xfff)) as usize;

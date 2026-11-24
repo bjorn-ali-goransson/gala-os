@@ -12211,6 +12211,12 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "capture 5 of 5",
             "(kernel32.dll+0x",
             "(stack_at_test.exe+0x",
+            // What the call was made with: NtWriteFile's buffer is its
+            // sixth argument, so the capture quotes the line the write
+            // was about to write (`\r` ends the run, as a character
+            // that is not printable).
+            "stack:   arguments 0-7: ",
+            "stack:   argument 5 reads as \"stack_at_test: raw one\"",
             "stack: NtWriteFile: the 5 captures asked for are spent",
         ],
     },
@@ -12233,6 +12239,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "stack: only calls with a module whose name contains \"kernel32\" on the stack",
             "(kernel32.dll+0x",
             "capture 2 of 2",
+            // The filter chose the two writes that went through
+            // kernel32, and the quote says which they were.
+            "stack:   argument 5 reads as \"stack_at_test: k32 one\"",
+            "stack:   argument 5 reads as \"stack_at_test: k32 two\"",
             "the 2 captures asked for are spent (3 calls so far did not reach stack_from=kernel32)",
             "stack: NtWriteFile: 2 captures of the 2 asked for, 3 calls passed over by stack_from=kernel32",
         ],
