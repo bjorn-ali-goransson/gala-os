@@ -7365,7 +7365,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // which says the body ran and the process is over. "stub
             // refused" says the body is unwritten and the asker was
             // told the name is absent, which is the work.
-            r#"ledger: {"service":"xmllite.dll!CreateXmlReader","what":"stub refused""#,
+            r#"ledger: {"service":"testdll.dll!gala_no_body","what":"stub refused""#,
             "loader_test: ok",
             "exited with status 0x00000000",
         ],
