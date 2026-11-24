@@ -201,6 +201,15 @@ const WS_XML_READER_PROPERTY_ALLOW_INVALID_REFS: u32 = 13;
 const WS_XML_READER_PROPERTY_MAX_NAMESPACES: u32 = 14;
 const WS_UINT32_TYPE: u32 = 7;
 const WS_WSZ_TYPE: u32 = 17;
+const WS_STRUCT_TYPE: u32 = 26;
+const WS_ATTRIBUTE_FIELD_MAPPING: u32 = 1;
+const WS_ELEMENT_FIELD_MAPPING: u32 = 2;
+const WS_REPEATING_ELEMENT_FIELD_MAPPING: u32 = 3;
+const WS_TEXT_FIELD_MAPPING: u32 = 4;
+const WS_FIELD_POINTER: u32 = 0x1;
+const WS_FIELD_OPTIONAL: u32 = 0x2;
+const WS_STRUCT_IGNORE_TRAILING_ELEMENT_CONTENT: u32 = 0x2;
+const WS_STRUCT_IGNORE_UNHANDLED_ATTRIBUTES: u32 = 0x4;
 const WS_READ_REQUIRED_VALUE: u32 = 1;
 const WS_READ_REQUIRED_POINTER: u32 = 2;
 
@@ -349,6 +358,43 @@ const SELF_CLOSED: &[u8] = b"<r><e/></r>";
 /// A number too big for 32 bits, and text that is no number at all.
 const TOO_BIG: &[u8] = b"<r><n>99999999999</n></r>";
 const NOT_A_NUMBER: &[u8] = b"<r><n>abc</n></r>";
+
+/// A root element with an attribute, a text element and a number: the
+/// shape a described struct is read from.
+const STRUCT_DOC: &[u8] = b"<r a=\"7\"><t>hello</t><n>42</n></r>";
+
+/// The same, without the number element.
+const NO_NUMBER: &[u8] = b"<r a=\"7\"><t>hello</t></r>";
+
+/// The same, with an element after the last field's.
+const TRAILING: &[u8] = b"<r a=\"7\"><t>hello</t><n>42</n><x>1</x></r>";
+
+/// The same, with an attribute no field names.
+const OTHER_ATTRIBUTE: &[u8] = b"<r a=\"7\" b=\"9\"><t>hello</t><n>42</n></r>";
+
+/// The same two elements, in the other order.
+const OUT_OF_ORDER: &[u8] = b"<r a=\"7\"><n>42</n><t>hello</t></r>";
+
+/// An element whose content is an element with a number in it.
+const NESTED: &[u8] = b"<r><inner><k>5</k></inner></r>";
+
+/// Three elements of the same name, for a repeating field.
+const REPEATED: &[u8] = b"<r><i>1</i><i>2</i><i>3</i></r>";
+
+/// An element with an attribute and text of its own.
+const TEXT_BODY: &[u8] = b"<r a=\"7\">hello</r>";
+
+/// A wrapper element with no items in it.
+const EMPTY_LIST: &[u8] = b"<r><list></list></r>";
+
+/// Three elements of the same name inside a wrapper element.
+const WRAPPED: &[u8] = b"<r><list><i>1</i><i>2</i><i>3</i></list></r>";
+
+/// The struct's two elements with no attribute on the root.
+const NO_ATTRIBUTE: &[u8] = b"<r><t>hello</t><n>42</n></r>";
+
+/// The same, in a default namespace.
+const NS_DOC: &[u8] = b"<r xmlns=\"urn:x\"><t>hello</t><n>42</n></r>";
 
 /// An element whose content is an element, which is no string.
 const CHILD: &[u8] = b"<r><a><b>x</b></a></r>";
@@ -1391,6 +1437,871 @@ fn depth(c: &mut Checks, error: *mut c_void) -> Result<(), u32> {
     Ok(())
 }
 
+/// WebServices.h's WS_FIELD_DESCRIPTION: how one field of a described
+/// struct is found in the document and where its value goes.
+#[repr(C)]
+struct WsFieldDescription {
+    mapping: u32,
+    local_name: *const WsXmlString,
+    ns: *const WsXmlString,
+    ws_type: u32,
+    type_description: *const c_void,
+    offset: u32,
+    options: u32,
+    default_value: *const c_void,
+    count_offset: u32,
+    item_local_name: *const WsXmlString,
+    item_ns: *const WsXmlString,
+    item_range: *const c_void,
+}
+
+/// WebServices.h's WS_STRUCT_DESCRIPTION: the struct a WS_STRUCT_TYPE
+/// read fills, its fields and its XML type name.
+#[repr(C)]
+struct WsStructDescription {
+    size: u32,
+    alignment: u32,
+    fields: *const *const WsFieldDescription,
+    field_count: u32,
+    type_local_name: *const WsXmlString,
+    type_ns: *const WsXmlString,
+    parent_type: *const c_void,
+    sub_types: *const c_void,
+    sub_type_count: u32,
+    struct_options: u32,
+}
+
+/// One field, with what no case here uses left NULL.
+fn field(
+    mapping: u32,
+    local_name: *const WsXmlString,
+    ws_type: u32,
+    type_description: *const c_void,
+    offset: usize,
+    options: u32,
+) -> WsFieldDescription {
+    WsFieldDescription {
+        mapping,
+        local_name,
+        ns: &NO_NS,
+        ws_type,
+        type_description,
+        offset: offset as u32,
+        options,
+        default_value: null(),
+        count_offset: 0,
+        item_local_name: null(),
+        item_ns: null(),
+        item_range: null(),
+    }
+}
+
+/// A description of `T`, with its size and alignment as the compiler
+/// lays it out, which is what a caller of WsReadType passes.
+fn described<T>(
+    fields: *const *const WsFieldDescription,
+    field_count: u32,
+    struct_options: u32,
+) -> WsStructDescription {
+    WsStructDescription {
+        size: size_of::<T>() as u32,
+        alignment: align_of::<T>() as u32,
+        fields,
+        field_count,
+        type_local_name: &ANSWER_NAME,
+        type_ns: &NO_NS,
+        parent_type: null(),
+        sub_types: null(),
+        sub_type_count: 0,
+        struct_options,
+    }
+}
+
+/// The empty namespace a document with no namespaces is read against.
+static NO_NS: WsXmlString = WsXmlString::new(b"");
+/// The XML type name every description here carries.
+static ANSWER_NAME: WsXmlString = WsXmlString::new(b"Answer");
+
+// SAFETY: the two statics above are read-only and their `bytes` point
+// into this image's constants, so sharing them between threads is
+// sound; WS_XML_STRING has no interior mutability of its own.
+unsafe impl Sync for WsXmlString {}
+
+/// The struct the simple cases fill: an element string, an element
+/// number and an attribute number.
+#[repr(C)]
+struct Answer {
+    text: *mut u16,
+    number: u32,
+    attr: u32,
+}
+
+/// A struct whose fields are pointers to their values.
+#[repr(C)]
+struct Pointers {
+    text: *mut u16,
+    number: *mut u32,
+}
+
+/// A repeating element field: the items on the heap and their count.
+#[repr(C)]
+struct Items {
+    items: *mut u32,
+    count: u32,
+}
+
+/// A struct whose only field is another struct.
+#[repr(C)]
+struct Inner {
+    k: u32,
+}
+
+#[repr(C)]
+struct Outer {
+    inner: Inner,
+}
+
+/// A reader over `doc`, positioned on its root element `<r>`.
+fn at_root(c: &mut Checks, doc: &[u8], error: *mut c_void) -> Result<*mut c_void, u32> {
+    let root = WsXmlString::new(b"r");
+    let mut found = SENTINEL as i32;
+    let reader = reader_over(c, doc, null(), 0, error)?;
+    // SAFETY: a reader this frame owns, and a name that outlives the call.
+    unsafe {
+        c.hr(WsReadToStartElement(reader, &root, null(), &raw mut found, error), S_OK)?;
+        c.eq(found as u32 as u64, 1)?;
+    }
+    Ok(reader)
+}
+
+/// One WS_STRUCT_TYPE read of `<r>` in `doc` against `description`,
+/// into `value`: the HRESULT, with the reader freed either way.
+#[allow(clippy::too_many_arguments)]
+fn read_struct(
+    c: &mut Checks,
+    doc: &[u8],
+    description: *const WsStructDescription,
+    read_option: u32,
+    value: *mut c_void,
+    value_size: u32,
+    heap: *mut c_void,
+    error: *mut c_void,
+) -> Result<i32, u32> {
+    let reader = at_root(c, doc, error)?;
+    // SAFETY: the reader is this frame's, `value` is `value_size` bytes
+    // of the caller's, and the description outlives the call.
+    let hr = unsafe {
+        let hr = WsReadType(
+            reader,
+            WS_ELEMENT_TYPE_MAPPING,
+            WS_STRUCT_TYPE,
+            description.cast(),
+            read_option,
+            heap,
+            value,
+            value_size,
+            error,
+        );
+        WsFreeReader(reader);
+        hr
+    };
+    Ok(hr)
+}
+
+/// WS_STRUCT_TYPE: an element read whole into a C struct the caller
+/// describes, which is what Word asks webservices.dll for and gala
+/// refuses (ROADMAP OF). Measured here before any of it is written.
+fn structs(c: &mut Checks, heap: *mut c_void, error: *mut c_void) -> Result<(), u32> {
+    let t = WsXmlString::new(b"t");
+    let n = WsXmlString::new(b"n");
+    let a = WsXmlString::new(b"a");
+    let i = WsXmlString::new(b"i");
+    let inner = WsXmlString::new(b"inner");
+    let k = WsXmlString::new(b"k");
+
+    // The three fields of `Answer`, attributes before elements as a
+    // description lists them.
+    let f_attr = field(
+        WS_ATTRIBUTE_FIELD_MAPPING,
+        &a,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, attr),
+        0,
+    );
+    let f_text = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &t,
+        WS_WSZ_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, text),
+        0,
+    );
+    let f_number = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &n,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, number),
+        0,
+    );
+    let fields: [*const WsFieldDescription; 3] = [&f_attr, &f_text, &f_number];
+    let answer = described::<Answer>(fields.as_ptr(), 3, 0);
+
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        STRUCT_DOC,
+        &answer,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.number), 42)?;
+    c.eq(u64::from(value.attr), 7)?;
+    c.ok(!value.text.is_null(), value.text as u64)?;
+    c.eq(diff_code(wide_diff(value.text, b"hello")), 0)?;
+
+    // A size that is not the struct's.
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        STRUCT_DOC,
+        &answer,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32 - 4,
+        heap,
+        error,
+    )?;
+    c.hr(hr, E_INVALIDARG)?;
+
+    // No description at all for a type that is one.
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        STRUCT_DOC,
+        null(),
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, E_INVALIDARG)?;
+
+    // The same read as a pointer: the struct goes on the heap.
+    let mut pointer: *mut Answer = null_mut();
+    let hr = read_struct(
+        c,
+        STRUCT_DOC,
+        &answer,
+        WS_READ_REQUIRED_POINTER,
+        (&raw mut pointer).cast(),
+        size_of::<*mut Answer>() as u32,
+        heap,
+        error,
+    )?;
+    // SAFETY: read only when the call succeeded and wrote a pointer,
+    // which it then owns on the heap passed in.
+    let (number, attr) = if hr == S_OK && !pointer.is_null() {
+        unsafe { (u64::from((*pointer).number), u64::from((*pointer).attr)) }
+    } else {
+        (0, 0)
+    };
+    c.hr(hr, S_OK)?;
+    c.eq(number, 42)?;
+    c.eq(attr, 7)?;
+
+    // A required element the document does not have.
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        NO_NUMBER,
+        &answer,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, WS_E_INVALID_FORMAT)?;
+    c.eq(u64::from(value.number), u64::from(SENTINEL))?;
+
+    // The same document, with that element optional.
+    let f_optional = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &n,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, number),
+        WS_FIELD_OPTIONAL,
+    );
+    let optional_fields: [*const WsFieldDescription; 3] = [&f_attr, &f_text, &f_optional];
+    let optional = described::<Answer>(optional_fields.as_ptr(), 3, 0);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        NO_NUMBER,
+        &optional,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.number), 0)?;
+    c.eq(u64::from(value.attr), 7)?;
+
+    // An element after the last field, and the option that ignores it.
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        TRAILING,
+        &answer,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, WS_E_INVALID_FORMAT)?;
+    c.eq(u64::from(value.number), 42)?;
+    let ignoring =
+        described::<Answer>(fields.as_ptr(), 3, WS_STRUCT_IGNORE_TRAILING_ELEMENT_CONTENT);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        TRAILING,
+        &ignoring,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.number), 42)?;
+
+    // An attribute no field names, and the option that ignores it.
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        OTHER_ATTRIBUTE,
+        &answer,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, WS_E_INVALID_FORMAT)?;
+    c.eq(u64::from(value.attr), 7)?;
+    let lenient = described::<Answer>(fields.as_ptr(), 3, WS_STRUCT_IGNORE_UNHANDLED_ATTRIBUTES);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        OTHER_ATTRIBUTE,
+        &lenient,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.attr), 7)?;
+
+    // The elements in the other order.
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        OUT_OF_ORDER,
+        &answer,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, WS_E_INVALID_FORMAT)?;
+    c.eq(u64::from(value.number), u64::from(SENTINEL))?;
+    c.eq(u64::from(value.attr), 7)?;
+
+    // A field whose namespace is NULL rather than the empty string.
+    let mut f_null_ns = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &t,
+        WS_WSZ_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, text),
+        0,
+    );
+    f_null_ns.ns = null();
+    let null_ns_fields: [*const WsFieldDescription; 3] = [&f_attr, &f_null_ns, &f_number];
+    let null_ns = described::<Answer>(null_ns_fields.as_ptr(), 3, 0);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        STRUCT_DOC,
+        &null_ns,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, E_INVALIDARG)?;
+    c.eq(u64::from(value.number), u64::from(SENTINEL))?;
+
+    // A field that is itself a described struct.
+    let f_k = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &k,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Inner, k),
+        0,
+    );
+    let inner_fields: [*const WsFieldDescription; 1] = [&f_k];
+    let inner_description = described::<Inner>(inner_fields.as_ptr(), 1, 0);
+    let f_inner = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &inner,
+        WS_STRUCT_TYPE,
+        (&raw const inner_description).cast(),
+        core::mem::offset_of!(Outer, inner),
+        0,
+    );
+    let outer_fields: [*const WsFieldDescription; 1] = [&f_inner];
+    let outer = described::<Outer>(outer_fields.as_ptr(), 1, 0);
+    let mut value = Outer { inner: Inner { k: SENTINEL } };
+    let hr = read_struct(
+        c,
+        NESTED,
+        &outer,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Outer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.inner.k), 5)?;
+
+    // A repeating element, four ways: the items named by the item name
+    // with no wrapper, the same with the field named too, a wrapper
+    // element around them, and the items as pointers.
+    let list = WsXmlString::new(b"list");
+    for (wrapper, options, doc, want, count, items) in [
+        // No wrapper element at all: a repeating field has to name one,
+        // and the items' own name is not it.
+        (null::<WsXmlString>(), 0, REPEATED, E_INVALIDARG, SENTINEL, 0),
+        // The items' name as the wrapper's: the first item's text is
+        // then inside the wrapper and is no item of the list, which is
+        // refused -- with the count the reader got to, zero, written.
+        (&raw const i, 0, REPEATED, WS_E_INVALID_FORMAT, 0, 0),
+        // The wrapper the document has, which is the shape that reads.
+        (&raw const list, 0, WRAPPED, S_OK, 3, 0x03_0201),
+        // Items that are pointers to their values, with no wrapper
+        // named either: the wrapper is answered for first.
+        (null::<WsXmlString>(), WS_FIELD_POINTER, REPEATED, E_INVALIDARG, SENTINEL, 0),
+    ] {
+        let mut f_items = field(
+            WS_REPEATING_ELEMENT_FIELD_MAPPING,
+            wrapper,
+            WS_UINT32_TYPE,
+            null(),
+            core::mem::offset_of!(Items, items),
+            options,
+        );
+        f_items.count_offset = core::mem::offset_of!(Items, count) as u32;
+        f_items.item_local_name = &i;
+        f_items.item_ns = &NO_NS;
+        let item_fields: [*const WsFieldDescription; 1] = [&f_items];
+        let items_description = described::<Items>(item_fields.as_ptr(), 1, 0);
+        let mut value = Items { items: null_mut(), count: SENTINEL };
+        let hr = read_struct(
+            c,
+            doc,
+            &items_description,
+            WS_READ_REQUIRED_VALUE,
+            (&raw mut value).cast(),
+            size_of::<Items>() as u32,
+            heap,
+            error,
+        )?;
+        // SAFETY: read only when the call wrote three items on the heap.
+        let read = if hr == S_OK && value.count == 3 && !value.items.is_null() {
+            unsafe {
+                u64::from(*value.items)
+                    | u64::from(*value.items.add(1)) << 8
+                    | u64::from(*value.items.add(2)) << 16
+            }
+        } else {
+            0
+        };
+        c.hr(hr, want)?;
+        c.eq(u64::from(value.count), u64::from(count))?;
+        c.eq(read, items)?;
+    }
+
+    // The element's own text as a field.
+    let mut f_body = field(
+        WS_TEXT_FIELD_MAPPING,
+        null(),
+        WS_WSZ_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, text),
+        0,
+    );
+    f_body.ns = null();
+    let text_fields: [*const WsFieldDescription; 2] = [&f_attr, &f_body];
+    let texty = described::<Answer>(text_fields.as_ptr(), 2, 0);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        TEXT_BODY,
+        &texty,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    let diff = if hr == S_OK && !value.text.is_null() {
+        diff_code(wide_diff(value.text, b"hello"))
+    } else {
+        u64::from(SENTINEL)
+    };
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.attr), 7)?;
+    c.eq(diff, 0)?;
+
+    // The same struct read from inside its element: the caller has read
+    // the start tag, and the reader is left on the end tag.
+    let reader = at_root(c, NO_ATTRIBUTE, error)?;
+    let content_fields: [*const WsFieldDescription; 2] = [&f_text, &f_number];
+    let content_description = described::<Answer>(content_fields.as_ptr(), 2, 0);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    // SAFETY: the reader is this frame's and the value is its own size.
+    let (hr, end) = unsafe {
+        c.hr(WsReadStartElement(reader, error), S_OK)?;
+        let hr = WsReadType(
+            reader,
+            WS_ELEMENT_CONTENT_TYPE_MAPPING,
+            WS_STRUCT_TYPE,
+            (&raw const content_description).cast(),
+            WS_READ_REQUIRED_VALUE,
+            heap,
+            (&raw mut value).cast(),
+            size_of::<Answer>() as u32,
+            error,
+        );
+        let end = WsReadEndElement(reader, error);
+        WsFreeReader(reader);
+        (hr, end)
+    };
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.number), 42)?;
+    c.hr(end, S_OK)?;
+
+    // Where the reader stands after a struct read: past the element's
+    // end tag, which the column says.
+    let reader = at_root(c, NO_ATTRIBUTE, error)?;
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    // SAFETY: as above; the column is the eight bytes its property is.
+    let (hr, column) = unsafe {
+        let hr = WsReadType(
+            reader,
+            WS_ELEMENT_TYPE_MAPPING,
+            WS_STRUCT_TYPE,
+            (&raw const content_description).cast(),
+            WS_READ_REQUIRED_VALUE,
+            heap,
+            (&raw mut value).cast(),
+            size_of::<Answer>() as u32,
+            error,
+        );
+        let mut column: u64 = u64::from(SENTINEL);
+        WsGetReaderProperty(
+            reader,
+            WS_XML_READER_PROPERTY_COLUMN,
+            (&raw mut column).cast(),
+            8,
+            error,
+        );
+        WsFreeReader(reader);
+        (hr, column)
+    };
+    c.hr(hr, S_OK)?;
+    c.eq(column, NO_ATTRIBUTE.len() as u64)?;
+
+    // A namespace the fields have to match: the document's default one.
+    let urn = WsXmlString::new(b"urn:x");
+    let mut f_ns_text = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &t,
+        WS_WSZ_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, text),
+        0,
+    );
+    f_ns_text.ns = &urn;
+    let mut f_ns_number = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &n,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, number),
+        0,
+    );
+    f_ns_number.ns = &urn;
+    let ns_fields: [*const WsFieldDescription; 2] = [&f_ns_text, &f_ns_number];
+    let in_namespace = described::<Answer>(ns_fields.as_ptr(), 2, 0);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        NS_DOC,
+        &in_namespace,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.number), 42)?;
+
+    // The same document against fields with no namespace.
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        NS_DOC,
+        &content_description,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, WS_E_INVALID_FORMAT)?;
+    c.eq(u64::from(value.number), u64::from(SENTINEL))?;
+
+    // An attribute field the document has no attribute for.
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        NO_ATTRIBUTE,
+        &answer,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, WS_E_INVALID_FORMAT)?;
+    c.eq(u64::from(value.attr), u64::from(SENTINEL))?;
+
+    // A scalar field that is a pointer to its value on the heap.
+    let f_pointer_number = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &n,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Pointers, number),
+        WS_FIELD_POINTER,
+    );
+    let f_pointer_text = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &t,
+        WS_WSZ_TYPE,
+        null(),
+        core::mem::offset_of!(Pointers, text),
+        0,
+    );
+    let pointer_fields: [*const WsFieldDescription; 2] = [&f_pointer_text, &f_pointer_number];
+    let pointer_description = described::<Pointers>(pointer_fields.as_ptr(), 2, 0);
+    let mut value = Pointers { text: null_mut(), number: null_mut() };
+    let hr = read_struct(
+        c,
+        NO_ATTRIBUTE,
+        &pointer_description,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Pointers>() as u32,
+        heap,
+        error,
+    )?;
+    // SAFETY: read only when the call wrote a pointer to the number it
+    // read, which it owns on the heap passed in.
+    let number = if hr == S_OK && !value.number.is_null() {
+        unsafe { u64::from(*value.number) }
+    } else {
+        u64::from(SENTINEL)
+    };
+    c.hr(hr, E_INVALIDARG)?;
+    c.eq(number, u64::from(SENTINEL))?;
+
+    // A field whose offset is past the end of the struct it describes.
+    let f_past_end =
+        field(WS_ELEMENT_FIELD_MAPPING, &n, WS_UINT32_TYPE, null(), size_of::<Answer>(), 0);
+    let past_fields: [*const WsFieldDescription; 2] = [&f_text, &f_past_end];
+    let past_end = described::<Answer>(past_fields.as_ptr(), 2, 0);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        NO_ATTRIBUTE,
+        &past_end,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, E_INVALIDARG)?;
+
+    // Two fields at the same offset.
+    let f_same = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &n,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, text),
+        0,
+    );
+    let same_fields: [*const WsFieldDescription; 2] = [&f_text, &f_same];
+    let overlapping = described::<Answer>(same_fields.as_ptr(), 2, 0);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        NO_ATTRIBUTE,
+        &overlapping,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+
+    // An element field before the attribute field in the description.
+    let reversed_fields: [*const WsFieldDescription; 3] = [&f_text, &f_number, &f_attr];
+    let reversed = described::<Answer>(reversed_fields.as_ptr(), 3, 0);
+    let mut value = Answer { text: null_mut(), number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        STRUCT_DOC,
+        &reversed,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, WS_E_INVALID_FORMAT)?;
+    c.eq(u64::from(value.number), u64::from(SENTINEL))?;
+    c.eq(u64::from(value.attr), u64::from(SENTINEL))?;
+
+    // A wrapper with no items in it, and items that are pointers.
+    let mut f_empty = field(
+        WS_REPEATING_ELEMENT_FIELD_MAPPING,
+        &list,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Items, items),
+        0,
+    );
+    f_empty.count_offset = core::mem::offset_of!(Items, count) as u32;
+    f_empty.item_local_name = &i;
+    f_empty.item_ns = &NO_NS;
+    let empty_fields: [*const WsFieldDescription; 1] = [&f_empty];
+    let empty_list = described::<Items>(empty_fields.as_ptr(), 1, 0);
+    let mut value = Items { items: usize::MAX as *mut u32, count: SENTINEL };
+    let hr = read_struct(
+        c,
+        EMPTY_LIST,
+        &empty_list,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Items>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(value.count), 0)?;
+    c.ok(!value.items.is_null(), value.items as u64)?;
+
+    let mut f_item_pointers = field(
+        WS_REPEATING_ELEMENT_FIELD_MAPPING,
+        &list,
+        WS_UINT32_TYPE,
+        null(),
+        core::mem::offset_of!(Items, items),
+        WS_FIELD_POINTER,
+    );
+    f_item_pointers.count_offset = core::mem::offset_of!(Items, count) as u32;
+    f_item_pointers.item_local_name = &i;
+    f_item_pointers.item_ns = &NO_NS;
+    let item_pointer_fields: [*const WsFieldDescription; 1] = [&f_item_pointers];
+    let item_pointers = described::<Items>(item_pointer_fields.as_ptr(), 1, 0);
+    let mut value = Items { items: null_mut(), count: SENTINEL };
+    let hr = read_struct(
+        c,
+        WRAPPED,
+        &item_pointers,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Items>() as u32,
+        heap,
+        error,
+    )?;
+    // SAFETY: read only when the call wrote three item pointers.
+    let first = if hr == S_OK && value.count == 3 && !value.items.is_null() {
+        unsafe {
+            let items = value.items.cast::<*mut u32>();
+            if (*items).is_null() { u64::from(SENTINEL) } else { u64::from(**items) }
+        }
+    } else {
+        u64::from(SENTINEL)
+    };
+    c.hr(hr, WS_E_INVALID_FORMAT)?;
+    c.eq(u64::from(value.count), u64::from(SENTINEL))?;
+    c.eq(first, u64::from(SENTINEL))?;
+
+    // An optional string field the document has no element for.
+    let f_optional_text = field(
+        WS_ELEMENT_FIELD_MAPPING,
+        &t,
+        WS_WSZ_TYPE,
+        null(),
+        core::mem::offset_of!(Answer, text),
+        WS_FIELD_OPTIONAL,
+    );
+    let no_text_fields: [*const WsFieldDescription; 2] = [&f_optional_text, &f_number];
+    let no_text = described::<Answer>(no_text_fields.as_ptr(), 2, 0);
+    let mut value = Answer { text: usize::MAX as *mut u16, number: SENTINEL, attr: SENTINEL };
+    let hr = read_struct(
+        c,
+        b"<r><n>42</n></r>",
+        &no_text,
+        WS_READ_REQUIRED_VALUE,
+        (&raw mut value).cast(),
+        size_of::<Answer>() as u32,
+        heap,
+        error,
+    )?;
+    c.hr(hr, S_OK)?;
+    c.eq(value.text as u64, 0)?;
+    c.eq(u64::from(value.number), 42)?;
+
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
 
@@ -1410,6 +2321,8 @@ fn run() -> Result<(), u32> {
     fragments(&mut c, heap, error)?;
     section(b"depth");
     depth(&mut c, error)?;
+    section(b"structs");
+    structs(&mut c, heap, error)?;
 
     // SAFETY: both objects were created above and nothing holds them.
     unsafe {

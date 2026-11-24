@@ -14,7 +14,7 @@ use core::char::decode_utf16;
 use core::ffi::c_void;
 use core::slice;
 
-use gala_xml::{Event, Scan};
+use gala_xml::{Attr, Event, Scan, XMLNS_NS};
 
 use crate::{
     E_INVALIDARG, ERROR, Error, HEAP, HResult, Heap, NOT_IMPLEMENTED, OTHER, READER, S_OK, WRITER,
@@ -33,8 +33,27 @@ const WS_ELEMENT_TYPE_MAPPING: u32 = 1;
 const WS_ELEMENT_CONTENT_TYPE_MAPPING: u32 = 3;
 const WS_UINT32_TYPE: u32 = 7;
 const WS_WSZ_TYPE: u32 = 17;
+const WS_STRUCT_TYPE: u32 = 26;
 const WS_READ_REQUIRED_VALUE: u32 = 1;
 const WS_READ_REQUIRED_POINTER: u32 = 2;
+
+/// WebServices.h's WS_FIELD_MAPPING, what a field of a struct is read
+/// from. The rest of the enumeration (the message headers, the any
+/// element and the union mappings, 5 to 12) is recorded in the ledger
+/// and refused.
+const WS_ATTRIBUTE_FIELD_MAPPING: u32 = 1;
+const WS_ELEMENT_FIELD_MAPPING: u32 = 2;
+const WS_REPEATING_ELEMENT_FIELD_MAPPING: u32 = 3;
+const WS_TEXT_FIELD_MAPPING: u32 = 4;
+
+/// WebServices.h's WS_FIELD_OPTIONS, the two bits the reader follows.
+const WS_FIELD_POINTER: u32 = 0x1;
+const WS_FIELD_OPTIONAL: u32 = 0x2;
+
+/// WebServices.h's WS_STRUCT_OPTIONS, the two bits that say what the
+/// reader may leave unread.
+const WS_STRUCT_IGNORE_TRAILING_ELEMENT_CONTENT: u32 = 0x2;
+const WS_STRUCT_IGNORE_UNHANDLED_ATTRIBUTES: u32 = 0x4;
 
 const TRUE: i32 = 1;
 const FALSE: i32 = 0;
@@ -132,6 +151,42 @@ pub struct WsXmlString {
     id: u32,
 }
 
+/// WebServices.h's WS_FIELD_DESCRIPTION: where a field sits in the
+/// struct, what XML stands for it, and what type its value is. A
+/// repeating field uses the last three as well: the count beside the
+/// array, and the name of one item.
+#[repr(C)]
+struct WsFieldDescription {
+    mapping: u32,
+    local_name: *const WsXmlString,
+    ns: *const WsXmlString,
+    ws_type: u32,
+    type_description: *const c_void,
+    offset: u32,
+    options: u32,
+    default_value: *const c_void,
+    count_offset: u32,
+    item_local_name: *const WsXmlString,
+    item_ns: *const WsXmlString,
+    item_range: *const c_void,
+}
+
+/// WebServices.h's WS_STRUCT_DESCRIPTION: how big the struct is, the
+/// fields it is made of, and what the reader may leave unread.
+#[repr(C)]
+struct WsStructDescription {
+    size: u32,
+    alignment: u32,
+    fields: *const *const WsFieldDescription,
+    field_count: u32,
+    type_local_name: *const WsXmlString,
+    type_ns: *const WsXmlString,
+    parent_type: *const WsStructDescription,
+    sub_types: *const *const WsStructDescription,
+    sub_type_count: u32,
+    struct_options: u32,
+}
+
 /// WebServices.h's WS_XML_READER_ENCODING and the text encoding that
 /// extends it.
 #[repr(C)]
@@ -162,8 +217,10 @@ struct WsXmlReaderProperty {
 
 /// The node a reader is on.
 enum Node {
-    /// A start tag, its namespace and local name.
-    Start { ns: String, name: String },
+    /// A start tag, its namespace and local name, and the attributes
+    /// on it -- which a struct's attribute fields are read from, so the
+    /// reader keeps them rather than dropping them with the tag.
+    Start { ns: String, name: String, attrs: Vec<Attr> },
     /// Character data or a CDATA section.
     Text(String),
     /// The end of the element the reader was in.
@@ -217,7 +274,7 @@ impl Reader {
         loop {
             match self.scan.next_event(&self.text) {
                 Ok(Event::Comment(_) | Event::Pi { .. }) => {}
-                Ok(Event::StartElement { ns, name, .. }) => {
+                Ok(Event::StartElement { ns, name, attrs, .. }) => {
                     // A start element deeper than the reader allows:
                     // the read that reaches its tag is refused, which
                     // is where Windows refuses it (the row and column
@@ -235,7 +292,7 @@ impl Reader {
                         );
                         return WS_E_QUOTA_EXCEEDED;
                     }
-                    self.node = Some(Node::Start { ns, name });
+                    self.node = Some(Node::Start { ns, name, attrs });
                     return S_OK;
                 }
                 Ok(Event::EndElement) => {
@@ -695,7 +752,7 @@ pub extern "system" fn WsReadToStartElement(
         return hr;
     }
     let matched = match &reader.node {
-        Some(Node::Start { ns, name }) => {
+        Some(Node::Start { ns, name, .. }) => {
             want_name.is_none_or(|want| want == name) && want_ns.is_none_or(|want| want == ns)
         }
         _ => false,
@@ -777,10 +834,13 @@ pub extern "system" fn WsReadEndElement(reader: *mut c_void, error: *mut c_void)
 /// reader, as Windows' does.
 ///
 /// The types gala reads are the two the Office Deployment Tool's answer
-/// is made of: WS_WSZ_TYPE as a NUL-terminated string on the heap, and
-/// WS_UINT32_TYPE as a number. Anything else is recorded in the ledger
-/// with the number it was handed and refused with WS_E_NOT_SUPPORTED,
-/// so the ledger names the next type a program needs.
+/// is made of -- WS_WSZ_TYPE as a NUL-terminated string on the heap and
+/// WS_UINT32_TYPE as a number -- and WS_STRUCT_TYPE, an element read
+/// into a C struct by the WS_STRUCT_DESCRIPTION the caller passes, which
+/// is how Word and the Click-to-Run service read their answers. Anything
+/// else is recorded in the ledger with the number it was handed and
+/// refused with WS_E_NOT_SUPPORTED, so the ledger names the next type a
+/// program needs.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn WsReadType(
@@ -813,6 +873,46 @@ pub extern "system" fn WsReadType(
             return WS_E_NOT_SUPPORTED;
         }
     };
+    read_type(
+        reader,
+        content,
+        ws_type,
+        type_description,
+        read_option,
+        heap,
+        value,
+        value_size,
+        error,
+    )
+}
+
+/// One value where the reader stands, which is what WsReadType reads
+/// and what each of a struct's fields is read with in turn: `content`
+/// tells the two mappings apart.
+#[allow(clippy::too_many_arguments)]
+fn read_type(
+    reader: &mut Reader,
+    content: bool,
+    ws_type: u32,
+    type_description: *const c_void,
+    read_option: u32,
+    heap: *mut c_void,
+    value: *mut c_void,
+    value_size: u32,
+    error: *mut c_void,
+) -> HResult {
+    if ws_type == WS_STRUCT_TYPE {
+        return read_struct(
+            reader,
+            content,
+            type_description.cast::<WsStructDescription>(),
+            read_option,
+            heap,
+            value,
+            value_size,
+            error,
+        );
+    }
     if !type_description.is_null() {
         record(b"WsReadType", b"a type description", NOT_IMPLEMENTED, u64::from(ws_type));
         return WS_E_NOT_SUPPORTED;
@@ -893,41 +993,688 @@ pub extern "system" fn WsReadType(
         }
     }
 
-    match ws_type {
-        WS_WSZ_TYPE => {
+    // SAFETY: the caller's buffer, of the size its type was checked for.
+    unsafe { write_scalar(reader, ws_type, &text, value.cast::<u8>(), heap, error) }
+}
+
+/// A scalar value written where it goes: the text it was read from as a
+/// string on the heap (WS_WSZ_TYPE, the pointer written to the slot) or
+/// as a number (WS_UINT32_TYPE). This is both what WsReadType writes and
+/// what a struct's field is written with, the attribute fields included,
+/// whose text is on the start tag rather than in an element.
+///
+/// # Safety
+/// `slot` is as many bytes as the type takes: a pointer, or four.
+unsafe fn write_scalar(
+    reader: &mut Reader,
+    ws_type: u32,
+    text: &str,
+    slot: *mut u8,
+    heap: *mut c_void,
+    error: *mut c_void,
+) -> HResult {
+    if ws_type == WS_WSZ_TYPE {
+        // SAFETY: a handle this DLL gave out.
+        let Some(heap) = (unsafe { body::<Heap>(heap, HEAP, b"WsReadType") }) else {
+            return E_INVALIDARG;
+        };
+        let mut units: Vec<u16> = text.encode_utf16().collect();
+        units.push(0);
+        let bytes = units.len() * size_of::<u16>();
+        let Some(block) = heap.alloc(bytes) else {
+            fail(error, b"WsReadType", "The heap has no room for the string.");
+            return WS_E_QUOTA_EXCEEDED;
+        };
+        // SAFETY: `block` is `bytes` bytes of the heap, which is as long
+        // as the string's units; the heap's blocks are blocks of 8-byte
+        // words, so it is aligned for u16 as well.
+        unsafe {
+            core::ptr::copy_nonoverlapping(units.as_ptr().cast::<u8>(), block, bytes);
+            slot.cast::<*mut u16>().write_unaligned(block.cast::<u16>());
+        }
+        return S_OK;
+    }
+    let digits = text.trim();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        reader.malformed(error, b"WsReadType", "The element does not hold a number.");
+        return WS_E_INVALID_FORMAT;
+    }
+    let Ok(number) = digits.parse::<u32>() else {
+        reader.malformed(error, b"WsReadType", "The number does not fit in 32 bits.");
+        return WS_E_NUMERIC_OVERFLOW;
+    };
+    // SAFETY: the caller's slot, of the four bytes its type takes.
+    unsafe { slot.cast::<u32>().write_unaligned(number) };
+    S_OK
+}
+
+/// How many bytes a value of the field's type takes where the field
+/// sits, or why it cannot be read: a type gala does not know is
+/// recorded in the ledger and refused, and a struct field with no
+/// description of its struct is a bad argument.
+///
+/// # Safety
+/// A struct field's `type_description` is the caller's
+/// WS_STRUCT_DESCRIPTION.
+unsafe fn value_size(f: &WsFieldDescription) -> Result<usize, HResult> {
+    match f.ws_type {
+        WS_UINT32_TYPE => Ok(size_of::<u32>()),
+        WS_WSZ_TYPE => Ok(size_of::<*mut u16>()),
+        WS_STRUCT_TYPE => {
+            if f.type_description.is_null() {
+                return Err(E_INVALIDARG);
+            }
+            // SAFETY: as the contract says.
+            let desc = unsafe { &*f.type_description.cast::<WsStructDescription>() };
+            Ok(desc.size as usize)
+        }
+        _ => {
+            record(b"WsReadType", b"a field's value type", NOT_IMPLEMENTED, u64::from(f.ws_type));
+            Err(WS_E_NOT_SUPPORTED)
+        }
+    }
+}
+
+/// The `i`th field of a description, or None when the array holds a
+/// null there.
+///
+/// # Safety
+/// `i` is below the description's field count, and its `fields` are an
+/// array of that many pointers.
+unsafe fn field_at(desc: &WsStructDescription, i: usize) -> Option<&'static WsFieldDescription> {
+    // SAFETY: as the contract says.
+    let p = unsafe { *desc.fields.add(i) };
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: a field description the caller gave.
+    Some(unsafe { &*p })
+}
+
+/// What a field's description has to say for the reader to read it,
+/// answered before the document is touched: a bad argument
+/// (E_INVALIDARG) is the caller's mistake, and what gala does not
+/// implement is recorded in the ledger and refused.
+///
+/// # Safety
+/// The names and the nested description are the caller's.
+unsafe fn check_field(f: &WsFieldDescription, size: usize) -> HResult {
+    let (named, repeating) = match f.mapping {
+        WS_ATTRIBUTE_FIELD_MAPPING | WS_ELEMENT_FIELD_MAPPING => (true, false),
+        WS_REPEATING_ELEMENT_FIELD_MAPPING => (true, true),
+        WS_TEXT_FIELD_MAPPING => (false, false),
+        _ => {
+            record(b"WsReadType", b"a field mapping", NOT_IMPLEMENTED, u64::from(f.mapping));
+            return WS_E_NOT_SUPPORTED;
+        }
+    };
+    // SAFETY: the caller's strings, which it said are names.
+    if named && unsafe { name_of(f.local_name).is_none() || name_of(f.ns).is_none() } {
+        return E_INVALIDARG;
+    }
+    let known = WS_FIELD_POINTER | WS_FIELD_OPTIONAL;
+    if f.options & !known != 0 {
+        let rest = u64::from(f.options & !known);
+        record(b"WsReadType", b"a field option", NOT_IMPLEMENTED, rest);
+        return WS_E_NOT_SUPPORTED;
+    }
+    if f.options & WS_FIELD_POINTER != 0 {
+        if !repeating {
+            // Windows refuses a pointer to a scalar field's value
+            // outright, so there is nothing here to implement.
+            return E_INVALIDARG;
+        }
+        // Items that are pointers to their values: Windows refuses the
+        // read, so the row says what was asked for and not that gala
+        // chose to refuse it.
+        record(b"WsReadType", b"items as pointers", NOT_IMPLEMENTED, u64::from(f.ws_type));
+        return WS_E_INVALID_FORMAT;
+    }
+    if f.ws_type == WS_STRUCT_TYPE && f.mapping != WS_ELEMENT_FIELD_MAPPING {
+        record(b"WsReadType", b"a struct field that is no element", NOT_IMPLEMENTED, 0);
+        return WS_E_NOT_SUPPORTED;
+    }
+    // SAFETY: as this function's contract says.
+    let value = match unsafe { value_size(f) } {
+        Ok(n) => n,
+        Err(hr) => return hr,
+    };
+    // A repeating field holds a pointer to the items, wherever they
+    // are, and the count beside it; every other field holds its value.
+    let slot = if repeating { size_of::<*mut c_void>() } else { value };
+    if f.offset as usize + slot > size {
+        return E_INVALIDARG;
+    }
+    if repeating {
+        // SAFETY: the caller's strings, which it said are names.
+        if unsafe { name_of(f.item_local_name).is_none() || name_of(f.item_ns).is_none() } {
+            return E_INVALIDARG;
+        }
+        if f.count_offset as usize + size_of::<u32>() > size || value == 0 {
+            return E_INVALIDARG;
+        }
+    }
+    S_OK
+}
+
+/// The attributes on the struct's element that no field read. A struct
+/// that does not say to ignore them cannot hold them, which is the
+/// answer Windows gives. The namespace declarations are not among them:
+/// they belong to the document, not to the struct.
+fn unhandled(
+    reader: &mut Reader,
+    options: u32,
+    attributes: &[Attr],
+    taken: &[bool],
+    error: *mut c_void,
+) -> HResult {
+    if options & WS_STRUCT_IGNORE_UNHANDLED_ATTRIBUTES != 0 {
+        return S_OK;
+    }
+    for (a, taken) in attributes.iter().zip(taken) {
+        if !*taken && a.ns != XMLNS_NS {
+            let qname = &a.qname;
+            reader.malformed(
+                error,
+                b"WsReadType",
+                &alloc::format!("The attribute {qname} is not a field of the struct."),
+            );
+            return WS_E_INVALID_FORMAT;
+        }
+    }
+    S_OK
+}
+
+/// An attribute field: the attribute the description names, from the
+/// start tag the reader is on. One the tag does not carry is zeroed
+/// when the field is optional and refused when it is not.
+///
+/// # Safety
+/// `base` is the struct's bytes, as many as its description said, and
+/// the field was checked against that size.
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_attribute(
+    reader: &mut Reader,
+    f: &WsFieldDescription,
+    attributes: &[Attr],
+    taken: &mut [bool],
+    base: *mut u8,
+    heap: *mut c_void,
+    error: *mut c_void,
+) -> HResult {
+    // SAFETY: names the description was checked for.
+    let (name, ns) = unsafe { (name_of(f.local_name), name_of(f.ns)) };
+    // SAFETY: inside the struct, where the field was checked to be.
+    let slot = unsafe { base.add(f.offset as usize) };
+    // SAFETY: as this function's contract says.
+    let size = match unsafe { value_size(f) } {
+        Ok(n) => n,
+        Err(hr) => return hr,
+    };
+    let found =
+        attributes.iter().position(|a| Some(a.name.as_str()) == name && Some(a.ns.as_str()) == ns);
+    let Some(i) = found else {
+        if f.options & WS_FIELD_OPTIONAL != 0 {
+            // SAFETY: the field's own bytes of the struct.
+            unsafe { core::ptr::write_bytes(slot, 0, size) };
+            return S_OK;
+        }
+        reader.malformed(
+            error,
+            b"WsReadType",
+            "The attribute a required field is read from is not on the element.",
+        );
+        return WS_E_INVALID_FORMAT;
+    };
+    taken[i] = true;
+    let text = attributes[i].value.clone();
+    // SAFETY: the field's own bytes, of the size its type takes.
+    unsafe { write_scalar(reader, f.ws_type, &text, slot, heap, error) }
+}
+
+/// An element field, or the text field that is read from where the
+/// reader stands rather than from an element of its own. An element the
+/// document does not hold is zeroed when the field is optional and
+/// refused when it is not, and the reader stays where it was either way.
+///
+/// # Safety
+/// `base` is the struct's bytes and the field was checked against them.
+unsafe fn read_element_field(
+    reader: &mut Reader,
+    f: &WsFieldDescription,
+    base: *mut u8,
+    heap: *mut c_void,
+    error: *mut c_void,
+) -> HResult {
+    // SAFETY: inside the struct, where the field was checked to be.
+    let slot = unsafe { base.add(f.offset as usize) };
+    // SAFETY: as this function's contract says.
+    let size = match unsafe { value_size(f) } {
+        Ok(n) => n,
+        Err(hr) => return hr,
+    };
+    // A string is read as a pointer to itself on the heap, which is
+    // what the field holds; everything else is read into the field.
+    let option =
+        if f.ws_type == WS_WSZ_TYPE { WS_READ_REQUIRED_POINTER } else { WS_READ_REQUIRED_VALUE };
+    if f.mapping == WS_TEXT_FIELD_MAPPING {
+        // The text where the reader stands, which is the content
+        // mapping: nothing of the element is consumed.
+        return read_type(
+            reader,
+            true,
+            f.ws_type,
+            f.type_description,
+            option,
+            heap,
+            slot.cast::<c_void>(),
+            size as u32,
+            error,
+        );
+    }
+    let hr = reader.settle(error, b"WsReadType");
+    if hr != S_OK {
+        return hr;
+    }
+    // SAFETY: names the description was checked for.
+    let (name, ns) = unsafe { (name_of(f.local_name), name_of(f.ns)) };
+    let here = matches!(
+        &reader.node,
+        Some(Node::Start { ns: has_ns, name: has, .. })
+            if Some(has.as_str()) == name && Some(has_ns.as_str()) == ns
+    );
+    if !here {
+        if f.options & WS_FIELD_OPTIONAL != 0 {
+            // SAFETY: the field's own bytes of the struct.
+            unsafe { core::ptr::write_bytes(slot, 0, size) };
+            return S_OK;
+        }
+        reader.malformed(
+            error,
+            b"WsReadType",
+            "The element a required field is read from is not there.",
+        );
+        return WS_E_INVALID_FORMAT;
+    }
+    read_type(
+        reader,
+        false,
+        f.ws_type,
+        f.type_description,
+        option,
+        heap,
+        slot.cast::<c_void>(),
+        size as u32,
+        error,
+    )
+}
+
+/// A repeating element field: the wrapper element the description
+/// names, the items inside it read one after another onto the heap, and
+/// their count beside the array. A wrapper the document does not hold
+/// is zeroed when the field is optional and refused when it is not.
+///
+/// # Safety
+/// `base` is the struct's bytes and the field was checked against them.
+unsafe fn read_items(
+    reader: &mut Reader,
+    f: &WsFieldDescription,
+    base: *mut u8,
+    heap: *mut c_void,
+    error: *mut c_void,
+) -> HResult {
+    // SAFETY: inside the struct, where the field was checked to be.
+    let (slot, count_slot) =
+        unsafe { (base.add(f.offset as usize), base.add(f.count_offset as usize)) };
+    // SAFETY: as this function's contract says; an item is a scalar,
+    // since a struct field that is no element was refused.
+    let stride = match unsafe { value_size(f) } {
+        Ok(n) if n <= size_of::<u64>() => n,
+        Ok(_) => return E_INVALIDARG,
+        Err(hr) => return hr,
+    };
+    let hr = reader.settle(error, b"WsReadType");
+    if hr != S_OK {
+        return hr;
+    }
+    // SAFETY: names the description was checked for.
+    let (name, ns) = unsafe { (name_of(f.local_name), name_of(f.ns)) };
+    let here = matches!(
+        &reader.node,
+        Some(Node::Start { ns: has_ns, name: has, .. })
+            if Some(has.as_str()) == name && Some(has_ns.as_str()) == ns
+    );
+    if !here {
+        if f.options & WS_FIELD_OPTIONAL != 0 {
+            // SAFETY: the field's own bytes of the struct: the array's
+            // pointer and the count beside it.
+            unsafe {
+                core::ptr::write_bytes(slot, 0, size_of::<*mut c_void>());
+                core::ptr::write_bytes(count_slot, 0, size_of::<u32>());
+            }
+            return S_OK;
+        }
+        reader.malformed(
+            error,
+            b"WsReadType",
+            "The wrapper element a required list is read from is not there.",
+        );
+        return WS_E_INVALID_FORMAT;
+    }
+    // Past the wrapper's start tag, into the items.
+    reader.node = None;
+    let hr = reader.pull(error, b"WsReadType");
+    if hr != S_OK {
+        return hr;
+    }
+    // SAFETY: names the description was checked for.
+    let (item, item_ns) = unsafe { (name_of(f.item_local_name), name_of(f.item_ns)) };
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut count: u32 = 0;
+    loop {
+        let hr = reader.settle(error, b"WsReadType");
+        if hr != S_OK {
+            return hr;
+        }
+        let is_item = matches!(
+            &reader.node,
+            Some(Node::Start { ns: has_ns, name: has, .. })
+                if Some(has.as_str()) == item && Some(has_ns.as_str()) == item_ns
+        );
+        if !is_item {
+            break;
+        }
+        let mut one = [0u8; size_of::<u64>()];
+        let option = if f.ws_type == WS_WSZ_TYPE {
+            WS_READ_REQUIRED_POINTER
+        } else {
+            WS_READ_REQUIRED_VALUE
+        };
+        let hr = read_type(
+            reader,
+            false,
+            f.ws_type,
+            f.type_description,
+            option,
+            heap,
+            one.as_mut_ptr().cast::<c_void>(),
+            stride as u32,
+            error,
+        );
+        if hr != S_OK {
+            return hr;
+        }
+        bytes.extend_from_slice(&one[..stride]);
+        count += 1;
+    }
+    // The items on the heap, written where the list ended and before
+    // the wrapper's end tag is answered for, because that is what
+    // Windows leaves behind when what follows the items is no item of
+    // the list: the count it read, not what the caller had there. A
+    // list with no items in it still gets a block of the heap, because
+    // that is where Windows leaves the field pointing -- not at null.
+    // SAFETY: a handle this DLL gave out.
+    let Some(heap) = (unsafe { body::<Heap>(heap, HEAP, b"WsReadType") }) else {
+        return E_INVALIDARG;
+    };
+    let Some(block) = heap.alloc(bytes.len().max(1)) else {
+        fail(error, b"WsReadType", "The heap has no room for the list.");
+        return WS_E_QUOTA_EXCEEDED;
+    };
+    // SAFETY: `block` is at least as long as the items; the slots are
+    // the field's own bytes of the struct.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), block, bytes.len());
+        slot.cast::<*mut u8>().write_unaligned(block);
+        count_slot.cast::<u32>().write_unaligned(count);
+    }
+    // The wrapper's end tag closes the list; anything else inside it is
+    // no item of the list.
+    if !matches!(reader.node, Some(Node::End)) {
+        reader.malformed(
+            error,
+            b"WsReadType",
+            "The wrapper element holds something that is no item of the list.",
+        );
+        return WS_E_INVALID_FORMAT;
+    }
+    reader.node = None;
+    reader.pull(error, b"WsReadType")
+}
+
+/// A struct read from the element the reader is on -- or, with the
+/// content mapping, from inside it -- field by field in the order the
+/// description names them, which is the order the document has to hold
+/// them in. The attribute fields come first, because they are read from
+/// the start tag that the fields after them read past; an attribute
+/// field after one of those is refused as a document that does not fit
+/// the description, which is what Windows answers rather than a bad
+/// argument.
+///
+/// Nothing zeroes the struct first: Windows writes it field by field
+/// and leaves the rest alone, so what a failed read leaves behind is
+/// what the caller had there, and an absent optional field is the only
+/// one written as zeros.
+#[allow(clippy::too_many_arguments)]
+fn read_struct(
+    reader: &mut Reader,
+    content: bool,
+    desc: *const WsStructDescription,
+    read_option: u32,
+    heap: *mut c_void,
+    value: *mut c_void,
+    value_size: u32,
+    error: *mut c_void,
+) -> HResult {
+    if desc.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's WS_STRUCT_DESCRIPTION, which is what the
+    // type description of a WS_STRUCT_TYPE is.
+    let desc = unsafe { &*desc };
+    let size = desc.size as usize;
+    let count = desc.field_count as usize;
+    if count != 0 && desc.fields.is_null() {
+        return E_INVALIDARG;
+    }
+    if !desc.parent_type.is_null() || desc.sub_type_count != 0 {
+        record(b"WsReadType", b"a struct with a parent or sub types", NOT_IMPLEMENTED, 0);
+        return WS_E_NOT_SUPPORTED;
+    }
+    let known = WS_STRUCT_IGNORE_TRAILING_ELEMENT_CONTENT | WS_STRUCT_IGNORE_UNHANDLED_ATTRIBUTES;
+    if desc.struct_options & !known != 0 {
+        let rest = u64::from(desc.struct_options & !known);
+        record(b"WsReadType", b"a struct option", NOT_IMPLEMENTED, rest);
+        return WS_E_NOT_SUPPORTED;
+    }
+    // Every field's description before anything is read, because a
+    // description the reader cannot follow is answered without the
+    // document being touched at all -- the order of the fields
+    // included, which is why nothing of the struct is written when the
+    // attribute fields do not come first.
+    let mut past_attributes = false;
+    for i in 0..count {
+        // SAFETY: `i` is below the count, and the array is the
+        // caller's array of that many pointers.
+        let Some(f) = (unsafe { field_at(desc, i) }) else {
+            return E_INVALIDARG;
+        };
+        if f.mapping == WS_ATTRIBUTE_FIELD_MAPPING {
+            if past_attributes {
+                // The attributes are on the start tag, which the fields
+                // read from the content read past, so a struct the
+                // reader could fill cannot name them in this order.
+                // Windows answers with a format error rather than the
+                // bad argument the other description errors are, and
+                // the reader is not faulted: nothing has been read.
+                fail(
+                    error,
+                    b"WsReadType",
+                    "An attribute field follows a field read from the element's content.",
+                );
+                return WS_E_INVALID_FORMAT;
+            }
+        } else {
+            past_attributes = true;
+        }
+        // SAFETY: the names and the nested description are the caller's.
+        let hr = unsafe { check_field(f, size) };
+        if hr != S_OK {
+            return hr;
+        }
+    }
+    // Where the struct's bytes go: the caller's buffer, or a block of
+    // the heap whose pointer is written into it.
+    let base = match read_option {
+        WS_READ_REQUIRED_VALUE => {
+            if value_size as usize != size {
+                return E_INVALIDARG;
+            }
+            value.cast::<u8>()
+        }
+        WS_READ_REQUIRED_POINTER => {
+            if value_size as usize != size_of::<*mut c_void>() {
+                return E_INVALIDARG;
+            }
             // SAFETY: a handle this DLL gave out.
             let Some(heap) = (unsafe { body::<Heap>(heap, HEAP, b"WsReadType") }) else {
                 return E_INVALIDARG;
             };
-            let mut units: Vec<u16> = text.encode_utf16().collect();
-            units.push(0);
-            let bytes = units.len() * size_of::<u16>();
-            let Some(block) = heap.alloc(bytes) else {
-                fail(error, b"WsReadType", "The heap has no room for the string.");
+            let Some(block) = heap.alloc(size.max(1)) else {
+                fail(error, b"WsReadType", "The heap has no room for the struct.");
                 return WS_E_QUOTA_EXCEEDED;
             };
-            // SAFETY: `block` is `bytes` bytes of the heap, which is as
-            // long as the string's units; the heap's blocks are blocks
-            // of 8-byte words, so it is aligned for u16 as well.
-            unsafe {
-                core::ptr::copy_nonoverlapping(units.as_ptr().cast::<u8>(), block, bytes);
-                value.cast::<*mut u16>().write_unaligned(block.cast::<u16>());
-            }
-            S_OK
+            // SAFETY: the caller's buffer, of the pointer it said.
+            unsafe { value.cast::<*mut u8>().write_unaligned(block) };
+            block
         }
         _ => {
-            let digits = text.trim();
-            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                reader.malformed(error, b"WsReadType", "The element does not hold a number.");
+            record(b"WsReadType", b"a struct read option", NOT_IMPLEMENTED, u64::from(read_option));
+            return WS_E_NOT_SUPPORTED;
+        }
+    };
+    // The element the struct is read from. Its attributes are on the
+    // start tag, so the reader keeps them while the attribute fields
+    // are read and the tag is still there.
+    let mut attributes: Vec<Attr> = Vec::new();
+    if !content {
+        let hr = reader.settle(error, b"WsReadType");
+        if hr != S_OK {
+            return hr;
+        }
+        match &reader.node {
+            Some(Node::Start { attrs, .. }) => attributes = attrs.clone(),
+            _ => {
+                reader.malformed(error, b"WsReadType", "A start element was expected.");
                 return WS_E_INVALID_FORMAT;
             }
-            let Ok(number) = digits.parse::<u32>() else {
-                reader.malformed(error, b"WsReadType", "The number does not fit in 32 bits.");
-                return WS_E_NUMERIC_OVERFLOW;
-            };
-            // SAFETY: the caller's buffer, of the four bytes it said.
-            unsafe { value.cast::<u32>().write_unaligned(number) };
-            S_OK
         }
     }
+    let mut taken: Vec<bool> = Vec::new();
+    taken.resize(attributes.len(), false);
+    // Whether the reader is past the start tag, inside the content.
+    let mut inside = content;
+    for i in 0..count {
+        // SAFETY: as above, and every field was read once already.
+        let Some(f) = (unsafe { field_at(desc, i) }) else {
+            return E_INVALIDARG;
+        };
+        if f.mapping == WS_ATTRIBUTE_FIELD_MAPPING {
+            // The reader is still on the start tag the attributes are
+            // on: the order of the fields was answered for above.
+            // SAFETY: `base` is the struct's bytes and the field was
+            // checked against its size.
+            let hr =
+                unsafe { read_attribute(reader, f, &attributes, &mut taken, base, heap, error) };
+            if hr != S_OK {
+                return hr;
+            }
+            continue;
+        }
+        if !inside {
+            let hr = unhandled(reader, desc.struct_options, &attributes, &taken, error);
+            if hr != S_OK {
+                return hr;
+            }
+            // Past the start tag, into the content the rest of the
+            // fields are read from.
+            reader.node = None;
+            let hr = reader.pull(error, b"WsReadType");
+            if hr != S_OK {
+                return hr;
+            }
+            inside = true;
+        }
+        // SAFETY: `base` is the struct's bytes and the field was
+        // checked against its size.
+        let hr = unsafe {
+            if f.mapping == WS_REPEATING_ELEMENT_FIELD_MAPPING {
+                read_items(reader, f, base, heap, error)
+            } else {
+                read_element_field(reader, f, base, heap, error)
+            }
+        };
+        if hr != S_OK {
+            return hr;
+        }
+    }
+    // A struct of attribute fields alone, or of no fields at all: its
+    // attributes are still answered for, and its start tag still read
+    // past.
+    if !inside {
+        let hr = unhandled(reader, desc.struct_options, &attributes, &taken, error);
+        if hr != S_OK {
+            return hr;
+        }
+        reader.node = None;
+        let hr = reader.pull(error, b"WsReadType");
+        if hr != S_OK {
+            return hr;
+        }
+    }
+    let hr = reader.settle(error, b"WsReadType");
+    if hr != S_OK {
+        return hr;
+    }
+    // What is left inside the element after the last field.
+    if !matches!(reader.node, Some(Node::End)) {
+        if desc.struct_options & WS_STRUCT_IGNORE_TRAILING_ELEMENT_CONTENT == 0 {
+            reader.malformed(
+                error,
+                b"WsReadType",
+                "The element holds more than the struct's fields.",
+            );
+            return WS_E_INVALID_FORMAT;
+        }
+        // To the element's own end tag, over whatever is in between,
+        // elements and all.
+        let mut depth = 0usize;
+        while !(depth == 0 && matches!(reader.node, Some(Node::End))) {
+            match &reader.node {
+                Some(Node::Start { .. }) => depth += 1,
+                Some(Node::End) => depth -= 1,
+                Some(Node::Text(_)) => {}
+                _ => {
+                    reader.malformed(error, b"WsReadType", "The element's end tag is not there.");
+                    return WS_E_INVALID_FORMAT;
+                }
+            }
+            reader.node = None;
+            let hr = reader.pull(error, b"WsReadType");
+            if hr != S_OK {
+                return hr;
+            }
+        }
+    }
+    // The element mapping takes the end tag as well and stands on the
+    // node after it; the content mapping leaves it for the caller's own
+    // WsReadEndElement, which is where Windows leaves it.
+    if !content {
+        reader.node = None;
+        let hr = reader.pull(error, b"WsReadType");
+        if hr != S_OK {
+            return hr;
+        }
+    }
+    S_OK
 }
