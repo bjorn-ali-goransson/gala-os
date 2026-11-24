@@ -378,6 +378,32 @@ int main(void)
 	say_epoll("a one-shot entry, ready", ewait(fresh, ev, 8, 0), ev);
 	say_epoll("  then disabled", ewait(fresh, ev, 8, 0), ev);
 	run_changer(fresh, q[0], 1, ev, "epoll_wait(-1), the entry re-armed by MOD meanwhile");
+
+	/* A writer edge-triggered on a unix stream socket: its next EPOLLOUT
+	 * is the peer reading, not anything arriving for the writer (the X
+	 * server waits so for a client's room, ospoll's edge trigger). */
+	say_text("-- EPOLLET|EPOLLOUT on a unix stream socket");
+	int u[2];
+	sys4(SYS_socketpair, 1 /* AF_UNIX */, SOCK_STREAM_ | 04000 /* SOCK_NONBLOCK */, 0, u);
+	i64 uep = sys1(SYS_epoll_create1, 0);
+	say_ret("ADD a fresh end (IN|OUT|ET), data 11", ctl(uep, EPOLL_CTL_ADD, u[0], EPOLLIN | EPOLLOUT | EPOLLET, 11));
+	say_epoll("epoll_wait(0): writable", ewait(uep, ev, 8, 0), ev);
+	say_epoll("  again (no new edge)", ewait(uep, ev, 8, 0), ev);
+	static char fill[4096];
+	int full = 0;
+	for (int i = 0; i < 100000 && !full; i++)
+		full = sys3(SYS_write, u[0], fill, sizeof fill) == -11 /* EAGAIN */;
+	say_bool("written until EAGAIN", full);
+	say_epoll("epoll_wait(0): full, nothing", ewait(uep, ev, 8, 0), ev);
+	int drained = 0;
+	for (int i = 0; i < 100000 && !drained; i++)
+		drained = sys3(SYS_read, u[1], fill, sizeof fill) == -11;
+	say_bool("the peer read it all", drained);
+	say_epoll("epoll_wait(0): writable again (the peer's read)", ewait(uep, ev, 8, 0), ev);
+	say_epoll("  again (no new edge)", ewait(uep, ev, 8, 0), ev);
+	sys1(SYS_close, uep);
+	sys1(SYS_close, u[0]);
+	sys1(SYS_close, u[1]);
 	say_text("epoll_test: ok");
 	return 0;
 }

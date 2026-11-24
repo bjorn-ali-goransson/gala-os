@@ -469,18 +469,37 @@ pub fn epoll_pwait2(
 }
 
 /// The state dump's lines for process `pid`'s epoll fd `fd`.
+///
+/// Each entry with its object as a look finds it now (readiness and
+/// events count, as `collect` does): an entry whose object is ready with a
+/// count other than `seen`, in a set a thread waits on, is a wakeup that
+/// was lost.
 pub fn dump(pid: u64, fd: usize, ep: &Epoll) {
+    // Looked at before the entries' lock, as `collect` does.
+    let looks = ep.snapshot().ok().and_then(|objects| {
+        look_once(&objects, |object| {
+            (u32::from(poll::readiness(object)), poll::events_count(object))
+        })
+        .ok()
+    });
     let entries = ep.entries.lock();
     for e in entries.iter() {
+        let now = looks
+            .as_ref()
+            .and_then(|l| l.iter().find(|l| l.0 == e.fd && l.1 == e.desc))
+            .map(|l| l.2);
+        // No look (no memory for it): ready 0, count u64::MAX.
+        let (ready, count) = now.unwrap_or((0, u64::MAX));
         crate::info!(
-            "lx: pid {pid} epoll fd {fd}: fd {} events {:#x} data {:#x} seen {:?} disabled {}",
+            "lx: pid {pid} epoll fd {fd}: fd {} events {:#x} data {:#x} seen {:?} disabled {}; now ready {ready:#x} count {count}",
             e.fd,
             e.interest.events,
             e.interest.data,
             e.interest.seen,
-            e.interest.disabled
+            e.interest.disabled,
         );
     }
+    crate::info!("lx: pid {pid} epoll fd {fd}: {} waiting on the set", ep.waiters.len());
 }
 
 #[cfg(test)]

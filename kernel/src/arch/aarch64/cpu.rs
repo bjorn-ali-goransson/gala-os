@@ -17,7 +17,7 @@ pub const PMR_OFF: u64 = 0xa0;
 /// ICC_PMR_EL1 with interrupts on: every priority the kernel uses.
 pub const PMR_ON: u64 = 0xf0;
 
-fn pmr() -> u64 {
+pub(super) fn pmr() -> u64 {
     let v: u64;
     // SAFETY: reads ICC_PMR_EL1 (the system-register interface is on
     // since the entry).
@@ -33,6 +33,20 @@ pub(super) fn pmr_off() {
     // SAFETY: writes ICC_PMR_EL1; no memory is touched.
     unsafe {
         core::arch::asm!("msr S3_0_C4_C6_0, {}", in(reg) PMR_OFF, options(nomem, nostack, preserves_flags))
+    };
+}
+
+/// Puts back a mask `pmr` read: an NMI's exit (`gic::dispatch`), whose
+/// handler may have taken an `IrqMutex` -- which writes `PMR_OFF` and,
+/// with PSTATE.I set inside the NMI, records interrupts as off and so
+/// never writes `PMR_ON` back. The exception return restores PSTATE, not
+/// this mask: an NMI that interrupted user mode would otherwise return
+/// to it with every interrupt but the NMI masked, for good (the CPU's
+/// ticks stopped; `statedump_test`'s check).
+pub(super) fn set_pmr(value: u64) {
+    // SAFETY: writes ICC_PMR_EL1 (a value read from it), then a barrier.
+    unsafe {
+        core::arch::asm!("msr S3_0_C4_C6_0, {}", "dsb sy", in(reg) value, options(nomem, nostack, preserves_flags))
     };
 }
 

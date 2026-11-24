@@ -125,8 +125,9 @@ fn ps2_setup() -> Option<(ps2::I8042, usize)> {
         return None;
     }
     crate::info!(
-        "input: bytes read at {:#x} (keyboard, mouse: two u64), mouse packets of {} bytes",
+        "input: bytes read at {:#x} (physical {:#x}; keyboard, mouse: two u64), mouse packets of {} bytes",
         core::ptr::addr_of!(BYTES_READ) as usize,
+        physical(core::ptr::addr_of!(BYTES_READ) as usize),
         if found.wheel { 4 } else { 3 }
     );
     Some((controller, if found.wheel { 4 } else { 3 }))
@@ -153,11 +154,24 @@ fn virtio_setup() -> Vec<virtio::VirtioInput> {
     }
     if !driven.is_empty() {
         crate::info!(
-            "input: virtio events read at {:#x} (keyboard, mouse: two u64)",
-            core::ptr::addr_of!(EVENTS_READ) as usize
+            "input: virtio events read at {:#x} (physical {:#x}; keyboard, mouse: two u64)",
+            core::ptr::addr_of!(EVENTS_READ) as usize,
+            physical(core::ptr::addr_of!(EVENTS_READ) as usize)
         );
     }
     driven
+}
+
+/// The physical address of `at`, a static in the kernel image (loaded
+/// physically contiguous at the base Limine, or the handover record,
+/// gave): what xtask reads the counters at. It reads them with the
+/// monitor's `pmemsave`, which needs no vCPU: `x` and `xp` synchronize
+/// CPU 0's state first (`run_on_cpu`), and that deadlocks QEMU while CPU
+/// 0 is in a virtio-gpu reset, which waits on the main loop the monitor
+/// runs in (WORKFLOW "Screen checks"). 0 without the load address.
+fn physical(at: usize) -> u64 {
+    crate::boot::early_addresses()
+        .map_or(0, |(_, k)| (at as u64).wrapping_sub(k.virtual_base).wrapping_add(k.physical_base))
 }
 
 fn input_thread(_: usize) {

@@ -9,7 +9,11 @@
 //! ten to thirty times its own length. The bytes of a line are held in
 //! [`Line`] until its newline and then written in one `rep outsb`
 //! (`port::Port::write_all`), one exit for the line: what the stream costs
-//! is now its lines and not its bytes. OBSERVABILITY "What it costs".
+//! is now its lines and not its bytes. Under KVM string I/O still exits
+//! once a byte, so a machine with a virtio console takes the lines by DMA
+//! instead (`crate::virtio_console`), and the port carries them only
+//! until that device starts or after it is given up on. OBSERVABILITY
+//! "What the stream costs".
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,8 +33,8 @@ pub static DEBUGCON: IrqMutex<DebugCon> = IrqMutex::new(DebugCon {
     line: Line::new(),
 });
 
-/// How many writes of the port those lines took, for the summary: the
-/// ratio to the events written is what the buffer is for.
+/// How many writes of the port those lines took, for the summary (the
+/// lines the virtio console took are counted there).
 static WRITES: AtomicU64 = AtomicU64::new(0);
 
 /// The number of writes the device has taken.
@@ -40,12 +44,23 @@ pub fn writes() -> u64 {
 
 /// Writes what is held of a line that has no newline yet, so that a run's
 /// last bytes reach the host (the summary at the end of a run calls this).
+/// Then waits for the virtio console to take what it holds: QEMU's exit
+/// device ends the run at once.
 pub fn flush() {
-    let DebugCon { port, line } = &mut *DEBUGCON.lock();
-    line.flush(&mut |bytes| {
+    {
+        let DebugCon { port, line } = &mut *DEBUGCON.lock();
+        line.flush(&mut |bytes| out(port, bytes));
+    }
+    crate::virtio_console::drain();
+}
+
+/// Writes a line (or a piece of one): to the virtio console when the
+/// machine has one, else to the port.
+fn out(port: &mut Port<u8>, bytes: &[u8]) {
+    if !crate::virtio_console::write(bytes) {
         port.write_all(bytes);
         WRITES.fetch_add(1, Ordering::Relaxed);
-    });
+    }
 }
 
 /// The bytes of a line, held until the line ends. Knows nothing of the
@@ -106,10 +121,7 @@ pub struct DebugCon {
 impl core::fmt::Write for DebugCon {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let Self { port, line } = self;
-        line.write(s, &mut |bytes| {
-            port.write_all(bytes);
-            WRITES.fetch_add(1, Ordering::Relaxed);
-        });
+        line.write(s, &mut |bytes| out(port, bytes));
         Ok(())
     }
 }

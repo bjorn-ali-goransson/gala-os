@@ -2,10 +2,14 @@
 //! file written through Arm semihosting (SYS_OPEN, SYS_WRITE; QEMU with
 //! `-semihosting-config enable=on`, which xtask passes on aarch64, and
 //! the run's exit already uses: `qemu`). x86-64's is QEMU's port 0xe9;
-//! QEMU's `virt` machine has no such device. The file is the one the
-//! kernel command line names (`events_file=<host path>`, which xtask
-//! gives an aarch64 image), opened at the first write; without that
-//! argument nothing is written, so a machine with no semihosting host
+//! QEMU's `virt` machine has no such device. The `events_host` flag on
+//! the kernel command line (which xtask gives an aarch64 test image)
+//! says a semihosting host takes the stream; the host names the file,
+//! per run, as its semihosting command line (SYS_GET_CMDLINE; xtask's
+//! `-semihosting-config ...,arg=<path>`), as x86-64's host names its
+//! device's file. An image does not carry the path: its copies (an
+//! `XTASK_REPEAT` boot's) would all write the first one's file. Without
+//! the flag nothing is written, so a machine with no semihosting host
 //! never traps on it.
 
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -14,7 +18,7 @@ use crate::sync::IrqMutex;
 
 pub static DEBUGCON: IrqMutex<DebugCon> = IrqMutex::new(DebugCon);
 
-/// The file's name (NUL-terminated) and its length, from the command line.
+/// The file's name (NUL-terminated) and its length, from the host.
 static PATH: IrqMutex<([u8; 512], usize)> = IrqMutex::new(([0; 512], 0));
 /// The semihosting handle: NONE (no file named), OPEN_FAILED, or one.
 static HANDLE: AtomicI64 = AtomicI64::new(NONE);
@@ -26,26 +30,61 @@ const UNOPENED: i64 = -3;
 /// mode 5 ("wb": create or truncate, write, binary).
 const SYS_OPEN: u64 = 0x01;
 const SYS_WRITE: u64 = 0x05;
+const SYS_GET_CMDLINE: u64 = 0x15;
 const MODE_WRITE_BINARY: u64 = 5;
 
-/// Takes the event file's name from the command line (`events_file=`).
+/// Asks the host for the event file's name when the command line says a
+/// semihosting host takes the stream (`events_host`), and says on the
+/// serial log which file that is (or why there is none): the host checks
+/// the stream it reads is the one the kernel wrote.
 pub fn configure(cmdline: &crate::cmdline::Cmdline<'_>) {
-    let Some(path) = cmdline.value("events_file") else { return };
-    let mut p = PATH.lock();
-    if path.is_empty() || path.len() >= p.0.len() {
+    if !cmdline.flag("events_host") {
         return;
     }
-    p.0[..path.len()].copy_from_slice(path.as_bytes());
-    p.0[path.len()] = 0;
-    p.1 = path.len();
+    let mut p = PATH.lock();
+    // SYS_GET_CMDLINE's block: the buffer and its size in, the length
+    // written out (without the NUL it adds); the room for the NUL is kept.
+    let mut block = [p.0.as_mut_ptr() as u64, (p.0.len() - 1) as u64];
+    let failed = semihost_mut(SYS_GET_CMDLINE, &mut block) != 0;
+    let len = block[1] as usize;
+    if failed || len == 0 || len >= p.0.len() {
+        crate::kprintln!(
+            "events: no file: the semihosting host named none (SYS_GET_CMDLINE {}, {len} bytes)",
+            if failed { "failed" } else { "answered" }
+        );
+        return;
+    }
+    p.0[len] = 0;
+    p.1 = len;
+    match core::str::from_utf8(&p.0[..len]) {
+        Ok(path) => crate::kprintln!("events: file {path} (named by the semihosting host)"),
+        Err(_) => crate::kprintln!("events: file of {len} bytes, not UTF-8"),
+    }
     HANDLE.store(UNOPENED, Ordering::Release);
+}
+
+/// A semihosting call whose parameter block the host writes.
+fn semihost_mut(op: u64, block: &mut [u64]) -> u64 {
+    let result: u64;
+    // SAFETY: QEMU's semihosting reads and writes the block (and what it
+    // points at, a buffer the caller owns); only called once the command
+    // line said a semihosting host is there.
+    unsafe {
+        core::arch::asm!(
+            "hlt #0xf000",
+            inout("x0") op => result,
+            in("x1") block.as_mut_ptr(),
+            options(nostack, preserves_flags)
+        )
+    };
+    result
 }
 
 /// A semihosting call: `op` with its parameter block.
 fn semihost(op: u64, block: &[u64]) -> u64 {
     let result: u64;
     // SAFETY: QEMU's semihosting reads the block (and what it points at);
-    // only called once a file was named, so a semihosting host is there.
+    // only called once the host named a file, so a semihosting host is there.
     unsafe {
         core::arch::asm!(
             "hlt #0xf000",
