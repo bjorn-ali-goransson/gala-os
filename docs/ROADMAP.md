@@ -8362,6 +8362,17 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
 
+- **`image_test` embeds the build's `testdll.dll`** (`include_bytes!` of
+  `target/<target>/release/testdll.dll`, for x64 and for ARM64), which
+  WORKFLOW "Reproducible user binaries" forbids of anything under
+  `target/`: the program's bytes then change with that DLL and with
+  whatever an earlier build left there, which is how an exported
+  `user/bin/arm64/image_test.exe` came to differ from a cold build's.
+  The build order carries it for now (`build_arm64_programs` builds the
+  DLLs first, as the x64 pass does), so a cold tree builds and two
+  trees agree. Structural fix: image_test makes its own test DLL, as
+  `bench` does since it embedded kernel32.dll. Item HS.
+
 - **`d3d11_test`'s screen check expects red and blue swapped**
   (`0x336699` reaches the screen as `0x996633`): DXVK asks for a
   `VK_FORMAT_R8G8B8A8_UNORM` swapchain for any 8-bit UNORM back buffer,

@@ -2279,10 +2279,14 @@ its program through LdrInitializeThunk (`arm_startup_test`).
   cannot do on ARM64 (x86 code: WOW64, straddle_test's x86 instructions)
   is x64's part of the test, or the scenario is left out of ARM64_TWINS
   with the reason beside the list.
-- `build_kernel_aarch64` builds USER_DLLS (but NOT_ARM64_DLLS), then
-  `arm64_programs()`, for ARM64; the aarch64 kernel's images carry those
-  in place of the x64 builds. A program that embeds a DLL embeds its own
-  machine's (`image_test`: `target/<target>/release/testdll.dll`).
+- `build_arm64_programs` builds USER_DLLS (but NOT_ARM64_DLLS) and
+  then `arm64_programs()`, so every caller gets the DLLs before the
+  programs that embed them -- `export-tests` builds the ARM64 programs
+  without the aarch64 kernel, and on a tree that had no ARM64 DLLs yet
+  it failed outright. The aarch64 kernel's images carry those builds in
+  place of the x64 ones. A program that embeds a DLL embeds its own
+  machine's (`image_test`: `target/<target>/release/testdll.dll`, which
+  the rule below forbids and ROADMAP's stopgaps carry).
 - `export-tests` copies them to `user/bin/arm64/` (CI checks they match
   their sources, as user/bin's); `run-all.ps1` runs only the x64
   programs beside it, an ARM64 Windows runs these.
