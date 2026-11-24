@@ -363,17 +363,42 @@ pub fn llvm_symbolize_kernel(elf: &std::path::Path, rips: &[u64]) -> Vec<Option<
     symbolize_at(elf, 0, rips)
 }
 
+/// What a host with no llvm-symbolizer is told, the first time one is
+/// wanted and `None` after that (one run, one line).
+///
+/// Without it every frame comes back as a bare address, which on the
+/// page is indistinguishable from a capture that walked no stack: the
+/// silent version of this spent a session reading unnamed stacks and
+/// doubting the capture. It is not in rustup's `llvm-tools`, which
+/// ships llvm-ar, llvm-nm and llvm-objdump and not this one; it comes
+/// with LLVM itself.
+fn no_symbolizer_note() -> Option<&'static str> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SAID: AtomicBool = AtomicBool::new(false);
+    (!SAID.swap(true, Ordering::Relaxed)).then_some(
+        "xtask: profile: no llvm-symbolizer could be run: every frame below is an address \
+         with no name. It is not part of rustup's llvm-tools component; it comes with LLVM \
+         (`apt install llvm`).",
+    )
+}
+
 /// llvm-symbolizer on `obj` for `base + offset` of each offset.
 fn symbolize_at(obj: &std::path::Path, base: u64, offsets: &[u64]) -> Vec<Option<String>> {
     let none = || vec![None; offsets.len()];
     let input: String = offsets.iter().map(|o| format!("{:#x}\n", base.wrapping_add(*o))).collect();
-    let Ok(mut child) = std::process::Command::new("llvm-symbolizer")
+    let spawned = std::process::Command::new("llvm-symbolizer")
         .arg(format!("--obj={}", obj.display()))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .spawn()
-    else {
-        return none();
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => {
+            if let Some(note) = no_symbolizer_note() {
+                eprintln!("{note} ({e})");
+            }
+            return none();
+        }
     };
     // Written from a thread of its own while the answers are read here:
     // the symbolizer answers as it reads, and a pipe holds only so much,
@@ -539,5 +564,21 @@ mod tests {
         let exe = std::env::current_exe().expect("the test binary");
         let rips: Vec<u64> = (0..50_000u64).map(|k| 0x1000 + 16 * k).collect();
         assert_eq!(symbolize_at(&exe, 0, &rips).len(), rips.len());
+    }
+
+    #[test]
+    fn a_host_without_the_symbolizer_is_told_once() {
+        // The note is a run's one line, not one per module: a stack of
+        // 30 frames from 8 modules would otherwise say it 8 times. The
+        // state is the process's, and another test in this binary may
+        // have taken the note already, so what is asserted is the
+        // invariant that holds whoever asked first -- two calls in a
+        // row are never both the note.
+        let said = no_symbolizer_note();
+        assert!(no_symbolizer_note().is_none(), "the note is said once a run");
+        if let Some(note) = said {
+            assert!(note.contains("llvm-symbolizer"), "{note}");
+            assert!(note.contains("llvm-tools"), "it says where the tool is not: {note}");
+        }
     }
 }

@@ -946,7 +946,16 @@ Out-of-space errors on the way get the same hint.
   scheduler's lock is free), then writes the crash record.
 - xtask symbolizes backtraces with `llvm-addr2line`/`addr2line`
   whenever it shows a failed boot's log; `cargo xtask symbolize <log>
-  [--release]` does it for any log.
+  [--release]` does it for any log. The sampling profiler and a
+  user-mode module's frames go through `llvm-symbolizer` instead, which
+  is a different tool and a different package: it is **not** part of
+  rustup's `llvm-tools` component (that ships llvm-ar, llvm-nm and
+  llvm-objdump), and a host without it has to install LLVM (`apt
+  install llvm`). Without it every frame is an address and no name,
+  which on the page cannot be told from a capture that walked no stack,
+  so the first frame that wants it says so in one line
+  (`xtask: profile: no llvm-symbolizer could be run`) rather than
+  letting the run look empty.
 - Fault injection's `failtrace` prints a backtrace at each injected
   failure, so the code that mishandled it is named even when the
   symptom comes much later (WORKFLOW "Fault injection").
