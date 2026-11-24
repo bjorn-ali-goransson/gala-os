@@ -351,8 +351,13 @@ pub fn dispatch(frame: &mut TrapFrame) -> Taken {
         core::arch::asm!("msr S3_0_C12_C12_1, {}", in(reg) iar, options(nomem, nostack, preserves_flags))
     };
     if intid == u64::from(NMI_SGI) {
-        // PSTATE.I stays set (the vector's): no NMI within an NMI.
+        // PSTATE.I stays set (the vector's): no NMI within an NMI. The
+        // handler may take an `IrqMutex` (the state dump's console),
+        // which leaves the mask "off": put back the interrupted code's
+        // (`cpu::set_pmr`).
+        let mask = super::cpu::pmr();
         super::interrupts::nmi(frame);
+        super::cpu::set_pmr(mask);
         return Taken::Nmi;
     }
     if intid == u64::from(CONSOLE.load(Ordering::Relaxed)) && intid != 0 {

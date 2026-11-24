@@ -28,6 +28,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/cmdline.rs        kernel command line parsing (host-tested)
   src/selftest.rs       in-kernel tests run at boot with `selftest`
   src/events.rs         the JSON event stream (`events=`)
+  src/virtio_console.rs the stream's transport by DMA ("The event stream's transport")
   src/flight.rs         flight recorder, watchdogs; statedump.rs: dumps on NMI
   src/failpoint.rs      fault injection (`failpoint=`); sim.rs: deterministic simulation
   src/clockctl.rs       clock control (`clock=`); replay.rs: record/replay
@@ -56,7 +57,9 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/lx/machine/       Linux's ABI on this architecture (x86_64.rs: registers, signal frame)
   src/hosted/           gala-um's platform (feature `hosted`; memfd, host threads, signals) [unsafe allowed]
 user/                   freestanding Windows programs and DLLs (x86_64-pc-windows-msvc)
-  ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
+  ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access, and the
+                        panic handler (`<program>: panic at <file>:<line>:<col>: <message>`,
+                        then exit 0xC0000409)
                         (x64.rs; x86.rs for 32-bit programs, "Plan: WOW64")
   wow64/                wow64.dll, the 64-bit side of 32-bit processes
   <name>_test/          test programs (one per feature)
@@ -332,7 +335,15 @@ faults, its exit).
   on and set "off" first thing. The NMI is SGI 1 (`gic::NMI_SGI`,
   `smp::send_nmi`), taken with PSTATE.I set (no nesting) and handed to
   `interrupts::nmi` (the state dump's and the profiler's handler, kept
-  in an atomic: it may interrupt any lock's holder). An ordinary IRQ is
+  in an atomic: it may interrupt any lock's holder). **Invariant: an NMI
+  leaves the mask as it found it**: `gic::dispatch` reads ICC_PMR_EL1
+  before the handler and writes it back after (`cpu::set_pmr`). The
+  exception return restores PSTATE, not this mask, and an `IrqMutex`
+  taken inside the NMI (the dump's console) writes "off" and, PSTATE.I
+  being set there, never writes "on" back: an NMI that interrupted user
+  mode returned to it with the CPU's ticks stopped for good
+  (`arm_statedump_test`'s spinner; the dump's threads part checks that
+  every CPU ticks after it). An ordinary IRQ is
   taken only with interrupts on; its handler runs with them off by
   priority and PSTATE.I clear, so an NMI reaches it too; its exit sets
   PSTATE.I and the mask back to "on" before the `eret`. A thread
@@ -380,9 +391,13 @@ faults, its exit).
   QEMU with `-semihosting-config enable=on`), with x86-64's statuses (33
   success, 35 failure). There is no ISA bus: the debug console (the event
   stream) is a host file written through semihosting too (SYS_OPEN,
-  SYS_WRITE; `debugcon`): the one the command line names
-  (`events_file=<host path>`, which xtask gives every aarch64 image: its
-  `<image>.events.jsonl`), opened at the first write, nothing without it;
+  SYS_WRITE; `debugcon`): with `events_host` on the command line (which
+  xtask gives every aarch64 test image) the kernel asks the host for the
+  file's name (SYS_GET_CMDLINE: the run's `-semihosting-config
+  ...,arg=<path>`, its `<image>.events.jsonl`), says it on the serial log
+  (`events: file <path>`), and opens it at the first write; nothing
+  without the flag. The image carries no path, so each copy of an image
+  (an `XTASK_REPEAT` boot's) writes its own file;
   no phase port (`bootphase` marks are no-ops). No PS/2 controller on
   `virt`: the keyboard and mouse are virtio-input devices (xtask gives
   every aarch64 machine `virtio-keyboard-pci` and `virtio-mouse-pci`;
@@ -593,7 +608,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `wayland=on`, `wayland=trace`, `wayland=off` | the Wayland server at boot, listening on `/run/user/<uid>/wayland-0` ("Linux applications on the desktop (Wayland)"): on by default where the desktop has a shell (not the server profile; a screen or `presenter=`), off where desktops are bare; `on` starts it anyway, `off` never; `trace` also logs every request and event as `WAYLAND_DEBUG=1` prints them |
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in\|out\|note: ...`) |
 | `trace` | log every system call (arguments, status) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line). The console holds a line and writes it to port 0xe9 in one `rep outsb` (`arch::x86_64::debugcon`, `Port::write_all`), aarch64 one semihosting write a piece of a line; what the stream costs is the crossing and not the device, about 12 us a byte, which is what bounds how much of a run can be written (OBSERVABILITY "What the stream costs") |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line). The console holds a line and hands it to the virtio console when the machine has one (x86-64; "The event stream's transport"), else writes it to port 0xe9 in one `rep outsb` (`arch::x86_64::debugcon`, `Port::write_all`), aarch64 one semihosting write a piece of a line; through the port what the stream costs is the crossing, about 12 us a byte under KVM (OBSERVABILITY "What the stream costs") |
 | `stack_at=<service>[:<n>]` | the calling thread's user stack the first `n` times a process reaches that system call, as `stack:` lines (OBSERVABILITY "Stack captures"; `n` default 4, at most 512; the processes are the ones `events_pid=`/`events_match=` choose; scenario `stack_at_test`) |
 | `stack_from=<module>` | of those, only the calls a module whose name contains the text is on the stack of; the others are passed over without spending a capture (a service another thread reaches in a loop spends any count before the call in question; scenario `stack_at_from_test`) |
 | `stack_words=<n>` | how many words of the caller's stack a capture reads (default 128, at most 512): a service that keeps a large frame of its own, such as user32's `MessageBoxW`, puts the program's frames past the default (OBSERVABILITY "Stack captures") |
@@ -6529,6 +6544,49 @@ of their own, clients of it) is the yardstick.
   exception 0xC06D007F with `dll!function` in the ledger as a missing
   export.
 
+## The event stream's transport
+
+`events=` writes JSON lines (`events.rs`); how they leave the machine
+is the transport's. x86-64's debug console (`arch::x86_64::debugcon`)
+holds a line until its newline and hands it to the virtio console
+(`virtio_console.rs`) when the machine has one, which every boot
+scenario's QEMU does; otherwise, and for the lines before the device
+starts, it writes the line to port 0xe9. aarch64 writes the stream to a
+file by semihosting (the file the host names, `events_host`) and has no
+virtio console.
+
+- **Why**: under KVM every byte written to an I/O port leaves the
+  guest, `rep outsb` included, about 12 us each, so a line of 200 bytes
+  cost 2-3 ms and a traced run was its stream's length
+  (OBSERVABILITY "What the stream costs"). A line handed to the virtio
+  console is copied into a buffer and costs one notify.
+- **The device**: QEMU's `virtio-serial-pci` at slot 0x1e with one
+  `virtconsole` on port 0, both writing the same host file as the port
+  (`-chardev file,append=on` twice; xtask `add_event_devices`), so the
+  file holds the port's lines and then the device's, in order. The
+  driver asks no features (no MULTIPORT): port 0's transmit queue is
+  queue 1, 64 buffers of 1024 bytes (`arch::debugcon`'s line). It
+  polls, as every virtio driver here does: used buffers are taken back
+  on the next line, and a line that finds all 64 in flight waits for one.
+- **Started** right after PCI configuration space (`lib.rs`), before
+  the disk and any program, and said in the log: `events: the stream
+  goes through the virtio console at <bus:dev.fn>`.
+- **The end of a run**: `debugcon::flush` (before the summary) waits
+  until the device has taken every line it was handed, because QEMU's
+  exit device ends the process at once and a line is written to the
+  host's file only when its notify has been handled.
+- **When the device misbehaves** -- failed, asking for a reset, or not
+  taking a buffer back for a second, or not draining within a second
+  at the end -- it is given up on: a warning names it and how many lines
+  it took, and the lines after go to the port. Lines it held when given
+  up on are lost; xtask's `stream_complete` compares the file's lines
+  with the count in the summary (`events: N written: V through the
+  virtio console, P writes of the debug console's port`) for every run
+  from boot and fails one that lost any, saying how many.
+- **Not a ring per CPU**: lines from all CPUs share the debug console's
+  lock as before, so their order in the file is the order they were
+  written in. OT2's per-CPU rings would remove the lock, not a crossing.
+
 ## Diagnostics of stuck and crashed programs
 
 The kernel's side of OBSERVABILITY.md's dumps; crash reports are under
@@ -6575,8 +6633,13 @@ The kernel's side of OBSERVABILITY.md's dumps; crash reports are under
   with CPU 1 in `write_samples` for 20 s). A CPU's idle state for the choice is read lock-free
   (`sched::cpu_idle`, set at each switch). A QEMU dump NMI that arrives
   while a sample NMI is pending merges with it: that CPU misses the
-  dump (the dump waits for it half a second). With one CPU the tick
-  samples itself.
+  dump (the dump waits for it half a second). **Invariant: at most one
+  sample NMI is in flight per CPU**: a tick that finds the flag still
+  set sends none (counted, "not asked" in the `events:` line). Under KVM
+  an NMI can wait for its vCPU longer than a sample period; with two in
+  flight the first took the flag, the second found it clear and was
+  taken for a dump, whose half-second wait swallowed `events_sample`'s
+  probe. With one CPU the tick samples itself.
 - Invariants: NMI code uses only atomics and `try_lock` (it may interrupt
   any lock holder, the console's too, so it prints with
   `console::emergency_line`); diagnostics that peek at locks there use
@@ -8461,8 +8524,10 @@ session's is shown by nothing unless GalaSession attaches a presenter
   sample-rate knock 200, 100, 80, then device id 3: 4-byte packets, the
   fourth byte's low nibble the signed movement, positive towards the
   user). It counts the bytes it reads from each device (`BYTES_READ`:
-  keyboard, mouse) and logs their address once (`input: bytes read at
-  <address> ..., mouse packets of N bytes`): xtask's screen checks send
+  keyboard, mouse) and logs their address once, virtual and physical
+  (`input: bytes read at <address> (physical <address>; ...), mouse
+  packets of N bytes`; the physical one from the kernel's load address,
+  as the image is physically contiguous): xtask's screen checks send
   their next input only once the guest has read all they sent, as
   QEMU's 16-byte PS/2 queues lose what does not fit (WORKFLOW "Screen
   checks"). The `input:` line at exit counts packets, presses, wheel
@@ -8516,7 +8581,17 @@ session's is shown by nothing unless GalaSession attaches a presenter
   then `flush`: the screen through `platform::screen_write_row`, a Test
   frame, or nothing: with no presenter nothing is composed). A desktop
   goes live lazily: its first use lays it out and draws it whole, as
-  does attaching a presenter.
+  does attaching a presenter. Composing every layer at every point
+  costs microseconds a pixel, under the desktop's lock with interrupts
+  off, so `redraw` first copies the client pixels nothing covers
+  (`Uncovered`: a shown window's client area away from its rounded
+  corners' rows, under no higher window or its shadow, the taskbar, the
+  start menu, the card or the pointer's box) straight from the window,
+  and composes only the rest with `pixel`. Invariant: what it writes is
+  `pixel`'s composition, point for point (host test
+  `windows_pixels_nothing_covers_are_copied_and_the_rest_composed`);
+  past 32 layers, the windows below are composed. `desktop::composed()`
+  counts areas, pixels and those copied, since boot.
 - **Drawing** (`paint.rs`): integer-only blending and gradients, an ARGB
   `Canvas` (rounded rectangles, outlines, tinted alpha masks, text in
   the baked Selawik sizes of `paint::Font`: proportional, advances in
@@ -8932,6 +9007,15 @@ registry ("Plan: windows across processes").
 - Composition runs under the desktop's `IrqMutex` with interrupts off
   (a full-screen redraw is ~1M pixels; drags redraw the old and new
   bounds).
+- A point is composed from the topmost window that covers it whole
+  (coverage 255), never from the layers under it (`Desktop::compose`):
+  blending at 255 is that window's colour whatever lies below, so the
+  result is the same, and a commit pays for the layers that show. The
+  wallpaper's two square roots a point and each lower window's shape
+  and shadow were most of a whole window's composition (a 904 x 720
+  window: 105 ms in a host debug build, 20 ms composed from the window);
+  `composing_from_the_topmost_opaque_window_changes_no_point` holds the
+  two ways equal at every point.
 - The desktop's keyboard focus is the active top-level window; focus
   among child windows is user32's.
 - Where nothing can show a desktop (no screen and no `presenter=`, or
@@ -13560,8 +13644,11 @@ names and connections as a Linux program's.
 - **A connection** (`Conn`) holds a queue toward each side (records:
   bytes, the rights that came with them, the quota charge for them),
   each side's shutdown flags as Linux keeps them (RCV, SEND; a stream
-  or seqpacket side that closes sets both on its peer) and arrival
-  counters (epoll's EPOLLET). It references its sockets' waiters, not
+  or seqpacket side that closes sets both on its peer) and two
+  counters per side for epoll's EPOLLET: arrivals (bytes, a message, a
+  shutdown) and room (each read by the peer that leaves the side
+  writable, its EPOLLOUT edge, which Linux raises from the reader's
+  read); `Socket::changes` is their sum. It references its sockets' waiters, not
   the sockets, so nothing cycles. connect makes the listener's side at
   once and queues it for accept (backlog + 1 may wait, as Linux; then
   `Error::Full` with the listener's waiters to block on).
@@ -13584,7 +13671,10 @@ names and connections as a Linux program's.
   for such cycles).
 - **Observability**: `unix::dump` in the state dump (`dump: unix:` a
   line per named socket: kind, creator, name, phase, queued, shutdown,
-  peer, waiters); the personality's events (`lx unix`, `lx unix
+  peer, waiters); every Linux process's unix fds, connected ones
+  included (`lx: pid P fd N: unix ...`), a connection showing both
+  directions (records and bytes queued, the arrivals count epoll's
+  EPOLLET compares); the personality's events (`lx unix`, `lx unix
   rights`).
 6. **`net` free of `nt`**: `kernel/src/net/` reaches threads, waits and
    time through `crate::runtime` (`kernel/src/runtime.rs`): the kernel's
@@ -14286,8 +14376,9 @@ The running parts (milestone 1; `lxrun=`):
   poll's (`poll::readiness`), masked by the events plus ERR and HUP;
   level-triggered entries report while ready, EPOLLET ones once after
   ADD/MOD and then only after their object moved (`poll::events_count`:
-  a pipe end's change counts, a socket's arrivals, `socket::arrivals`:
-  bytes or connections taken plus queued), EPOLLONESHOT ones once until
+  a pipe end's change counts, a unix socket's arrivals and room,
+  `unix::Socket::changes`, an inet socket's arrivals, `socket::arrivals`:
+  bytes or connections taken plus queued, with no EPOLLOUT edges yet), EPOLLONESHOT ones once until
   MOD. A closed fd whose description lives on (a dup) stays in the set;
   the description's last close removes it from every set
   (`Fd::watchers`, `Epoll::forget`); closing the epoll fd empties its
@@ -14542,7 +14633,10 @@ The running parts (milestone 1; `lxrun=`):
   event per clone (pid, tid, flags) after the core's `thread create`; a
   failed clone logs why. The state dump (OBSERVABILITY "State dump")
   lists every Linux thread (Linux and core tid, mask, pending, blocked
-  or running), every epoll set's entries and every futex waiter (pid,
+  or running; its NT thread line the Linux call it is in, with four
+  arguments and how long, `nt::thread::LxCall`, set and cleared by
+  `lx::dispatch` apart from the NT `in_syscall` that handover and hot
+  swap restart), every epoll set's entries and every futex waiter (pid,
   address, bitset, thread), so a hang shows who waits where. Ledger:
   `linux clone flags missing` (and vfork's CLONE_VM, unsupported thread
   flag sets), `linux signal action missing`

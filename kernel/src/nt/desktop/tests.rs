@@ -1188,6 +1188,50 @@ fn a_frame_of_another_size_lays_the_desktop_out_again() {
     frame_matches(&d);
 }
 
+/// `n` client pixels of a pattern no two neighbours share, with a fourth
+/// byte the window must not show.
+fn pattern(n: usize, seed: u32) -> Vec<u32> {
+    (0..n as u32)
+        .map(|i| 0xab00_0000 | (i.wrapping_mul(2_654_435_761) ^ seed) & 0x00ff_ffff)
+        .collect()
+}
+
+#[test]
+fn windows_pixels_nothing_covers_are_copied_and_the_rest_composed() {
+    let mut d = Desktop::new();
+    d.set_screen(640, 480).unwrap();
+    d.s.live = true;
+    // Bottom to top: a maximized window, a framed (rounded) one, a
+    // frameless one over its right half, a popup over the frameless
+    // one's bottom, and the pointer over the framed one.
+    let m = d.create(9, 0, 0, 640, 440, &title("Max"), 0).unwrap();
+    let a = d.create(9, 40, 30, 300, 200, &title("Framed"), 0).unwrap();
+    let f = d.create(9, 200, 100, 200, 150, &title("own frame"), STYLE_FRAMELESS).unwrap();
+    let p = d.create(9, 260, 220, 120, 60, &[], STYLE_POPUP).unwrap();
+    for (id, seed) in [(m, 1), (a, 2), (f, 3), (p, 4)] {
+        d.show(id, 9, true).unwrap();
+        let (cw, ch) = d.s.window(id).unwrap().client_size();
+        let px = pattern((cw * ch) as usize, seed);
+        d.present(id, Rect { x: 0, y: 0, w: cw.into(), h: ch.into() }, &px, cw as usize).unwrap();
+    }
+    d.s.windows.iter_mut().find(|w| w.id == m).unwrap().maximized = true;
+    d.s.raise(a);
+    d.s.raise(f);
+    d.s.raise(p);
+    d.pointer = (100, 150);
+    d.set_presenter(Presenter::Test(Frame::new(640, 480).unwrap())).unwrap();
+    // The whole screen again, now with every layer in place: what reaches
+    // the frame is the composition, pixel for pixel ...
+    let copied = redraw(&mut d, Rect { x: 0, y: 0, w: 640, h: 480 });
+    frame_matches(&d);
+    // ... and the popup (on top, square, nothing over it) was copied
+    // whole, not composed, and so was much of the framed window's client
+    // area (but not the pointer's box over it).
+    let popup = 120 * 60;
+    assert!(copied >= popup + 100 * 100, "copied {copied}");
+    assert!(copied < 640 * 480, "copied {copied}");
+}
+
 #[test]
 fn a_frame_reads_areas_inside_it_only() {
     assert!(Frame::new(0, 10).is_none());
@@ -1784,4 +1828,40 @@ fn a_tile_initial_from_the_title_or_else_the_program() {
     let star = w("*untitled");
     assert_eq!(tile_initial(&star, &[]), ('*', &star[..]));
     assert_eq!(tile_initial(&[], &[]), ('?', &[][..]));
+}
+
+/// A point under a window that covers it whole is that window's colour
+/// whatever lies under it, so composing from the topmost such window
+/// (`pixel`) gives every point of the screen what composing every layer
+/// gives: rounded corners and shadows over the drawn wallpaper, a window
+/// partly over another, a popup, a frameless window, a maximized one,
+/// active and inactive.
+#[test]
+fn composing_from_the_topmost_opaque_window_changes_no_point() {
+    let mut d = Desktop::new();
+    let (sw, sh) = (640u32, 480u32);
+    d.set_screen(sw, sh).unwrap();
+    let t = title("w");
+    let shown = |d: &mut Desktop, owner, x, y, w, h, style| {
+        let id = d.create(owner, x, y, w, h, &t, style).unwrap();
+        d.show(id, owner, true).unwrap();
+        id
+    };
+    let back = shown(&mut d, 1, 0, 0, 10, 10, 0);
+    d.place(back, 1, 0, 0, sw, sh - TASKBAR).unwrap();
+    assert!(d.s.window(back).unwrap().maximized);
+    let a = shown(&mut d, 2, 40, 30, 300, 200, 0);
+    d.present(a, Rect { x: 0, y: 0, w: 3, h: 3 }, &[0x00ab_cdef; 9], 3).unwrap();
+    shown(&mut d, 2, 200, 120, 260, 220, 0);
+    shown(&mut d, 3, 420, 60, 120, 90, STYLE_POPUP);
+    shown(&mut d, 3, 500, 300, 100, 80, STYLE_FRAMELESS);
+    let mut differ = 0;
+    for y in 0..i64::from(sh) {
+        for x in 0..i64::from(sw) {
+            if d.compose(x, y, true) != d.compose(x, y, false) {
+                differ += 1;
+            }
+        }
+    }
+    assert_eq!(differ, 0);
 }

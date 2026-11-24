@@ -65,5 +65,14 @@ epoll_wait(-1) on an empty set, a pipe ADDed meanwhile and written = 1: data 7 e
 a one-shot entry, ready = 1: data 8 events IN
   then disabled = 0
 epoll_wait(-1), the entry re-armed by MOD meanwhile = 1: data 8 events IN
+-- EPOLLET|EPOLLOUT on a unix stream socket
+ADD a fresh end (IN|OUT|ET), data 11 = 0
+epoll_wait(0): writable = 1: data 11 events OUT
+  again (no new edge) = 0
+written until EAGAIN = yes
+epoll_wait(0): full, nothing = 0
+the peer read it all = yes
+epoll_wait(0): writable again (the peer's read) = 1: data 11 events OUT
+  again (no new edge) = 0
 epoll_test: ok
 -- exit status 0

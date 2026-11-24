@@ -13,6 +13,6 @@ Installers:
   - RelativeFilePath: pklib-1.0.0\pklib.exe
     PortableCommandAlias: pklib
   InstallerUrl: https://packages.gala.invalid/pklib-1.0.0.zip
-  InstallerSha256: B445BD1E4BD3EE8F8436881EF2C90DAE9777230E6D7A203022F88DF66ED79413
+  InstallerSha256: A410E18191D55360B7BD621F59AD0750E2D05BD952927C10D0EFAF490754B60D
 ManifestType: singleton
 ManifestVersion: 1.6.0
