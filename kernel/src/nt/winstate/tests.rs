@@ -310,3 +310,20 @@ fn input_left_untaken_for_five_seconds_is_not_responding() {
     s.destroy_owned(1);
     assert!(!s.not_responding(1, t2 + 60 * HUNG_NS));
 }
+
+#[test]
+fn input_since_is_when_the_oldest_untaken_input_came() {
+    let mut s = state();
+    let a = s.create(1, 10, 20, 300, 200, &title("A"), 0).unwrap();
+    assert_eq!(s.input_since(1), None);
+    s.send(a, WM_KEYDOWN, 0x41, 0);
+    let since = s.input_since(1).expect("input waits");
+    s.send(a, WM_KEYUP, 0x41, 0);
+    // More input does not move it: the oldest still waits.
+    assert_eq!(s.input_since(1), Some(since));
+    let none = InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 };
+    let mut out = [none; 4];
+    assert_eq!(s.take_input(1, &mut out), 2);
+    // All taken: nothing waits.
+    assert_eq!(s.input_since(1), None);
+}

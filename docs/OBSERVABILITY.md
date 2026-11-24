@@ -126,7 +126,10 @@ port. Lines that tools and agents rely on:
   and a C runtime call with an invalid argument in a program without an
   invalid-parameter handler ends the process with 0xc0000409 after
   `ucrtbase: invalid parameter passed to a C runtime function, ending the
-  process (0xc0000409)` on its stderr;
+  process (0xc0000409)` on its stderr; a Rust panic in a test program
+  built on ntrt prints `<program>: panic at <file>:<line>:<col>:
+  <message>` before the process ends with 0xc0000409 (gala and real
+  Windows alike);
   `wow64: ... cannot free an exited
   thread's 64-bit stack|TEB32` if a WOW64 thread's exit leaks them; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
@@ -218,8 +221,11 @@ A second output channel for tools: QEMU's `isa-debugcon` on port 0xe9
 UART handshake), which xtask
 always writes to `<iso>.events.jsonl` next to the serial log. On aarch64
 (QEMU `virt`, no ISA bus) the kernel writes the same file itself through
-Arm semihosting, its path on the command line (`events_file=`, which
-xtask adds to every aarch64 image). One JSON
+Arm semihosting, its path named by the host for each run (the kernel
+asks for it when the command line has `events_host`, which xtask adds
+to every aarch64 test image, and says it: `events: file <path>`; a
+stream the host finds short in another file than that one fails saying
+so). One JSON
 object per line, starting with `"t"` (ns since boot), `"cpu"`, `"by"`
 (the client id of the thread whose work emitted it: an NT thread id, a
 Linux tid, 0 for a kernel thread; the scheduler keeps it per CPU, so
@@ -258,8 +264,13 @@ there.
 
 #### What the stream costs
 
-Its bytes, and nothing else: about 12 us for each one that leaves the
-guest. `user/import_cost_test` makes calls through one traced import
+Through port 0xe9 it was its bytes, and nothing else: about 12 us for
+each one that left the guest. So on x86-64 the stream now leaves by DMA
+through a virtio console when the machine has one, which every boot
+scenario's machine does (ARCHITECTURE "The event stream's transport"):
+a line is copied into a buffer the device reads, and costs one notify.
+The measurements below are the port's, which is what a machine without
+the device still pays. `user/import_cost_test` makes calls through one traced import
 (5 000; the table was measured with 20 000 on a laptop under KVM),
 and four runs of it differ only in what is written, so the difference
 between their in-kernel seconds is the stream itself (scenarios
@@ -306,11 +317,16 @@ samples say where a program's time goes, and what keeps the cost near
 the question is writing less: `events=syscall` rather than `all`,
 `events_pid=`, `events_match=`, a narrowed `imports=`, and
 `events_from=` for a failure late in a long run. What a run paid is in
-its own log, the summary saying both numbers -- `events: N written to
-the debug console in M writes of the device` -- and the way out is to
-stop crossing a byte at a time at all: the stream by DMA over
-virtio-serial, which is ROADMAP OT2's per-CPU rings (one exit a line,
-or a batch of them, instead of one an event's every byte).
+its own log, the summary saying which way the lines went -- `events: N
+written: V through the virtio console, P writes of the debug console's
+port` -- and the stream crossing a line at a time instead of a byte at
+a time is the virtio console. A run where V is not N wrote the rest to
+the port: the lines before the device started (none in a boot
+scenario: it starts right after PCI configuration space, before any
+program), or after a warning that the device was given up on. xtask
+counts the lines of the host's file against N for every run that
+started from boot (`stream_complete`), so a transport that loses lines
+fails the scenario that lost them and names how many.
 
 | Category | Events |
 |---|---|
@@ -319,7 +335,7 @@ or a batch of them, instead of one an event's every byte).
 | `thread` | create (start address: the Win32 start routine, TEB, `teb32`: a WOW64 thread's 32-bit TEB, else 0), name (`thread name`: SetThreadDescription's, as NtSetInformationThread ThreadNameInformation sets it), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"machine"`: `"x86"` for a 32-bit process running through WOW64, `"x64"` otherwise, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; `"elevated"`: its primary token is elevated (TokenElevation; the log line ends in `, elevated token`); scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line); `process terminate` (TerminateProcess of another process: `by`, pid, status; with the log line `process: pid B (x.exe) terminates pid P (y.exe) with status S`, so who ended a process is in the log); the task manager's (`nt::tasks`, ARCHITECTURE "The task manager"): `tasks query` (each GalaTasks list: `by`, `nt`, `linux` and `hung` counts; the first query of each caller also a `tasks: pid P (x.exe) lists the processes: ...` line, and each process's first "Not responding" a `tasks: pid P (x.exe) is not responding: ...` line), `tasks end` (End task of a Linux process or distribution: `by`, `what`, pid, `detail` (the signal, or the distribution and how many processes ended), status; always a `tasks: pid P (x.exe) ends ...` line), and `lx signal` for the signal itself; scenario `taskmgr` |
 | `fault` | every user-mode CPU exception, before it is resolved or delivered (`fault`: pid, vector, rip, cr2, error), and the ones handed to the program's own dispatcher once the frame is on its stack (`exception`: pid, tid, `status`, `name` as the crash report names it, `ip`, `address` for an access violation). The second is the only record of an exception a program catches itself, which is what a program that gives up over one of its own leaves behind (scenario `seh_test`). Every demand-paged page fault is one of these, so from boot the category spends a run's budget before the program in question starts: arm it at the second the question is about (`events=fault events_match=WINWORD events_from=46`, which showed that Word takes no exception at all before its box, the budget untouched) |
-| `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled: in the kernel by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too, and in user mode by its own tick (exact there, as user mode runs with interrupts on; an NMI landing in user mode records nothing, so user samples never depend on the neighbor's vCPU getting host time, and both kinds come at the same rate); the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts the samples asked of another CPU, written in user mode and in the kernel, lost to a full ring, interrupts off for over 8 sample periods, and those that landed while the tick was writing samples, which are not kept, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads (each with where it starts, `starts at module+offset`, from its `thread create` event's Win32 start address), modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
+| `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled: in the kernel by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too, and in user mode by its own tick (exact there, as user mode runs with interrupts on; an NMI landing in user mode records nothing, so user samples never depend on the neighbor's vCPU getting host time, and both kinds come at the same rate); the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts the samples asked of another CPU, those not asked because that CPU had not yet taken the last NMI sent to it (at most one is in flight per CPU: ARCHITECTURE "Profiler NMIs"), written in user mode and in the kernel, lost to a full ring, interrupts off for over 8 sample periods, and those that landed while the tick was writing samples, which are not kept, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads (each with where it starts, `starts at module+offset`, from its `thread create` event's Win32 start address), modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF of the architecture the scenario ran on (the aarch64 kernel's for an `arm_` twin or an aarch64 scenario, named from the stream's file; the report's first line says which ELF), a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued); Linux memfds: `lx memfd` (pid, fd, name, flags, node) and `lx memfd seal` (pid, fd, seals asked for, errno or 0). Linux AF_UNIX sockets: `lx unix` (pid, fd, op: socketpair, bind, listen, connect, accept with `new_fd` and `peer_pid`, close of a named socket; the name, a path or `@` and an abstract name; errno or 0: a refused bind, listen or connect is here) and `lx unix rights` (pid, fd, what: sent, received, dropped; count). The window station's clipboard: `clipboard` (pid, tid, session, station; op `open`, `open denied` with the holder, `empty` with the previous owner, `set` and `get` with format, kind and size, `get`'s `source` for a synthesized format and `from_pid`, `close` with `changed` and the listeners told, `listener`; ARCHITECTURE "The clipboard"; scenario `clipboard_test`). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
 | `net` | TCP accept, connect, close, reset, with local and remote addresses; shutdown (`tcp shutdown`), close and reset with the connection's byte counts (`sent`, `received` by its owner, `unsent`, `unread` then); a listener's backlog filling (`tcp backlog full`: further connections refused, or ignored on Linux sockets) and each SYN ignored over it (`tcp syn ignored`, the client's address); AFD's `afd shutdown after sends`, `afd send failed`, `afd shutdown failed` |
@@ -332,7 +348,7 @@ Click-to-Run package's VFS tree instead of the machine's own (nt::pkgview,
 ARCHITECTURE "A package's VFS view"): the `pid`, the path `asked` for and
 the path `served`, so a run shows every file a program found only in its
 package (scenario `pkgview_test`); `key`: each NtOpenKey(Ex) and NtCreateKey with the key it is relative to (`base`, full name), the name and the status (the ledger keeps only an absent key's first time; which open came last before a failure needs this); `value`, `value set`, `value deleted`: each value read (NtQueryValueKey, NtEnumerateValueKey), written or deleted, with the key it is in (full name), the `name` asked for, the `index` an enumerate asked for, the `kind`, `bytes` and `data` of what it held where the call had any -- an empty value is a different answer from an absent one -- and the status. `data` is the first 64 bytes -- or as many as `events_data=<n>` asked for, 512 at the most -- read as the type says to read them: a number for the integer types that are the width they claim, a string's text with the NULs at its end trimmed and the ones between a multi-string's parts kept, and hex for anything else -- a type gala does not know, and an integer narrower than its type, which is shown as the bytes it is rather than guessed at. `bytes` is how much there was, so data cut at the bound needs no field of its own to be seen, and the bound is what keeps a program walking a hive of long values from turning the stream into a second copy of the hive -- which is why the default is small and `events_data=` is what a long value is read with: a record a program writes about itself says nothing in its first 64 bytes (Word's session record is 401 bytes of JSON; scenario `events_registry_data`), and a peek past the bound or that is no number leaves the default standing and says so rather than reading as the one that was asked for; the ledger has none of this, so the value a program read last before it gave up is here or nowhere, and a call refused before its key is resolved (a handle that is not a key, one without the access right) leaves only its system call's status under `events=syscall`. Scenario `events_registry`; `key notify` (registry change notification, nt::regnotify: `op` `arm` (pid, key, filter, tree, `requests` waiting, status: STATUS_PENDING or the completion of a kept change, tid, `agnostic`), `fire` (the requests completed, the change bits, `lost`: a change not noted for want of memory), `cleanup` (the key object's end: STATUS_NOTIFY_CLEANUP), `thread end` (its thread-bound requests: STATUS_CANCELLED)); `key rename` (pid, the old full name, the new name, status). Scenario `regnotify_test` |
-| `wayland` | the Wayland server (`wayland=on`): `wayland connect` (pid, client number), `wayland disconnect` (`why`: closed, protocol error, output full, no memory; `requests` handled), `wayland role` (surface, role, its object), `wayland map` (surface, window or -1), `wayland commit` (surface, `buffer`: whether one came, its width and height, `rows` copied into the window, window, `placed` with `x`/`y`: the outer position the window was put at for the configure this commit answers), `wayland configure` (surface, the `width` and `height` asked for, 0x0 the client's choice, `states` as bits 1 << state: maximized 2, activated 16, tiled 32-256, the xdg_surface's `serial`), `wayland error` (object, interface, code, message), `wayland popup` (surface, `what`: configure with `x`/`y` relative to the parent's window geometry, `width`, `height` and the xdg_surface's `serial`; repositioned with the token as `serial`; grab with the press's `serial`; grab denied, dismissed and orphaned with `why`: not the last press's serial, a parent dismissed already, a press outside the client's windows, its window no longer the active one, the parent unmapped, its parent popup destroyed first) and `wayland input` (`what`: enter, leave, button, axis, key, focus, unfocus, close, maximize, restore, place, or dropped for a window the client shows no surface in; surface, window, `code` the button or evdev key, `state` pressed or released, an axis's delta in WHEEL_DELTA units; motion is not evented): each with the client's pid and number. A denied grab and an orphaned popup are also log lines (`wayland: pid P: wl_surface@S's popup: grab denied (...)`). Scenarios `lx_wl`, `lx_wl_popup`, `lx_wl_input` (with `window`: the desktop's `button` and `key` say where input went before the server took it), `lx_simple_shm`, `lx_gtk`. Without the category, each connection's end is a log line with its requests, commits shown and frame callbacks done (`wayland: pid P's connection N ended (closed): ...`) |
+| `wayland` | the Wayland server (`wayland=on`): `wayland connect` (pid, client number), `wayland disconnect` (`why`: closed, protocol error, output full, no memory; `requests` handled), `wayland role` (surface, role, its object), `wayland map` (surface, window or -1), `wayland commit` (surface, `buffer`: whether one came, its width and height, `rows` copied into the window, window, `placed` with `x`/`y`: the outer position the window was put at for the configure this commit answers), `wayland configure` (surface, the `width` and `height` asked for, 0x0 the client's choice, `states` as bits 1 << state: maximized 2, activated 16, tiled 32-256, the xdg_surface's `serial`), `wayland error` (object, interface, code, message), `wayland popup` (surface, `what`: configure with `x`/`y` relative to the parent's window geometry, `width`, `height` and the xdg_surface's `serial`; repositioned with the token as `serial`; grab with the press's `serial`; grab denied, dismissed and orphaned with `why`: not the last press's serial, a parent dismissed already, a press outside the client's windows, its window no longer the active one, the parent unmapped, its parent popup destroyed first) and `wayland input` (`what`: enter, leave, button, axis, key, focus, unfocus, close, maximize, restore, place, or dropped for a window the client shows no surface in; surface, window, `code` the button or evdev key, `state` pressed or released, an axis's delta in WHEEL_DELTA units; motion is not evented): each with the client's pid and number. `wayland input late`: input that waited half the key repeat delay or more between the desktop queueing it and the server taking it for the client (a key's press and release read together can then reach the client far enough apart that it repeats the key): `waited_ms`, `asleep` (the server was waiting for work: its wake, or a CPU, came late) with `woke_after_ms`, else busy in a round that began before the input came: `round_ms` and `round_cpu_ms` (much less than `round_ms`: it waited for a CPU), and what the round composed on the desktop (`round_composes` areas, `round_composed_pixels`, of them `round_copied_pixels` copied straight from windows rather than composed point by point); also logged without the category (`wayland: pid P's input waited N ms for the server (...)`). A denied grab and an orphaned popup are also log lines (`wayland: pid P: wl_surface@S's popup: grab denied (...)`). Scenarios `lx_wl`, `lx_wl_popup`, `lx_wl_input` (with `window`: the desktop's `button` and `key` say where input went before the server took it), `lx_simple_shm`, `lx_gtk`. Without the category, each connection's end is a log line with its requests, commits shown and frame callbacks done (`wayland: pid P's connection N ended (closed): ...`) |
 | `call` | calls a program makes into a DLL gala wrote, once `trace_from=` has armed one (nt::tracecall, "Call tracing"): `call` events with the `pid` and `process` that called, `call` (the method's full name, as the ledger spells it: `d2d1.dll!ID2D1RenderTarget::FillRectangle`) and `args` (the words it was handed, a pointer as its address and a float as its bits); the thread that made the call is the line's own `by`, so a trace of a program with more than one thread is read per thread (scenario `import_threads`). A vtable call is an indirect call inside the program, so the DLL reports it rather than the kernel seeing it, and nothing at all is reported without `trace_from=`. What this shows that the ledger cannot is a repeat: the ledger keeps one row a call site. A method that returns something records a second event, `ret`, with the same `call` and the `answer` as one word. Scenarios `trace_from_test`, `trace_from_budget_test`, `trace_from_answer_test`. `imports=` writes to this same category under the event name `import` ("Import tracing"): the first call a program makes through each of its import slots, with `call` the import's name as the ledger spells it (`testdll.dll!gala_add`) and `args` the four integer argument registers; with `imports_repeat=<n>` every call through an armed slot is such an event and not only the first, which is the same trade `trace_from=` makes and makes the stream a sequence. With `imports_answers=<n>` a recorded call is followed by a `ret` event of its own -- the same shape `trace_from=` writes, with `answer` the word the call gave back -- so that a call and its answer read as a pair. Each of those events also carries `from`, the image whose import slot the call went through, which is who made it where `call` names the DLL that supplies the export: one import is a slot in every image that imports it, so without this field a trace of a whole program reads the program's own call and a DLL's as the same line twice (scenario `iat_from`). Whoever wrote the DLL: an import of Microsoft's own code is reported the same way, which is what no other instrument here can do. Scenarios `iat_trace_test`, `iat_from` |
 | `wsl` | the WSL facade (`lx::distro`, `nt::wsl_calls`): `wsl import` (`distro`, `by`: wsl.exe's pid, `count`: the nodes made), `wsl start` (`distro`, `by`, `path`, and the Linux `pid` or the `errno`), `wsl terminate` and `wsl shutdown` (`count`: processes ended), `wsl remove` (`count`: names removed). The same as `wsl:` log lines (`wsl: bb: pid 108 /bin/sh started by pid 92`); a process that does not end within 10 s of `--terminate` is a warning; wsl.exe's missing options and gala's gaps are in the ledger (`wsl.exe!<option>`, `wsl.exe!/mnt cwd`, `wsl special file`, `ntio`, `ntio ioctl`). Scenarios `wsl`, `wsl_terminal` |
 | `service` | the service control manager (nt::scm): `service` events with `op` (connected to, opened, created, marked for deletion, asked to start, sent a control to, changed configuration level of, deleted), the caller's `pid`, the service's `name`, the `access` granted or the failing `status` (0xC007xxxx: the SCM's Win32 error xxxx). The same as `scm:` log lines, the first 64 per boot (`scm: pid P (program) opened "OfficeSvc": 0xc0070424 (a Win32 error)`); a service whose key goes with its last handle is logged with the outcome; a running service's side (nt::scm_run) adds `service` events with `op` starting, status, stopped, process ended, exited (before its dispatcher connected), start timed out, cannot start (its executable), start refused, and its `state`, `exit`, `specific` and `service_pid`, and `scm:` lines (the first 96) for its start (pid, command line), its dispatcher's connection, ServiceMain's start, each state it reports and a handler's non-zero answer; a start that times out and a service process that ends while its service runs are warnings; what the SCM cannot start is in the ledger (`GalaServiceControl: start a driver`, `start as an account`, `share process: run alone`). A service's own output does not reach the serial log: its standard handles are NULL, as on Windows; what it did is read from these events, its `syscall` events (`events_pid`) and its exit codes (svcrun_test's service side reports its first failed check as its service-specific exit code). Scenarios `svc_test`, `svcrun_test` and their `wow64_` twins |
@@ -1042,7 +1058,11 @@ a new line, since QEMU's end can cut the guest's last one off):
    thread each CPU runs, whether the scheduler, heap, frame and console
    locks are free (a lock held for the whole dump is the deadlock), heap
    and frame figures, the flight recorder.
-2. From the boot thread (may take locks): every NT thread's start
+2. From the boot thread (may take locks): first whether every CPU took
+   timer interrupts since part 1 (20 ms at least; `statedump: every CPU
+   took timer interrupts since the NMI part`, else `statedump: CPU N took
+   no timer interrupt ...`: an NMI that left its CPU's interrupt mask
+   off, ARCHITECTURE "Interrupt masking and the pseudo-NMI"), then every NT thread's start
    routine (`start 0x...`, its Win32 start address: which thread it is,
    a pool worker or the program's own; also in triage's thread lines)
    and its name if the program gave it one (` name "CrBrowserMain"`,
@@ -1061,7 +1081,12 @@ a new line, since QEMU's end can cut the guest's last one off):
    queued for it: (waiters, releasers, all entries) Some((1, 0, 1))`, so a
    release waiting with no waiter, or a waiter whose value changed, shows;
    for a thread that is suspended or parked, who stopped it and the rip it
-   is parked at, "Suspensions" above),
+   is parked at, "Suspensions" above; for a Linux thread the Linux call it
+   is in, `lx::dispatch` recording it in the thread's `lx_call`: `linux
+   read(0x0, 0x7ffffe7d0000, 0x10000, 0x0) from rip 0x4d3682 for 19863
+   ms`, the name from the architecture's own table, its first four
+   arguments, its return address and how long it has been in it, the
+   test `lx_statedump` and its twin),
    every
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB, R reservations, G regions; paged U/L (peak P) nonpaged
@@ -1070,25 +1095,28 @@ a new line, since QEMU's end can cut the guest's last one off):
    among them) in S slots`; a waiting one with where its wait began:
    `sched: thread N (x) Waiting { until_tick: None } at
    kernel/src/lx/futex.rs:304`, the caller of `prepare_wait` through
-   `#[track_caller]` wrappers; the only clue for a Linux thread, which
-   has no NT system-call record -- `lx/dispatch.rs` never calls
-   `thread::set_in_syscall`, so the NT lines say `in a system call
-   false` and name no call, no arguments and no wait object for every
-   Linux thread, which reads as a thread doing nothing; ROADMAP
-   "Defects known, not yet fixed"), the ledger, every registry change
+   `#[track_caller]` wrappers: for a Linux thread, the wait object the
+   NT lines do not name), the ledger, every registry change
    notification armed (`statedump: registry watch pid P key K
    subordinate S filter F tree T waiting N (B thread-bound) change kept
    C`: who waits on which key), C:'s write-back (`statedump: persist:
    write-back every N ms: syncs <cause> K, ...; D pages dirty now, at
    most M (limit L); T calls throttled`), each Linux thread (`lx: pid P thread
    T (core C): mask .. pending .. process pending .. blocked|running`),
-   each epoll set's entries (`lx: pid P epoll fd N: fd ..`), each
+   each epoll set's entries (`lx: pid P epoll fd N: fd F events E
+   data D seen S disabled B; now ready R count C`: an entry ready now
+   with a count other than `seen`, in a set a thread waits on, is a
+   wakeup that was lost; then `lx: pid P epoll fd N: W waiting on the
+   set`), each unix fd (`lx: pid P fd N: unix ...` as below: an X or
+   Wayland client's connection, not only named sockets), each
    eventfd (`lx: pid P fd N: eventfd (count C[, semaphore]), W
    waiting`) and every
    futex waiter (`lx: futex waiter: pid P address A bitset B thread
    T`), every named AF_UNIX socket (`dump: unix: stream by pid P,
    node N|abstract NAME, listening (K of B waiting)|connected (side S:
-   Q queued, shutdown F, peer open|gone), W waiting`), the Wayland
+   Q queued (B bytes), A arrivals, shutdown F; peer open|gone: Q
+   queued (B bytes), A arrivals), W waiting`: bytes queued to a side
+   whose reader waits is a wakeup it missed), the Wayland
    server's clients and their objects (`statedump: wayland on PATH: N
    clients; a round would find work: true|false`: true while its thread
    waits is a wakeup it missed, false with a client blocked reading is a
@@ -2498,6 +2526,14 @@ always on and cheap:
   the vCPUs it asked for (2, or 1 for `onecpu_*`); a boot short of CPUs
   is booted once more (not with a disk), and a failure on one says first
   `VM got 1 of 2 CPUs (host overloaded?)`.
+- **A firmware crash**: EDK2 crashing before the kernel (aarch64's
+  `Synchronous Exception at ...` dump on the serial log, x64's `!!!! X64
+  Exception ...` on the firmware's debug log `.bios.log`) hangs in its
+  assert loop until the run's limit, with no boot phases. xtask
+  (`telemetry::firmware_crash`) finds it and the failure says first
+  `the firmware crashed (<exception> in <module> (<ESR line>); <ASSERT
+  line>)`, with an `xtask: the firmware crashed before the kernel:` line
+  in the serial log's telemetry.
 - **Boot phase markers** (`arch::bootphase`): one line per step on
   debug-console port 0x403 (the event stream has 0xe9), lock-free and
   allocation-free, written only under QEMU (CPUID's hypervisor leaf; on
