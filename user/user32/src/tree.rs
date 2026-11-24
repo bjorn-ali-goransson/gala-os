@@ -336,8 +336,10 @@ pub fn show_child(hwnd: Hwnd, show: bool) -> i32 {
     i32::from(was)
 }
 
-/// A top-level window was shown: it gets the focus unless one of its
-/// windows has it.
+/// A top-level window was activated: it gets the focus unless one of
+/// its windows has it. A show that does not activate the window
+/// (SW_SHOWNOACTIVATE and its kin) does not come here, so it leaves the
+/// focus where it is.
 pub fn shown_top_level(top: Hwnd) {
     let focus = crate::input::focus();
     let inside = focus != 0

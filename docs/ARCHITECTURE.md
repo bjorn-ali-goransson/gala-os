@@ -9815,8 +9815,10 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 - Mouse input from the desktop goes to the deepest visible, enabled
   child under the pointer, or the capture window, with lParam in its
   client coordinates; keys go to the focus window (SetFocus/GetFocus
-  with WM_KILLFOCUS/WM_SETFOCUS; a shown top-level window takes the
-  focus).
+  with WM_KILLFOCUS/WM_SETFOCUS; a top-level window takes the focus as
+  part of being activated, so a show that activates nothing --
+  SW_SHOWNOACTIVATE, SW_SHOWMINNOACTIVE, SW_SHOWNA -- leaves both the
+  active window and the focus where they are).
 - The focus and the active window are a thread's, not the process's:
   every thread has an input state of its own (`input.rs`), and
   AttachThreadInput joins two threads' into one that both then read and

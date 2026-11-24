@@ -1772,11 +1772,16 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
         // foreground where they are.
         if !window(hwnd).is_some_and(|w| w.popup) {
             // SW_SHOWNOACTIVATE (4), SW_SHOWMINNOACTIVE (7) and SW_SHOWNA
-            // (8) leave the active window as it is.
+            // (8) leave the active window as it is -- and so the focus,
+            // which a top-level window takes as part of being activated
+            // and not as part of being shown (user32_test's
+            // `activation`: a window shown with SW_SHOWNOACTIVATE is
+            // visible while the active window and the focus are still
+            // the other window's).
             if !matches!(cmd, 4 | 7 | 8) {
                 set_foreground(hwnd);
+                crate::tree::shown_top_level(hwnd);
             }
-            crate::tree::shown_top_level(hwnd);
         }
         InvalidateRect(hwnd, core::ptr::null(), 1);
         wake();
