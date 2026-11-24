@@ -13,10 +13,12 @@ on:
     branches: [main]
     paths:
       - web/**
+      - docs/ROADMAP.md
       - .github/workflows/website.yml
   pull_request:
     paths:
       - web/**
+      - docs/ROADMAP.md
       - .github/workflows/website.yml
   workflow_dispatch:
 

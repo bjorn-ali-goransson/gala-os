@@ -6,5 +6,7 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   base: "/",
+  // The roadmap section reads docs/ROADMAP.md (src/roadmap.ts).
+  server: { fs: { allow: [".", "../docs/ROADMAP.md"] } },
   build: { outDir: "dist", emptyOutDir: true },
 });

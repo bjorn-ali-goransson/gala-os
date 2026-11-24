@@ -219,7 +219,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | UAC | User Account Control: the consent prompt | planned | an administrator account (the boot user or a second one) logs on with a filtered token linked to its full one (TokenLinkedToken, elevation types 2/3); `runas`, `requireAdministrator` manifests and COM elevation (`Elevation:Administrator!new:`) go to an AppInfo-like service that shows a consent prompt (or a credential prompt for a standard user) on a secure desktop the user's programs cannot reach (with SH step 3's trusted process) and creates the process with the full token; CreateProcess's ERROR_ELEVATION_REQUIRED; UAC virtualization of Program Files and HKLM for legacy programs; a scenario that drives the prompt through input and screen checks. Today an elevated caller's `runas` runs without a prompt and everyone else's is declined as a cancelled prompt (SECURITY "Elevation") |
-| D1-D4 | Disk: virtio-blk, C: kept (`persist`), the registry kept, files' contents in the disk's data area (a disk-backed C:: free space is the disk's, files larger than memory), written back lazily as Windows' cache manager does (FlushFileBuffers, write-through and unbuffered handles at once; a dirty limit throttling writers) | done | `disk_test`, `persist_test`, `volume_test`, `sqllocaldb_persist`, `writeback_test`, `writeback_crash`, `writeback_lazy`; ARCHITECTURE "Disk", "A disk-backed C:" |
+| D1-D4 | Disk: virtio-blk, a C: kept on disk, written back lazily | done | virtio-blk, C: kept (`persist`), the registry kept, files' contents in the disk's data area (a disk-backed C:: free space is the disk's, files larger than memory), written back lazily as Windows' cache manager does (FlushFileBuffers, write-through and unbuffered handles at once; a dirty limit throttling writers); `disk_test`, `persist_test`, `volume_test`, `sqllocaldb_persist`, `writeback_test`, `writeback_crash`, `writeback_lazy`; ARCHITECTURE "Disk", "A disk-backed C:" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
@@ -5011,6 +5011,16 @@ is left is delay-loaded or stubbed.
    DrawEdge/DrawFrameControl, window placement), gdi32 (16: metafiles,
    font enumeration), kernel32 (13), comdlg32 (4), oleacc, winmm's
    PlaySoundW, ws2_32's inet_pton/inet_ntop (GnuTLS).
+9. What programs look up at run time: the website's coverage figures
+   (WORKFLOW "API coverage") and the gap list above come from import
+   tables, which name nothing a program finds with GetProcAddress. gala's
+   GetProcAddress records every lookup, found or not, as a ledger row
+   (module, name, caller's module), so a run of a program lists its
+   dynamic imports the way its import table lists the static ones; a
+   test first (`getprocaddress_test`: lookups by name and by ordinal, of
+   a stub, of a missing name, each leaving its row), then a
+   `tools/import_survey.py`-style report of a scenario's rows that
+   `tools/api_coverage.py` can add to a program's measure.
 
 
 ### WD. Windows divergences: the test programs on real Windows
@@ -6108,14 +6118,22 @@ site answers on `https://gala-os.com` and nothing else. The feed has its
 own name as well: `updates.gala-os.com` is a proxied R2 custom domain in
 front of the release bucket, and `FEED_URL` in release.yml points at it
 rather than at R2's rate-limited development URL.
+The page also shows the roadmap, read from this file's "Status at a
+glance" tables when the site is built (so a change here republishes
+it), and the API coverage: how many of Windows' named functions gala's
+DLLs export, and how many of what each prebuilt program imports
+(WORKFLOW "API coverage").
 
 **Next**:
 1. Verify ownership in Google Search Console and Bing Webmaster Tools,
    which is a sign-in and so is done by hand. Search Console's DNS method
    wants a TXT record on the apex, in the same Cloudflare zone.
-2. The owner's own screenshots of gala running, replacing the two crash
+2. Refresh the API coverage figures as DLLs gain exports (they are
+   measured, not computed by the build: WORKFLOW "API coverage"), and
+   add the dynamic imports once AG step 9 records them.
+3. The owner's own screenshots of gala running, replacing the two crash
    screens the site shows now (`web/public/shots/`, listed in `App.tsx`).
-3. Open: whether the ARCHITECTURE map is generated from the document's
+4. Open: whether the ARCHITECTURE map is generated from the document's
    headings instead of restated in `web/src/content.ts`, which would stop
    the two drifting apart.
 

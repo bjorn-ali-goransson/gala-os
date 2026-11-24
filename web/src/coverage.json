@@ -1,0 +1,711 @@
+{
+ "measured": "2026-11-24",
+ "galaCommit": "c3fad6efb1",
+ "windows": {
+  "product": "Windows Server 2025 Datacenter",
+  "build": "26100.33828",
+  "dlls": 3166,
+  "exports": 122443
+ },
+ "gala": {
+  "dlls": 84,
+  "real": 5135,
+  "stubs": 591
+ },
+ "dlls": [
+  {
+   "name": "ntdll",
+   "windows": 2539,
+   "real": 277,
+   "stubs": 22
+  },
+  {
+   "name": "ucrtbase",
+   "windows": 2484,
+   "real": 678,
+   "stubs": 0
+  },
+  {
+   "name": "kernelbase",
+   "windows": 2034,
+   "real": 833,
+   "stubs": 50
+  },
+  {
+   "name": "kernel32",
+   "windows": 1692,
+   "real": 803,
+   "stubs": 65
+  },
+  {
+   "name": "msvcrt",
+   "windows": 1330,
+   "real": 339,
+   "stubs": 0
+  },
+  {
+   "name": "user32",
+   "windows": 1041,
+   "real": 441,
+   "stubs": 33
+  },
+  {
+   "name": "gdi32",
+   "windows": 993,
+   "real": 211,
+   "stubs": 23
+  },
+  {
+   "name": "advapi32",
+   "windows": 851,
+   "real": 230,
+   "stubs": 30
+  },
+  {
+   "name": "setupapi",
+   "windows": 682,
+   "real": 11,
+   "stubs": 0
+  },
+  {
+   "name": "gdiplus",
+   "windows": 630,
+   "real": 18,
+   "stubs": 0
+  },
+  {
+   "name": "rpcrt4",
+   "windows": 556,
+   "real": 56,
+   "stubs": 2
+  },
+  {
+   "name": "ole32",
+   "windows": 549,
+   "real": 91,
+   "stubs": 6
+  },
+  {
+   "name": "shell32",
+   "windows": 479,
+   "real": 68,
+   "stubs": 2
+  },
+  {
+   "name": "combase",
+   "windows": 466,
+   "real": 90,
+   "stubs": 2
+  },
+  {
+   "name": "oleaut32",
+   "windows": 425,
+   "real": 108,
+   "stubs": 0
+  },
+  {
+   "name": "clusapi",
+   "windows": 396,
+   "real": 74,
+   "stubs": 0
+  },
+  {
+   "name": "shlwapi",
+   "windows": 380,
+   "real": 44,
+   "stubs": 0
+  },
+  {
+   "name": "iphlpapi",
+   "windows": 313,
+   "real": 22,
+   "stubs": 1
+  },
+  {
+   "name": "wininet",
+   "windows": 299,
+   "real": 22,
+   "stubs": 2
+  },
+  {
+   "name": "netapi32",
+   "windows": 298,
+   "real": 8,
+   "stubs": 10
+  },
+  {
+   "name": "crypt32",
+   "windows": 295,
+   "real": 77,
+   "stubs": 153
+  },
+  {
+   "name": "msi",
+   "windows": 295,
+   "real": 31,
+   "stubs": 0
+  },
+  {
+   "name": "cfgmgr32",
+   "windows": 283,
+   "real": 9,
+   "stubs": 0
+  },
+  {
+   "name": "dbghelp",
+   "windows": 252,
+   "real": 14,
+   "stubs": 4
+  },
+  {
+   "name": "wldap32",
+   "windows": 245,
+   "real": 0,
+   "stubs": 25
+  },
+  {
+   "name": "ws2_32",
+   "windows": 196,
+   "real": 78,
+   "stubs": 2
+  },
+  {
+   "name": "webservices",
+   "windows": 193,
+   "real": 19,
+   "stubs": 4
+  },
+  {
+   "name": "winmm",
+   "windows": 180,
+   "real": 33,
+   "stubs": 1
+  },
+  {
+   "name": "odbc32",
+   "windows": 176,
+   "real": 0,
+   "stubs": 34
+  },
+  {
+   "name": "wintrust",
+   "windows": 165,
+   "real": 7,
+   "stubs": 2
+  },
+  {
+   "name": "ncrypt",
+   "windows": 162,
+   "real": 14,
+   "stubs": 57
+  },
+  {
+   "name": "resutils",
+   "windows": 146,
+   "real": 4,
+   "stubs": 0
+  },
+  {
+   "name": "powrprof",
+   "windows": 139,
+   "real": 6,
+   "stubs": 1
+  },
+  {
+   "name": "imm32",
+   "windows": 137,
+   "real": 13,
+   "stubs": 0
+  },
+  {
+   "name": "urlmon",
+   "windows": 131,
+   "real": 4,
+   "stubs": 2
+  },
+  {
+   "name": "comctl32",
+   "windows": 119,
+   "real": 39,
+   "stubs": 11
+  },
+  {
+   "name": "pdh",
+   "windows": 119,
+   "real": 7,
+   "stubs": 1
+  },
+  {
+   "name": "windowscodecs",
+   "windows": 117,
+   "real": 4,
+   "stubs": 0
+  },
+  {
+   "name": "uiautomationcore",
+   "windows": 110,
+   "real": 10,
+   "stubs": 0
+  },
+  {
+   "name": "appxdeploymentclient",
+   "windows": 106,
+   "real": 2,
+   "stubs": 0
+  },
+  {
+   "name": "secur32",
+   "windows": 98,
+   "real": 45,
+   "stubs": 1
+  },
+  {
+   "name": "shcore",
+   "windows": 97,
+   "real": 4,
+   "stubs": 0
+  },
+  {
+   "name": "winhttp",
+   "windows": 91,
+   "real": 18,
+   "stubs": 3
+  },
+  {
+   "name": "mpr",
+   "windows": 85,
+   "real": 3,
+   "stubs": 4
+  },
+  {
+   "name": "uxtheme",
+   "windows": 85,
+   "real": 31,
+   "stubs": 0
+  },
+  {
+   "name": "msctf",
+   "windows": 78,
+   "real": 2,
+   "stubs": 0
+  },
+  {
+   "name": "wtsapi32",
+   "windows": 76,
+   "real": 9,
+   "stubs": 0
+  },
+  {
+   "name": "wsock32",
+   "windows": 75,
+   "real": 33,
+   "stubs": 0
+  },
+  {
+   "name": "dhcpcsvc",
+   "windows": 71,
+   "real": 0,
+   "stubs": 1
+  },
+  {
+   "name": "authz",
+   "windows": 68,
+   "real": 0,
+   "stubs": 6
+  },
+  {
+   "name": "sppc",
+   "windows": 67,
+   "real": 15,
+   "stubs": 0
+  },
+  {
+   "name": "mswsock",
+   "windows": 64,
+   "real": 3,
+   "stubs": 0
+  },
+  {
+   "name": "bcrypt",
+   "windows": 60,
+   "real": 26,
+   "stubs": 25
+  },
+  {
+   "name": "userenv",
+   "windows": 59,
+   "real": 11,
+   "stubs": 0
+  },
+  {
+   "name": "d3d11",
+   "windows": 51,
+   "real": 2,
+   "stubs": 0
+  },
+  {
+   "name": "dwmapi",
+   "windows": 44,
+   "real": 7,
+   "stubs": 0
+  },
+  {
+   "name": "slc",
+   "windows": 40,
+   "real": 16,
+   "stubs": 0
+  },
+  {
+   "name": "schannel",
+   "windows": 37,
+   "real": 11,
+   "stubs": 0
+  },
+  {
+   "name": "security",
+   "windows": 36,
+   "real": 19,
+   "stubs": 0
+  },
+  {
+   "name": "wow64",
+   "windows": 32,
+   "real": 0,
+   "stubs": 0
+  },
+  {
+   "name": "wldp",
+   "windows": 31,
+   "real": 3,
+   "stubs": 0
+  },
+  {
+   "name": "d3d10",
+   "windows": 29,
+   "real": 1,
+   "stubs": 0
+  },
+  {
+   "name": "d3d10_1",
+   "windows": 29,
+   "real": 2,
+   "stubs": 0
+  },
+  {
+   "name": "d3dcompiler_47",
+   "windows": 29,
+   "real": 4,
+   "stubs": 0
+  },
+  {
+   "name": "comdlg32",
+   "windows": 28,
+   "real": 6,
+   "stubs": 3
+  },
+  {
+   "name": "oleacc",
+   "windows": 28,
+   "real": 5,
+   "stubs": 0
+  },
+  {
+   "name": "psapi",
+   "windows": 27,
+   "real": 7,
+   "stubs": 0
+  },
+  {
+   "name": "msftedit",
+   "windows": 25,
+   "real": 0,
+   "stubs": 0
+  },
+  {
+   "name": "dxgi",
+   "windows": 20,
+   "real": 4,
+   "stubs": 0
+  },
+  {
+   "name": "d3d12",
+   "windows": 18,
+   "real": 4,
+   "stubs": 0
+  },
+  {
+   "name": "dcomp",
+   "windows": 18,
+   "real": 4,
+   "stubs": 0
+  },
+  {
+   "name": "version",
+   "windows": 17,
+   "real": 8,
+   "stubs": 0
+  },
+  {
+   "name": "d2d1",
+   "windows": 13,
+   "real": 8,
+   "stubs": 0
+  },
+  {
+   "name": "rstrtmgr",
+   "windows": 12,
+   "real": 10,
+   "stubs": 0
+  },
+  {
+   "name": "bcryptprimitives",
+   "windows": 11,
+   "real": 1,
+   "stubs": 0
+  },
+  {
+   "name": "wofutil",
+   "windows": 11,
+   "real": 6,
+   "stubs": 0
+  },
+  {
+   "name": "riched20",
+   "windows": 9,
+   "real": 0,
+   "stubs": 0
+  },
+  {
+   "name": "xolehlp",
+   "windows": 8,
+   "real": 0,
+   "stubs": 1
+  },
+  {
+   "name": "msxml6",
+   "windows": 6,
+   "real": 2,
+   "stubs": 0
+  },
+  {
+   "name": "xmllite",
+   "windows": 6,
+   "real": 0,
+   "stubs": 2
+  },
+  {
+   "name": "msimg32",
+   "windows": 5,
+   "real": 3,
+   "stubs": 0
+  },
+  {
+   "name": "normaliz",
+   "windows": 5,
+   "real": 4,
+   "stubs": 0
+  },
+  {
+   "name": "shfolder",
+   "windows": 2,
+   "real": 2,
+   "stubs": 0
+  },
+  {
+   "name": "dwrite",
+   "windows": 1,
+   "real": 1,
+   "stubs": 0
+  }
+ ],
+ "programs": [
+  {
+   "name": "Java (JDK)",
+   "files": 16,
+   "imports": 179,
+   "real": 179,
+   "stubs": 0,
+   "static": {
+    "imports": 179,
+    "real": 179,
+    "stubs": 0
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "Git (MinGit)",
+   "files": 1,
+   "imports": 85,
+   "real": 85,
+   "stubs": 0,
+   "static": {
+    "imports": 85,
+    "real": 85,
+    "stubs": 0
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "Caddy",
+   "files": 1,
+   "imports": 49,
+   "real": 49,
+   "stubs": 0,
+   "static": {
+    "imports": 49,
+    "real": 49,
+    "stubs": 0
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "Python",
+   "files": 3,
+   "imports": 402,
+   "real": 398,
+   "stubs": 4,
+   "static": {
+    "imports": 402,
+    "real": 398,
+    "stubs": 4
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "FileZilla Server",
+   "files": 11,
+   "imports": 378,
+   "real": 374,
+   "stubs": 4,
+   "static": {
+    "imports": 378,
+    "real": 374,
+    "stubs": 4
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "PowerShell",
+   "files": 5,
+   "imports": 471,
+   "real": 465,
+   "stubs": 0,
+   "static": {
+    "imports": 466,
+    "real": 460,
+    "stubs": 0
+   },
+   "missingDlls": []
+  },
+  {
+   "name": ".NET",
+   "files": 5,
+   "imports": 465,
+   "real": 459,
+   "stubs": 0,
+   "static": {
+    "imports": 460,
+    "real": 454,
+    "stubs": 0
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "OpenSSH",
+   "files": 3,
+   "imports": 277,
+   "real": 273,
+   "stubs": 4,
+   "static": {
+    "imports": 277,
+    "real": 273,
+    "stubs": 4
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "PostgreSQL",
+   "files": 14,
+   "imports": 637,
+   "real": 609,
+   "stubs": 24,
+   "static": {
+    "imports": 637,
+    "real": 609,
+    "stubs": 24
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "FileZilla",
+   "files": 22,
+   "imports": 960,
+   "real": 906,
+   "stubs": 54,
+   "static": {
+    "imports": 960,
+    "real": 906,
+    "stubs": 54
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "curl",
+   "files": 1,
+   "imports": 277,
+   "real": 258,
+   "stubs": 19,
+   "static": {
+    "imports": 277,
+    "real": 258,
+    "stubs": 19
+   },
+   "missingDlls": []
+  },
+  {
+   "name": "Chromium",
+   "files": 3,
+   "imports": 1322,
+   "real": 1183,
+   "stubs": 21,
+   "static": {
+    "imports": 531,
+    "real": 520,
+    "stubs": 11
+   },
+   "missingDlls": [
+    "mfplat.dll",
+    "hid.dll",
+    "esent.dll",
+    "bthprops.cpl",
+    "winusb.dll",
+    "winspool.drv",
+    "propsys.dll",
+    "wevtapi.dll"
+   ]
+  },
+  {
+   "name": "Microsoft Office (Word, Excel, PowerPoint)",
+   "files": 78,
+   "imports": 3548,
+   "real": 2038,
+   "stubs": 118,
+   "static": {
+    "imports": 459,
+    "real": 457,
+    "stubs": 0
+   },
+   "missingDlls": [
+    "msvcp_win.dll",
+    "chakra.dll",
+    "mfplat.dll",
+    "ipcfile.dll",
+    "usp10.dll",
+    "hlink.dll",
+    "winspool.drv",
+    "httpapi.dll"
+   ],
+   "version": "16.0.20527.20150"
+  }
+ ]
+}
