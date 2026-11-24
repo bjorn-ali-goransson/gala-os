@@ -810,4 +810,212 @@ export const ar: Record<string, string> = {
     "ما تحتاج إليه",
   "Limits for now":
     "القيود حاليًا",
+  "API coverage":
+    "تغطية الواجهات البرمجية",
+  "Roadmap":
+    "خارطة الطريق",
+  "How much of Windows' API gala's own DLLs provide, measured two ways: against all of Windows, and against what real programs import.":
+    "كم توفّر مكتبات DLL الخاصة بـ gala من الواجهات البرمجية لـ Windows، مقيسًا بطريقتين: مقابل Windows كله، ومقابل ما تستورده برامج حقيقية.",
+  "Every item of gala's roadmap and where it stands, read from the roadmap itself when this page is built.":
+    "كل بند في خارطة طريق gala وأين وصل، مقروءًا من خارطة الطريق نفسها عند بناء هذه الصفحة.",
+  "What programs import":
+    "ما تستورده البرامج",
+  "The Windows functions each program imports, from its executables and the DLLs of its own they load, and how many of those gala's DLLs export. The bar counts all of them; the figure after it, only the static imports, which Windows resolves before the program runs (the rest are delay imports, each resolved the first time it is called).":
+    "دوال Windows التي يستوردها كل برنامج، من ملفاته التنفيذية ومن مكتبات DLL الخاصة به التي تحمّلها، وكم منها تصدّره مكتبات gala. يعدّها الشريط كلها؛ والرقم بعده لا يعدّ إلا الاستيراد الثابت، الذي يحلّه Windows قبل أن يعمل البرنامج (والباقي استيراد مؤجَّل، تُحلّ كل دالة منه أول مرة تُستدعى).",
+  "Windows' DLLs, one by one":
+    "مكتبات DLL في Windows، واحدة واحدة",
+  "The largest of the Windows DLLs gala has its own of, each against every function the Windows one exports. A DLL gala does not have counts as none of its functions in the whole above.":
+    "أكبر مكتبات DLL في Windows التي لدى gala نسختها الخاصة منها، كلٌّ مقابل كل دالة تصدّرها نظيرتها في Windows. أما المكتبة التي ليست لدى gala فلا تُحسب أيٌّ من دوالها في الكلّ أعلاه.",
+  "exported for real":
+    "مُصدَّرة بتنفيذ فعلي",
+  "a stub that reports failure":
+    "بديل يُبلغ عن الفشل",
+  "What these figures do not see":
+    "ما لا تراه هذه الأرقام",
+  "Functions a program looks up while it runs (GetProcAddress) are in no import table, and neither are the methods of COM interfaces: a program can import everything it names and still stop on one of those.":
+    "الدوال التي يبحث عنها البرنامج أثناء تشغيله (GetProcAddress) ليست في أي جدول استيراد، ولا كذلك توابع واجهات COM: قد يجد البرنامج كل ما يستورده بالاسم ثم يتوقف عند إحداها.",
+  "An export that exists may do only part of its job. These figures say what a program finds when it loads, not that it works: the boot scenarios in What runs say that.":
+    "قد لا تؤدي الدالة المُصدَّرة إلا جزءًا من عملها. تقول هذه الأرقام ما يجده البرنامج عند تحميله، لا أنه يعمل: سيناريوهات الإقلاع في «ما الذي يعمل» هي التي تقول ذلك.",
+  "They are read from the files' import and export tables, metadata every Windows binary carries, never from Microsoft's code.":
+    "تُقرأ من جداول الاستيراد والتصدير في الملفات، وهي بيانات وصفية يحملها كل ملف ثنائي في Windows، ولا تُقرأ أبدًا من شيفرة Microsoft.",
+  "Microsoft Office (Word, Excel, PowerPoint)":
+    "Microsoft Office (Word وExcel وPowerPoint)",
+  "Done":
+    "منجَز",
+  "Later":
+    "لاحقًا",
+  "Parked":
+    "مؤجَّل",
+  "Foundation and the NT layer":
+    "الأساس وطبقة NT",
+  "Boot, memory, scheduler, user mode":
+    "الإقلاع والذاكرة والمجدول ونمط المستخدم",
+  "NT core services":
+    "خدمات NT الأساسية",
+  "XSAVE and AVX state":
+    "حالة XSAVE وAVX",
+  "Screen console, cargo xtask screenshot":
+    "طرفية الشاشة، cargo xtask screenshot",
+  "SMP bring-up":
+    "تشغيل المعالجات المتعددة (SMP)",
+  "SMP scheduling":
+    "الجدولة على المعالجات المتعددة",
+  "SMP memory: user TLB shootdown":
+    "ذاكرة SMP: إبطال TLB لنمط المستخدم",
+  "SMP robustness and early-boot telemetry":
+    "متانة SMP وقياسات بداية الإقلاع",
+  "Clock calibration under host load":
+    "معايرة الساعة تحت حمل المضيف",
+  "SMP, the rest":
+    "SMP، البقية",
+  "Test speed":
+    "سرعة الاختبارات",
+  "Boot-test limits on the VM's run time":
+    "حدود boot-test على زمن تشغيل الآلة الافتراضية",
+  "Ledger, event stream, backtraces, benchmarks":
+    "السجل وتدفق الأحداث وتتبّع المكدس وقياسات الأداء",
+  "gala-um":
+    "gala-um",
+  "gala-um: more than one NT process":
+    "gala-um: أكثر من عملية NT واحدة",
+  "gala-um: a window on the host":
+    "gala-um: نافذة على المضيف",
+  "Windows applications in CI through gala-um":
+    "تطبيقات Windows في CI عبر gala-um",
+  "Lints before every commit":
+    "فحوص الشيفرة قبل كل إيداع",
+  "Portability seams for a second architecture":
+    "مفاصل النقل إلى معمارية ثانية",
+  "Hygiene sweeps":
+    "حملات تنظيف الشيفرة",
+  "Programs and Win32":
+    "البرامج وWin32",
+  "kernel32, first part":
+    "kernel32، الجزء الأول",
+  "Go hello world":
+    "«Hello world» بلغة Go",
+  "Workable Go programs":
+    "برامج Go قابلة للاستخدام",
+  "Networking: virtio-net, TCP/IP, AFD, ws2_32, UDP":
+    "الشبكات: virtio-net وTCP/IP وAFD وws2_32 وUDP",
+  "Nginx (x64 build, master/worker, zlib, PCRE2, OpenSSL)":
+    "Nginx (بناء x64، رئيسي/عامل، zlib وPCRE2 وOpenSSL)",
+  "IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses":
+    "مقابس IPv6: الاسترجاع ::1 وIPV6_V6ONLY والمكدس المزدوج وعناوين البطاقة",
+  "Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks":
+    "نحو الاستضافة الذاتية: الأنابيب وbusybox والنصوص البرمجية وTinyCC (ونفسه) وmake وLua وسرعة البناء وSQLite وأقفال الملفات",
+  "busybox httpd and wget over loopback":
+    "busybox httpd وwget عبر الاسترجاع المحلي",
+  "32-bit x86 programs (WOW64)":
+    "برامج x86 ذات 32 بت (WOW64)",
+  "Unmodified prebuilt programs":
+    "برامج مبنية مسبقًا دون تعديل",
+  "Security model: tokens, descriptors, access checks, logons, integrity, UIPI":
+    "نموذج الأمان: الرموز والواصفات وفحوص الوصول وتسجيلات الدخول والسلامة وUIPI",
+  "User Account Control: the consent prompt":
+    "التحكم في حساب المستخدم: نافذة الموافقة",
+  "Disk: virtio-blk, a C: kept on disk, written back lazily":
+    "القرص: virtio-blk، ومحرك C: محفوظ على القرص، يُكتب إليه بتأخير",
+  "Schannel and the HTTP stacks on it":
+    "Schannel ومكدسات HTTP المبنية عليه",
+  "API gaps in the shell and runtime DLLs":
+    "ثغرات الواجهات في مكتبات الصدفة ووقت التشغيل",
+  "Windows divergences: the test programs on real Windows":
+    "اختلافات Windows: برامج الاختبار على Windows حقيقي",
+  "Linux personality":
+    "شخصية Linux",
+  "Linux containers: Podman and Docker on Linux, reached from Windows":
+    "حاويات Linux: Podman وDocker على Linux، يُوصل إليها من Windows",
+  "Desktop Linux applications":
+    "تطبيقات Linux المكتبية",
+  "ARM64 port":
+    "النقل إلى ARM64",
+  "Virtual machines on gala":
+    "آلات افتراضية على gala",
+  "64-bit Windows programs on ARM64":
+    "برامج Windows ذات 64 بت على ARM64",
+  "Android applications":
+    "تطبيقات Android",
+  "Desktop, sessions and remote access":
+    "سطح المكتب والجلسات والوصول عن بُعد",
+  "Windows on the screen":
+    "النوافذ على الشاشة",
+  "Styled desktop and input":
+    "سطح مكتب منسَّق والإدخال",
+  "FileZilla":
+    "FileZilla",
+  "The Windows look":
+    "مظهر Windows",
+  "The shell in user mode":
+    "الصدفة في نمط المستخدم",
+  "Start menu: default apps and install-on-click":
+    "قائمة ابدأ: التطبيقات الافتراضية والتثبيت بنقرة",
+  "An AI-enabled start menu":
+    "قائمة ابدأ مزوّدة بالذكاء الاصطناعي",
+  "The system's actions as tools for AI clients":
+    "أفعال النظام أدواتٍ لعملاء الذكاء الاصطناعي",
+  "UI Automation and windows across processes":
+    "UI Automation والنوافذ عبر العمليات",
+  "Server and desktop workloads kept apart":
+    "فصل أحمال الخادم عن أحمال سطح المكتب",
+  "SSH as a remote shell":
+    "SSH صدفةً عن بُعد",
+  "An interactive console prompt":
+    "موجّه طرفية تفاعلي",
+  "Remote access and sessions":
+    "الوصول عن بُعد والجلسات",
+  "Graphics and GPU":
+    "الرسوميات ومعالج الرسوميات",
+  "Sound":
+    "الصوت",
+  "USB: xHCI, keyboards, mice and storage":
+    "USB: xHCI ولوحات المفاتيح والفئران والتخزين",
+  "The installer: gala onto a machine's disk":
+    "المثبّت: gala على قرص الجهاز",
+  "A real laptop: gala on hardware, waiting for updates":
+    "حاسوب محمول حقيقي: gala على العتاد، بانتظار التحديثات",
+  "Wi-Fi: a dynamic interface, 802.11 and the Windows APIs":
+    "Wi-Fi: واجهة ديناميكية و802.11 وواجهات Windows البرمجية",
+  "A web browser: stock Edge":
+    "متصفح ويب: Edge كما هو",
+  "Microsoft 365 apps and the new Outlook":
+    "تطبيقات Microsoft 365 وOutlook الجديد",
+  "Robustness, live update, tooling":
+    "المتانة والتحديث الحي والأدوات",
+  "Invariants":
+    "الثوابت",
+  "Fault injection":
+    "حقن الأعطال",
+  "Lock-order checking":
+    "التحقق من ترتيب الأقفال",
+  "Flight recorder, watchdogs, crash record across reboots":
+    "مسجّل الرحلة والمراقبون وسجل الأعطال عبر إعادات التشغيل",
+  "Deterministic simulation in gala-um":
+    "محاكاة حتمية في gala-um",
+  "Charging resources to an owner":
+    "تحميل الموارد على مالكها",
+  "Live mocking: clock control, record/replay, device faults":
+    "المحاكاة الحية: التحكم في الساعة والتسجيل/الإعادة وأعطال الأجهزة",
+  "Chain of trust for updates":
+    "سلسلة الثقة للتحديثات",
+  "Live update, kernel included":
+    "التحديث الحي، النواة ضمنه",
+  "OpenTelemetry as the telemetry model":
+    "OpenTelemetry نموذجًا للقياس عن بُعد",
+  "Gap reports from real runs, straight to GitHub":
+    "تقارير الثغرات من تشغيلات حقيقية، مباشرة إلى GitHub",
+  "Security updates: where fixes come from and how they reach machines":
+    "التحديثات الأمنية: من أين تأتي الإصلاحات وكيف تصل إلى الأجهزة",
+  "Crash-safe: no hard resets, a kind crash screen":
+    "آمن من الأعطال: لا إعادة تشغيل قسرية، وشاشة عطل لطيفة",
+  "A task manager for Windows and Linux programs alike":
+    "مدير مهام لبرامج Windows وLinux على السواء",
+  "A file explorer over every file system":
+    "مستكشف ملفات فوق كل نظام ملفات",
+  "gala install over winget manifests":
+    "gala install فوق بيانات winget",
+  "Snapshots: whole machines, then single programs, from the command line":
+    "اللقطات: أجهزة كاملة، ثم برامج مفردة، من سطر الأوامر",
+  "Windows drivers, staged and isolated":
+    "مشغّلات Windows، مرحلية ومعزولة",
 };

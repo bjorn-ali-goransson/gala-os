@@ -54,7 +54,7 @@ for name in ["ProductName", "EditionID", "InstallationType", "DisplayVersion",
         lines.append(f"{name}\t{winreg.QueryValueEx(k, name)[0]}")
     except OSError:
         pass
-with open(os.path.join(out, "version.txt"), "w", encoding="utf-8") as f:
+with open(os.path.join(out, "version.txt"), "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(lines) + "\n")
 
 dlls = sorted(
@@ -112,13 +112,13 @@ for n in dlls:
     counts[n.lower()] = len(again)
     if stderr.strip():
         errors.append(f"{n}: {stderr.strip()}")
-with open(os.path.join(out, "dlls.tsv"), "w", encoding="utf-8") as f:
+with open(os.path.join(out, "dlls.tsv"), "w", encoding="utf-8", newline="\n") as f:
     for n in dlls:
         f.write(f"{n.lower()}\t{counts.get(n.lower(), 0)}\n")
-with open(os.path.join(out, "errors.txt"), "w", encoding="utf-8") as f:
+with open(os.path.join(out, "errors.txt"), "w", encoding="utf-8", newline="\n") as f:
     f.write("".join(e + "\n" for e in unreadable + errors))
 
-with open(os.path.join(out, "exports.tsv"), "w", encoding="utf-8") as f:
+with open(os.path.join(out, "exports.tsv"), "w", encoding="utf-8", newline="\n") as f:
     for dll, ordinal, name, forward in sorted(set(rows)):
         f.write(f"{dll}\t{ordinal}\t{name}\t{forward}\n")
 print(f"{len(dlls)} x64 DLLs, {len(set(r[0] for r in rows))} with named exports, "
