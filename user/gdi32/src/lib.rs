@@ -103,6 +103,7 @@ unsafe extern "system" {
     ) -> *mut c_void;
     fn UnmapViewOfFile(at: *const c_void) -> i32;
     fn GetCurrentThreadId() -> u32;
+    fn SetLastError(code: u32);
 }
 
 type Handle = *mut c_void;
@@ -461,6 +462,12 @@ fn present_hook(hdc: Handle) {
     // SAFETY: user32 registered a function of this signature (its `drew`).
     let hook: extern "system" fn(Handle) = unsafe { core::mem::transmute(hook) };
     hook(hdc);
+}
+
+/// Sets the calling thread's last error.
+pub(crate) fn set_last_error(code: u32) {
+    // SAFETY: plain call.
+    unsafe { SetLastError(code) };
 }
 
 pub(crate) fn unsupported(what: &[u8], detail: u64) {

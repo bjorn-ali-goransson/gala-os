@@ -10,6 +10,7 @@ use crate::{
 };
 
 const SRCCOPY: u32 = 0x00cc_0020;
+const ERROR_INVALID_HANDLE: u32 = 6;
 
 /// The DC's brush colour (None: the null brush).
 pub(crate) fn brush(dc: &Dc, slots: &[Object]) -> Option<u32> {
@@ -768,6 +769,37 @@ pub extern "system" fn GetTextMetricsW(hdc: Handle, out: *mut font::TextMetricW)
         1
     })
     .unwrap_or(0)
+}
+
+/// GetTextCharsetInfo(hdc, sig, flags): the character set the selected
+/// font is realized with, and through `sig` the Unicode ranges and code
+/// pages its face covers (`font::signature`). `flags` is reserved and
+/// not used, as documented; a non-zero one is not an error. Without a DC
+/// the answer is DEFAULT_CHARSET with ERROR_INVALID_HANDLE, and the
+/// signature is cleared rather than left as it was. Word delay-loads
+/// this one while it lays its first text out, so an absent export ends
+/// the process on the delay-load helper's 0xc06d007f (ROADMAP OF).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTextCharsetInfo(hdc: Handle, sig: *mut [u32; 6], _flags: u32) -> u32 {
+    let got = with_dc(hdc, |dc, slots| {
+        let font = font_of(dc, slots);
+        (u32::from(font::realized_charset(&font)), font::signature(&font))
+    });
+    let (charset, signature) = got.unwrap_or((u32::from(font::DEFAULT_CHARSET), [0; 6]));
+    if !sig.is_null() {
+        // SAFETY: the caller's FONTSIGNATURE.
+        unsafe { sig.write(signature) };
+    }
+    if got.is_none() {
+        crate::set_last_error(ERROR_INVALID_HANDLE);
+    }
+    charset
+}
+
+/// GetTextCharset: GetTextCharsetInfo without the signature.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTextCharset(hdc: Handle) -> u32 {
+    GetTextCharsetInfo(hdc, core::ptr::null_mut(), 0)
 }
 
 /// GetTextFaceW(hdc, n, buf): the selected font's face name; the

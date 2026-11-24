@@ -501,9 +501,7 @@ pub extern "system" fn EnumFontFamiliesExW(
             metric,
             flags: if weight >= 700 { NTM_BOLD } else { NTM_REGULAR },
             size_em: em,
-            // Latin 1 (bit 0 of the Unicode ranges' first word), code page
-            // 1252 (bit 0 of the ANSI code pages).
-            signature: [1, 0, 0, 0, 1, 0],
+            signature: font::LATIN_SIGNATURE,
         };
         result = callback(&e, &m, TRUETYPE_FONTTYPE, param);
         if result == 0 {
