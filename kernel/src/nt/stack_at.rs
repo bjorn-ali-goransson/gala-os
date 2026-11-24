@@ -13,6 +13,13 @@
 //! `<module>+<offset>`, which is the part of the DLL to look at and the
 //! gala call it reached last.
 //!
+//! A capture also says what the call was made with: the first
+//! [`ARGS_SHOWN`] arguments, and the text any of them points at. That is
+//! what turns "who called this" into "who called this, and for what" --
+//! the name a gap was recorded under (`GalaRecordMissing`), the bytes a
+//! write was about to write, the path an open failed on -- without a
+//! trigger per service.
+//!
 //! The stack is scanned, not unwound: every word of it that points into
 //! a loaded image is named. That brings dead values from earlier frames
 //! with it, so a line is evidence rather than proof -- but it needs
@@ -72,6 +79,21 @@ const MAX_SCAN_WORDS: usize = 512;
 
 /// Captures when `stack_at=` gives no count.
 const DEFAULT_CAPTURES: u32 = 4;
+
+/// Arguments a capture names. Four are in registers on x64 and the rest
+/// on the user stack (`abi::syscall_arg`), and eight is what it takes to
+/// reach the ones that say what a call is about: `NtWriteFile`'s buffer
+/// is its sixth. Past a service's own arguments the values are whatever
+/// its caller left there, as the scanned stack words are: a line is
+/// evidence, not proof.
+const ARGS_SHOWN: usize = 8;
+
+/// The longest text a capture quotes from an argument, and the shortest
+/// run that is quoted at all: a run of three characters or fewer is as
+/// likely the low bytes of a number as a name
+/// (`crashreport::read_text`).
+const ARG_TEXT: usize = 64;
+const ARG_TEXT_LEAST: usize = 4;
 
 /// The most a count may ask for. A number is typed on purpose, so this
 /// is a guard against a typo rather than a budget: when the calls in
@@ -282,7 +304,7 @@ pub(super) fn on_call(call: &Call<'_>, name: &str) {
         }
     }
     let nth = ASKED.load(Ordering::Relaxed).saturating_sub(left) + 1;
-    capture(&call.process, &regs, &bytes[..read], regs.sp(), name, nth);
+    capture(call, &regs, &bytes[..read], regs.sp(), name, nth);
 }
 
 /// Says once that the count is spent, with what the filter passed over:
@@ -352,9 +374,31 @@ fn read_stack(process: &Process, sp: u64, buf: &mut [u8]) -> usize {
     at.wrapping_sub(sp) as usize
 }
 
-/// Logs where `regs` came from: the instruction, then every word of the
-/// already read `stack` that points into a loaded image.
-fn capture(process: &Process, regs: &UserRegs, stack: &[u8], sp: u64, name: &str, nth: u32) {
+/// A capture's arguments as the log writes them: hexadecimal, in order,
+/// and `?` for one that could not be read (a stack argument on a page
+/// that is not there).
+struct Args<'a>(&'a [Option<u64>; ARGS_SHOWN]);
+
+impl core::fmt::Display for Args<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, value) in self.0.iter().enumerate() {
+            if i != 0 {
+                f.write_str(", ")?;
+            }
+            match value {
+                Some(v) => write!(f, "{v:#x}")?,
+                None => f.write_str("?")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Logs what `regs` was called with and where it came from: the
+/// arguments and the text they point at, the instruction, then every
+/// word of the already read `stack` that points into a loaded image.
+fn capture(call: &Call<'_>, regs: &UserRegs, stack: &[u8], sp: u64, name: &str, nth: u32) {
+    let process = &call.process;
     let tid = super::thread::current()
         .and_then(|t| match &t.body {
             super::object::ObjectBody::Thread(t) => Some(t.id),
@@ -368,6 +412,26 @@ fn capture(process: &Process, regs: &UserRegs, stack: &[u8], sp: u64, name: &str
         ASKED.load(Ordering::Relaxed),
         At::of(process, regs.ip())
     );
+    // What the call was made with, before the stack it was made from:
+    // the values on one line, and a line per argument that points at
+    // text, which is what a service's own name for the thing it was
+    // asked about reads as.
+    let mut args = [None; ARGS_SHOWN];
+    for (i, slot) in args.iter_mut().enumerate() {
+        *slot = call.arg(i).ok();
+    }
+    info!("stack:   arguments 0-{}: {}", ARGS_SHOWN - 1, Args(&args));
+    let read = |addr: u64, out: &mut [u8]| process.read(addr, out).is_ok();
+    for (i, value) in args.iter().enumerate().filter_map(|(i, v)| v.map(|v| (i, v))) {
+        let mut text = [0u8; ARG_TEXT];
+        let chars = super::crashreport::read_text(value, &mut text, &read);
+        if chars >= ARG_TEXT_LEAST {
+            info!(
+                "stack:   argument {i} reads as \"{}\"",
+                core::str::from_utf8(&text[..chars]).unwrap_or("?")
+            );
+        }
+    }
     let mut shown = 0;
     for (i, word) in stack.chunks_exact(8).enumerate() {
         let mut value = [0u8; 8];
