@@ -470,25 +470,34 @@ opentelemetry-proto's definitions:
 
 Every STATUS_NOT_IMPLEMENTED, STATUS_INVALID_SYSTEM_SERVICE, unknown
 information class, unsupported flag or TODO path increments a counter
-keyed by (service, what, detail) in a fixed 512-entry table. A record
-the table has no room for is still counted under its kind, so a dump
-says what it lost: one line per kind, `?full` for a table with nothing
-free left and `?bulk` for the bulk cap below, with `?` / `ledger full`
-for the kinds past the 32 the drop table itself names. When running a
-real program, this list is the work queue, ranked by how often it was
-hit (scenario `ledger_test`).
+keyed by (service, what, detail) in a table of 512 entries, and then
+on the heap, which the table grows into fallibly by at most 1536 more.
+A record there is no room for is still counted under its kind, so a
+dump says what it lost: one line per kind, `?full` for both tables full
+and `?bulk` for the bulk cap below, with `?` / `ledger full` for the
+kinds past the 32 the drop table itself names. The 1536 is a guard
+against a caller that reports a new name per call, in the spirit of
+`stack_at=`'s cap, and not a budget: a Word startup fills the fixed 512
+and loses 44 rows of four kinds after them, which is what the heap
+part is for. When running a real program, this list is the work queue,
+ranked by how often it was hit (scenario `ledger_test`).
+
 Names from user mode (`GalaRecordMissing`, the registry's absent keys)
-live in a second fixed table of 512 names; a name that finds no room is
-`?user`, and a name that is not plain text is `?text` -- a caller's bug
-and no cap of the ledger's, told apart because a row that said `?user`
-of a name read for more bytes than the caller meant sent the reader
-after a cap of the ledger's instead (`ledger_test` reports one of each). Invariants (`nt::ledger`): each dump gives back the names no
+live in a second table of 512 names that grows the same way; a name
+that finds no room is `?user`, and a name that is not plain text is
+`?text` -- a caller's bug and no cap of the ledger's, told apart
+because a row that said `?user` of a name read for more bytes than the
+caller meant sent the reader after a cap of the ledger's instead
+(`ledger_test` reports one of each).
+
+Invariants (`nt::ledger`): each dump gives back the names no
 entry uses any more, so the table holds the names of the gaps since the
 last dump, not every name of the boot; and bulk reports (the registry's
-`absent key`s, thousands in an Office install) hold at most 384 names
-and 384 entries, so a rarer gap such as a missing DLL still finds room
-for its name between two dumps. Whether those caps are right is in the
-dump: `?bulk` lines are the caps working as meant, while a `?full` line
+`absent key`s, thousands in an Office install) hold at most three
+quarters of either table (1536 of 2048), which is the share the fixed
+table alone gave them, so a rarer gap such as a missing DLL still
+finds room for its name between two dumps. Whether those caps are
+right is in the dump: `?bulk` lines are the caps working as meant, while a `?full` line
 of a rarer kind says a gap was lost and the caps need revisiting. A name
 is 96 bytes, and a registry key's is built to fit in them
 (`nt::registry_calls::absent_name`): a key under a user hive is named by
@@ -500,12 +509,12 @@ events carry every open's full name for whoever wants the hive itself.
 
 `ledger_except=<text>[,<text>...]` keeps the gaps whose names hold one
 of the texts out of the table altogether -- no name, no record and no
-hit -- so that the 512 records go to the rest. The texts are parts of a
+hit -- so that the 2048 records go to the rest. The texts are parts of a
 name and are compared without regard to case, so one text covers a
 family a program reports once in every module it loads:
 `register_frame` holds both the registering and the deregistering name
-and is 86 of the 409 records a Word startup leaves, a fifth of them and
-as many of the 512 names. What the filter is not for is a gap that is
+and is 86 of the 409 records a Word startup leaves, a fifth of them
+and as many of the 2048 names. What the filter is not for is a gap that is
 merely known, because a record it keeps out is one the next reader does
 not see: every dump says how many records each text kept out, as
 `?except` lines, the texts that kept out none included -- a name a dump
@@ -517,8 +526,9 @@ every gap is recorded, as without it, a filter that quietly excluded
 nothing reading afterwards as a table the gaps it was meant to keep out
 were entitled to fill. A dump of a program that recorded nothing says
 nothing at all, filter or no filter. Scenario `ledger_except`, whose
-program reports one gap after the 600 that fill the table without it:
-that row is in the dump only when the filter freed the slot it took.
+program reports one gap after the 2100 that fill both tables without
+it: that row is in the dump only when the filter freed the slot it
+took.
 
 - The dispatcher records unknown services and, generically, any
   STATUS_INVALID_INFO_CLASS (with the class argument, per

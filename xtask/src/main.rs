@@ -12166,9 +12166,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
     Scenario {
         // The ledger's exclusion filter (`ledger_except=`): a gap whose
         // name holds one of the texts is not recorded at all, so the
-        // table's slots go to the rest. The program above fills the
-        // 512-entry table with 600 gaps under one name and reports one
-        // more afterwards, which a full table drops (`ledger_test`
+        // tables' slots go to the rest. The program above fills the
+        // 2048 entries (512 fixed and 1536 the heap gives) with 2100
+        // gaps under one name and reports one more afterwards, which
+        // full tables drop (`ledger_test`
         // expects the `?full` line that says so); with that one name
         // excluded, the later gap has a slot, which is what says the
         // filter freed the table and did not only hide what it matched.
@@ -12188,11 +12189,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
              no slot of the table and no hit",
             "ledger_test: ok",
             "exited with status 0x00000000",
-            // The gap after the 600, which only a freed table records.
+            // The gap after the 2100, which only freed tables record.
             r#"ledger: {"service":"ledger_test.exe!after","what":"other","detail":0,"hits":1,"#,
             // What each text kept out, the one that kept out nothing
             // included.
-            r#"ledger: {"service":"?except","what":"LEDGER_TEST.EXE!FILL","detail":0,"hits":600,"#,
+            r#"ledger: {"service":"?except","what":"LEDGER_TEST.EXE!FILL","detail":0,"hits":2100,"#,
             r#"ledger: {"service":"?except","what":"no_such_gap","detail":0,"hits":0,"#,
             // The two gaps this program asks of Windows as well are
             // recorded as ever: the filter kept out the name it was
