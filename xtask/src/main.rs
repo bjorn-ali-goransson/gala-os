@@ -1637,6 +1637,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("ole32_test", "user32.dll", "Windows/System32"),
     ("ole32_test", "gdi32.dll", "Windows/System32"),
     ("ole32_test", "user/bin/ole32_test.exe", "gala"),
+    ("moniker_test", "ntdll.dll", "Windows/System32"),
+    ("moniker_test", "kernel32.dll", "Windows/System32"),
+    ("moniker_test", "msvcrt.dll", "Windows/System32"),
+    ("moniker_test", "ole32.dll", "Windows/System32"),
+    ("moniker_test", "combase.dll", "Windows/System32"),
+    ("moniker_test", "oleaut32.dll", "Windows/System32"),
+    ("moniker_test", "advapi32.dll", "Windows/System32"),
+    ("moniker_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("moniker_test", "user32.dll", "Windows/System32"),
+    ("moniker_test", "gdi32.dll", "Windows/System32"),
+    ("moniker_test", "user/bin/moniker_test.exe", "gala"),
     ("shell32_test", "ntdll.dll", "Windows/System32"),
     ("shell32_test", "kernel32.dll", "Windows/System32"),
     ("shell32_test", "msvcrt.dll", "Windows/System32"),
@@ -10208,6 +10219,18 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=wow64_shlwapi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wow64_shlwapi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: ole32's monikers and the running object table -- parsing a
+        // display name, the four kinds of moniker and what composing
+        // them gives, and registering, finding and revoking a running
+        // object -- against what Windows 11 answers. Word's
+        // Mso20win32client.dll delay-loads MkParseDisplayName
+        // (user/moniker_test/main.c, mingw).
+        name: "moniker_test",
+        cmdline: "qemu_exit run=moniker_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["moniker_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the

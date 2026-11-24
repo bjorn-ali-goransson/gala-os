@@ -12,9 +12,8 @@
 //!   reserved argument may be 0 or 1, as on Windows, and a refused one
 //!   leaves the caller's pointer alone.
 //!   Revoking a parameter that is not there is E_FAIL, as on Windows,
-//!   and not the documented S_FALSE. There is
-//!   no running object table (GetRunningObjectTable, and
-//!   EnumObjectParam, are recorded and fail).
+//!   and not the documented S_FALSE. GetRunningObjectTable gives the
+//!   process's table (moniker.rs); EnumObjectParam is recorded and fails.
 //! - CoImpersonateClient / CoRevertToSelf: gala has no cross-process COM
 //!   calls, so there is never a call to impersonate the client of:
 //!   RPC_E_CALL_COMPLETE, as outside a call on Windows.
@@ -233,12 +232,14 @@ extern "system" fn get_options(this: *mut BindCtx, opts: *mut u8) -> HResult {
     S_OK
 }
 
+/// IBindCtx::GetRunningObjectTable: the process's table, the same object
+/// GetRunningObjectTable hands out (measured on Windows 11: the test
+/// program gets one pointer from both).
 extern "system" fn running_object_table(_: *mut BindCtx, out: *mut *mut c_void) -> HResult {
-    if !out.is_null() {
-        put(out, core::ptr::null_mut());
+    if out.is_null() {
+        return E_POINTER;
     }
-    missing(b"ole32.dll!IBindCtx::GetRunningObjectTable(no running object table)", 0);
-    E_NOTIMPL
+    super::moniker::bind_ctx_table(out)
 }
 
 /// `name` (NUL-terminated) as a fixed key, or None if it is too long.
