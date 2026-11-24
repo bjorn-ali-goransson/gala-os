@@ -9476,6 +9476,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("moniker_test", "user32.dll", "Windows/System32"),
     ("moniker_test", "gdi32.dll", "Windows/System32"),
     ("moniker_test", "user/bin/moniker_test.exe", "gala"),
+    ("oleload_test", "ntdll.dll", "Windows/System32"),
+    ("oleload_test", "kernel32.dll", "Windows/System32"),
+    ("oleload_test", "msvcrt.dll", "Windows/System32"),
+    ("oleload_test", "ole32.dll", "Windows/System32"),
+    ("oleload_test", "combase.dll", "Windows/System32"),
+    ("oleload_test", "oleaut32.dll", "Windows/System32"),
+    ("oleload_test", "advapi32.dll", "Windows/System32"),
+    ("oleload_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("oleload_test", "user32.dll", "Windows/System32"),
+    ("oleload_test", "gdi32.dll", "Windows/System32"),
+    ("oleload_test", "user/bin/oleload_test.exe", "gala"),
     ("shell32_test", "ntdll.dll", "Windows/System32"),
     ("shell32_test", "kernel32.dll", "Windows/System32"),
     ("shell32_test", "msvcrt.dll", "Windows/System32"),
@@ -17911,6 +17922,18 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=moniker_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["moniker_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: OleLoad -- the embedded object a storage holds,
+        // activated and loaded -- against what Windows 11 answers:
+        // the order of the calls, the client site before or after
+        // the load as OLEMISC_SETCLIENTSITEFIRST says, and what each
+        // refusal leaves behind. Word's WWLIB.DLL delay-loads
+        // OleLoad (user/oleload_test/main.c, mingw).
+        name: "oleload_test",
+        cmdline: "qemu_exit run=oleload_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["oleload_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the

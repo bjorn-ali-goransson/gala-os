@@ -5663,7 +5663,8 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   registration keeps the object alive until it has (a revoke meanwhile
   puts the registration out of reach and leaves its reference for the
   borrow to give back).
-- **Objects in streams** (`persist.rs`): a persisted object is its
+- **Objects in streams and storages** (`persist.rs`): a persisted
+  object is its
   class id and then whatever the object writes. WriteClassStm writes
   the CLSID's sixteen bytes as they sit in memory, at the stream's
   position; ReadClassStm zeroes the caller's CLSID first, so a stream
@@ -5686,6 +5687,41 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   zeroed (all measured, `ole32_test`). A moniker's own Save and Load are
   not there (`moniker.rs`), so persisting one through these is recorded
   and fails.
+
+  OleLoad does the same for a storage, and in that order (measured,
+  `oleload_test`): the caller's pointer is zeroed, then
+  IStorage::Stat(STATFLAG_NONAME) for the class the storage was saved
+  with -- the only call made before anything is activated -- then the
+  class activated for the caller's own interface, then
+  IPersistStorage::Load given that same storage. A NULL output pointer
+  is E_INVALIDARG before the Stat (not E_POINTER, where
+  OleLoadFromStream's is), a NULL riid E_INVALIDARG after it, and
+  CLSID_NULL in the storage REGDB_E_CLASSNOTREG with nothing opened.
+  A client site turns the call into an activation as well: with one,
+  the object must have IOleObject (refusing it is E_NOINTERFACE for
+  the whole call, where the same object without a site loads), it is
+  asked for its OLEMISC bits for DVASPECT_CONTENT -- a refusal there
+  is no error and the bits such a call wrote are not read -- and it is
+  given the site before the load when it asked for
+  OLEMISC_SETCLIENTSITEFIRST and after it otherwise; a SetClientSite
+  that refuses ends the call in either order, the loaded object let
+  go. Last of all an object with IOleLink is asked to BindIfRunning
+  and what it answers is ignored. The caller is left holding one
+  reference to its own interface, the storage's and the site's counts
+  are as they were, and nothing is cached: two OleLoads of one storage
+  make two objects. Every refusal leaves the caller's pointer NULL.
+
+  **Limit:** a class nobody registered is REGDB_E_CLASSNOTREG
+  (`ole32.dll!OleLoad(no default handler for the class)`). Windows
+  does not stop there: ole32 puts its own default handler in the
+  class's place, reads the storage's 'Ole', 'CompObj' and 'OlePres000'
+  streams and hands back an object with the cached presentation,
+  answering IOleObject, IPersistStorage, IDataObject, IViewObject2,
+  IOleCache2, IRunnableObject and IMarshal with the storage's class
+  id and REGDB_E_CLASSNOTREG from GetMiscStatus. gala has no default
+  handler, so a document whose embedded objects are not registered
+  loses them rather than showing their last picture; the row names
+  the class that went unanswered (ROADMAP OF).
 - **Monikers and the running object table** (`moniker.rs`,
   `moniker_test`, measured against Windows 11): a moniker here is its
   kind and its display name, and every operation is on that name, which
