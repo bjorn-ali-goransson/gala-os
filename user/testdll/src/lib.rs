@@ -13,6 +13,11 @@
 //! handed them and answer it, one with text and one with the bytes of
 //! a structure, which is what a trace reads at a return and not at a
 //! call (user/import_strings_test).
+//!
+//! One export has no body at all: it sits in the `.gstub` section, the
+//! one gala's DLLs put an unwritten export in, so that user/loader_test
+//! has a body-less export of its own to probe (writing a shipped DLL's
+//! missing function must not take the example away with it).
 
 #![no_std]
 
@@ -177,6 +182,28 @@ pub static mut GALA_ATTACH_COUNT: u64 = 0;
 /// the DLL was loaded with the program, NULL for LoadLibrary.
 #[unsafe(no_mangle)]
 pub static mut GALA_ATTACH_RESERVED: u64 = 0;
+
+/// An export that is there and has no body: the `.gstub` section is the
+/// one `gala_stubs` puts an unwritten export in, so the export table
+/// carries the name while LdrGetProcedureAddress answers
+/// STATUS_ENTRYPOINT_NOT_FOUND -- what a program probing for an optional
+/// function must see (user/loader_test). The example lives here rather
+/// than in whichever shipped DLL happens to still lack a body, so that
+/// writing that body does not take the test's example away with it.
+///
+/// Nothing calls it: an address for it is what the loader must refuse,
+/// so a call means the test has already failed. It spins instead of
+/// returning, which leaves the thread in `testdll.dll!gala_no_body` for
+/// a state dump to name. It is hand-rolled rather than written with
+/// `gala_stubs`' macro, whose body imports from ntdll: testdll's import
+/// table is itself what the import tests read.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".gstub")]
+pub extern "system" fn gala_no_body() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 /// Entry point required by our link flags; a DllMain that counts attaches.
 #[unsafe(no_mangle)]

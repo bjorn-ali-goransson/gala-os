@@ -31,8 +31,9 @@
 //! fallback; the ledger records it as a "stub refused" and not as a
 //! missing export, because the two ask for different work (write the
 //! body, or add the export) and a program that binds the name by delay
-//! load does not probe at all. Asked of gala only: the xmllite.dll beside the
-//! exe is gala's, whose CreateXmlReader is such a stub.
+//! load does not probe at all. Asked of gala only: testdll.dll exports
+//! `gala_no_body` from that section and nothing else, so that writing a
+//! shipped DLL's missing body cannot take the example away.
 //!
 //! A DLL loaded by path takes its dependencies from the usual places, or
 //! with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR from its own directory first
@@ -790,20 +791,23 @@ fn run() -> Result<(), u32> {
     c.eq(s.into(), STATUS_INVALID_FILE_FOR_SECTION.into())?;
     remove_path(&empty, false);
 
-    // An export that is there and has no body: gala's xmllite.dll
-    // exports CreateXmlReader as a `.gstub` stub. The export table
+    // An export that is there and has no body: testdll.dll exports
+    // `gala_no_body` from the `.gstub` section (the one gala's
+    // unwritten exports live in, `gala_stubs`). The export table
     // carries the name, and GetProcAddress still answers
     // STATUS_ENTRYPOINT_NOT_FOUND, so that a program probing for an
-    // optional function keeps its fallback (`gala_stubs`). The scenario
-    // checks that the ledger calls the row a "stub refused": a
-    // `missing export` row would say gala has never heard of the name,
-    // which is the opposite of what is true, and a delay load of it
-    // ends a process with 0xc06d007f and nothing else to read.
+    // optional function keeps its fallback. The scenario checks that
+    // the ledger calls the row a "stub refused": a `missing export`
+    // row would say gala has never heard of the name, which is the
+    // opposite of what is true, and a delay load of it ends a process
+    // with 0xc06d007f and nothing else to read. The export is
+    // testdll's own: a shipped DLL's stub stops being one the day its
+    // body is written, and took this check with it.
     if on_gala() {
-        let (s, stubs) = api.load(&wide!("xmllite.dll"));
+        let (s, stubs) = api.load(&wide!("testdll.dll"));
         c.eq(s.into(), STATUS_SUCCESS.into())?;
-        c.ok(find_export(stubs, b"CreateXmlReader").is_some(), stubs as u64)?;
-        let (s, address) = api.proc(stubs, b"CreateXmlReader");
+        c.ok(find_export(stubs, b"gala_no_body").is_some(), stubs as u64)?;
+        let (s, address) = api.proc(stubs, b"gala_no_body");
         c.eq(s.into(), STATUS_ENTRYPOINT_NOT_FOUND.into())?;
         c.eq(address as u64, 0)?;
         (api.unload)(stubs);
