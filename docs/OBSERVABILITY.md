@@ -1535,14 +1535,14 @@ records.
 ### Stack captures (`stack_at=`, `stack_from=`, `stack_match=`, `stack_words=`)
 
 `stack_at=<service>[:<n>]` logs the calling thread's user stack the first
-`n` times a process reaches that system call. Two filters choose which
-of its calls those are: `stack_from=<module>` keeps the calls a module
-of that name is on the stack of (who made the call), and
-`stack_match=<text>` the calls one of whose arguments points at text
-containing it (what the call is about). `stack_words=<n>` says how far
-up the stack to read (`n` default 4, at most 512;
-`kernel/src/nt/stack_at.rs`, scenarios `stack_at_test`,
-`stack_at_from_test`, `stack_at_match_test` and
+`n` times a process reaches that system call (`n` default 4, at most
+512). Two filters choose which of its calls those are:
+`stack_from=<module>` keeps the calls a module of that name is on the
+stack of (who made the call), and `stack_match=<text>` the calls one of
+whose arguments points at text containing it (what the call is about).
+`stack_words=<n>` says how far up the stack to read (default 128 words,
+a kilobyte, at most 512; `kernel/src/nt/stack_at.rs`, scenarios
+`stack_at_test`, `stack_at_from_test`, `stack_at_match_test` and
 `stack_at_words_test`). It answers what the other
 facilities leave open: the event stream says which calls a program made
 and the ledger what gala did not have, and neither says who made the
