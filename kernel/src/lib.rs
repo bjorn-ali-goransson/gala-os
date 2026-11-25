@@ -402,6 +402,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(text) = cmdline.value("stack_from") {
         nt::stack_at::only_from(text);
     }
+    // `stack_match=<text>`: of those, only the calls one of whose
+    // arguments points at text containing it (nt::stack_at).
+    if let Some(text) = cmdline.value("stack_match") {
+        nt::stack_at::only_matching(text);
+    }
     // `stack_words=<n>`: how far up the caller's stack a capture reads,
     // for a service whose own frame hides the caller (nt::stack_at).
     if let Some(text) = cmdline.value("stack_words") {

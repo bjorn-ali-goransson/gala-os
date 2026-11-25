@@ -599,7 +599,22 @@ write) no count gets to the call in question, and raising it only moves
 the flood. The count is the flood guard behind that, and the end of the
 run says how many captures were taken and how many calls the filter
 passed over -- 0 and the rest means the module was not on any of those
-stacks, so try the next one. Reach for this before
+stacks, so try the next one.
+
+When the call at that moment is one a service is reached about hundreds
+of times -- `GalaRecordMissing`, which every ledger row goes through --
+no module filter separates them, because they all arrive through the
+same modules. `stack_match=` picks by what the call is about instead:
+the text an argument points at, which for that service is the name the
+gap was recorded under, so a `ledger:` row is itself the trigger
+(`%20` for the space, since a value cannot carry one):
+
+```sh
+XTASK_CMDLINE='stack_at=GalaRecordMissing stack_match=empty%20path \
+  stack_from=wwlib events_match=WINWORD' cargo xtask boot-test 'office_word$'
+```
+
+Reach for this before
 adding records by hand to a DLL -- it costs a run, needs nothing of the
 program, and works for Microsoft's DLLs too.
 
