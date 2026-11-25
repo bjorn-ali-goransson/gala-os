@@ -12055,7 +12055,15 @@ stations and desktops a program creates are refused until stage 3).
   Windows answers for any value name on a handle that consumed no right
   -- measured, with E_INVALIDARG for what is not a handle or a NULL
   required output, and for a NULL value name in the DWORD form alone)
-  and SLPersistApplicationPolicies has nothing to keep (S_OK);
+  and SLPersistApplicationPolicies has nothing to keep (S_OK), which
+  leaves the fast policy path with nothing to load:
+  SLLoadApplicationPolicies is SL_E_APPLICATION_POLICIES_MISSING and
+  hands out no context, so SLGetApplicationPolicy and
+  SLUnloadApplicationPolicies are SL_E_APPLICATION_POLICIES_NOT_LOADED
+  for whatever context they are given -- measured, as is the order they
+  check in: a NULL context, value name or required output is
+  E_INVALIDARG before the context is looked up, while
+  SLGetApplicationPolicy's data type stays optional;
   SLPersistRTSPayloadOverride, undocumented, is E_NOTIMPL. XrML
   signatures are not verified, where Windows refuses a license that is
   not signed (`sppc_test` runs its round trip only where its unsigned
