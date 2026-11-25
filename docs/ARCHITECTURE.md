@@ -6410,6 +6410,81 @@ built for x64 and x86.
   content not of the type) leaves, char's value and a failed typed
   load's parse error.
 
+### xmllite (XmlLite's reader)
+
+XmlLite's pull reader, `CreateXmlReader` and `IXmlReader`
+(`user/xmllite`, `xmllite_test`; ROADMAP OF). Word delay-loads
+`CreateXmlReader` and ends on 0xc06d007f without it; SQL Server LocalDB
+imports it and `CreateXmlWriter`. Built for x64, x86 and ARM64. The
+reader is `gala_xml`'s `Scan`, so it refuses what msxml6's DOM and
+webservices' reader refuse, in the same words.
+
+- **The reader**: `CreateXmlReader(IID_IXmlReader, &reader, NULL)`;
+  another interface is E_NOINTERFACE and an IMalloc passed is ignored
+  (gala allocates from the process heap), both recorded. A reader with
+  no input has node type None, is not at end of file and its ReadState
+  is **Closed**, measured, where the documentation says Initial;
+  ConformanceLevel is Document and DtdProcessing Prohibit. Its
+  references are its own (no IMalloc, no apartment); the last Release
+  frees it.
+- **The input**: `SetInput` asks the object for IStream and then
+  ISequentialStream (anything else is E_NOINTERFACE, recorded) and
+  reads it whole in 64 KiB calls until one gives nothing, which is what
+  Windows' reader does too -- measured: QueryInterface and Read, no
+  Seek, no AddRef or Release, so a program may hand it a stream that can
+  do no more. XmlLite reads the document as its caller pulls nodes;
+  gala's scanner works on the whole text, so the decoding error of
+  bytes that are not the encoding they are taken for comes out of
+  SetInput and not of a Read. `SetInput(NULL)` leaves the reader as
+  CreateXmlReader made it, and SetInput again starts it over.
+- **The nodes** (`reader.rs`): each Read hands out one node -- the XML
+  declaration (type 17, `version` and `encoding` its attributes), white
+  space (13), a comment (8), an element (1), text (3), a CDATA section
+  (4), a processing instruction (7) or an end tag (15) -- with its
+  depth, line and position, whether the element is empty, and its
+  qualified name, prefix, local name, namespace URI and value. Windows'
+  own answers, asserted node by node (`xmllite_test`, 659 checks, the
+  same transcript on Windows 11 and under gala): an empty element is
+  ONE node with IsEmptyElement set and no end tag; a start tag's depth
+  is its element's and an end tag's is its content's, one more; a node's
+  position is the column of its first character past the markup that
+  opens it, counted from 1 in characters; character data that is all
+  white space is Whitespace wherever it stands, inside the root element
+  as well as outside it; and an element's namespace declarations are
+  among its attributes, in `http://www.w3.org/2000/xmlns/`. Past the
+  root element Read is S_FALSE with node type None, IsEOF is true and
+  the ReadState EndOfFile.
+- **Attributes**: MoveToFirstAttribute, MoveToNextAttribute,
+  MoveToAttributeByName (local name and namespace URI; no namespace
+  asked for means the attributes in none) and MoveToElement, with the
+  getters answering for the attribute the reader has moved to. A
+  fragment is read when ConformanceLevel is set to Fragment before
+  SetInput (`gala_xml`'s `allow_fragment`): any number of root
+  elements, every other rule unchanged.
+- **A document that is not well formed** fails the Read that meets it,
+  with the code XmlLite answers for what the reader was looking for,
+  and leaves the reader in the Error ReadState, which every later Read
+  answers again. `gala_xml`'s `Reason` maps one-to-one onto XmlLite's
+  XmlError (`error_code`): 24 of them measured on Windows -- among them
+  WC_E_ELEMENTMATCH, WC_E_ROOTELEMENT, WC_E_CDSECT, WC_E_COMMENT,
+  WC_E_PI, WC_E_TEXTXMLDECL, WC_E_DTDPROHIBITED, NC_E_QNAMECHARACTER,
+  NC_E_UNDECLAREDPREFIX and NC_E_EMPTYURI -- while
+  SC_E_MAXELEMENTDEPTH (nesting past gala's 256) and MX_E_ENCODING are
+  named from the SDK's `xmllite.h` and not measured. The same table is
+  the test's (`xmllite_test`'s `BADS`), so a reason added belongs in
+  both. One document is refused one Read earlier than Windows refuses
+  it: text that ends inside a CDATA section is a CDATA node to
+  Windows, which fails the Read after it, and nothing to gala, which
+  hands out no node made of text that is not well formed. The test
+  carries both counts (`Bad::win`) rather than smoothing the
+  difference over.
+- **Limits**, each recorded when a program meets it: ReadValueChunk and
+  GetBaseUri are not implemented, a DTD is never parsed (DtdProcessing
+  stays Prohibit, XmlLite's own default), the attribute getters answer
+  with the position of the element's node since the scan keeps none per
+  attribute, and the writer (`CreateXmlWriter`) ends the process
+  (`gala_stubs`) so the ledger names it when something wants one.
+
 ### RPC: rpcrt4
 
 The RPC runtime for local RPC (`user/rpcrt4`, `rpc_test`): string
@@ -11683,9 +11758,21 @@ the scan is an offset into the document and borrows nothing; a caller
 can keep the document and the scan side by side. A scan can be told
 that its text is a fragment (`allow_fragment`): more than one root
 element, every other rule unchanged, which is what webservices.dll's
-WS_XML_READER_PROPERTY_ALLOW_FRAGMENT asks for. It also says where it
-has got to (`position`: the line from 1 and the bytes into it), which
-is what that DLL's ROW and COLUMN are made of.
+WS_XML_READER_PROPERTY_ALLOW_FRAGMENT asks for. A section is its own event
+(`Event::CData`), since XmlLite's reader has a node type for it, where
+webservices' takes it for character data. It also says where it has got
+to: `position`, the line from 1 and the bytes into it, which is what
+that DLL's ROW and COLUMN are made of, and `line_position`, the line and
+the character both from 1, which is how XmlLite counts and, asked
+before the next event, where the node about to be read starts. After a
+start tag `empty_element` says whether the element was written empty,
+which XmlLite's reader reports as IsEmptyElement and hands out no end
+tag for. Every refusal carries what the reader was looking for
+(`Reason`) beside its message, so a DLL answers in its own codes
+instead of reading gala's words: msxml6's three XML_E_ codes
+(`parse_into`) and XmlLite's 24 XmlError codes (`user/xmllite`'s
+`error_code`, measured in `xmllite_test`) are the same table read two
+ways.
 **ZIP64** (`zip.rs`): the zip64 end record, locator and extra field
 (MSIX packages are zip64 with data descriptors; the central directory is
 authoritative); entries of 4 GiB or more are refused (archives are in

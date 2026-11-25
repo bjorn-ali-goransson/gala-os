@@ -809,6 +809,25 @@ took.
   detail). Each QueryInterface
   msxml6 does not answer: `msxml6.dll!QI? <node|list|map|error|cache|
   XSLTemplate|XSLProcessor> {<the whole IID>}`, "other", its first dword as detail.
+  XmlLite's reader (xmllite, ARCHITECTURE "xmllite"): every document
+  refused, `xmllite.dll!IXmlReader::Read <what the reader was looking
+  for>`, "other", with the line as detail -- and
+  `xmllite.dll!IXmlReader::SetInput <reason>` for bytes that are not
+  the encoding they are taken for, which is refused before any node.
+  The program sees only an HRESULT, so this is where a document Word or
+  LocalDB could not read names its own gap. What such a program asks
+  for and gala has not: `CreateXmlReader(iid)` and
+  `IXmlReader::QueryInterface(iid)` (unsupported, the IID's first dword
+  as detail), `CreateXmlReader(IMalloc)` (unsupported: the allocator is
+  ignored), `IXmlReader::SetInput(not a stream)` (unsupported: the
+  input answers neither IStream nor ISequentialStream),
+  `IXmlReader::SetInput(stream read)` ("other", the stream's HRESULT as
+  detail), `IXmlReader::SetProperty(property)` (unsupported, the
+  property << 32 | the value) and `GetProperty(property)` (not
+  implemented, the property), `IXmlReader::ReadValueChunk` and
+  `IXmlReader::GetBaseUri` (not implemented). A panic in the reader is
+  `xmllite.dll!panic <file>` with the line as detail, and ends the
+  process with 0xc0000409.
   The RPC runtime (rpcrt4): `rpcrt4.dll!NdrClientCall2 raised`, "other",
   for every status a client call raises (detail: the procedure number
   << 32 | the status: a program that fails over RPC names the call);
@@ -1688,9 +1707,9 @@ became visible, which is before the program has painted it --
 `hook_test`'s fourth window is white in its own picture and the three
 before it are not -- and `hook=window=shot+1` catches a window the
 program has drawn. But the wait is time the window may not live through:
-Word's splash lives about 2 s and WINWORD ends on Office's own fail-fast
-at ~30 s, and a picture taken after that is of the desktop that outlived
-it, which looks exactly like a hook that never fired. So the host takes
+WINWORD puts its splash up a few seconds in and ends ~31 s in on a
+delay load gala cannot resolve, and a picture taken after that is of the
+desktop that outlived it, which looks exactly like a hook that never fired. So the host takes
 both, at the request and when the wait is up:
 
 ```
@@ -1699,7 +1718,9 @@ target/screenshots/<scenario>-hook-<name>-<secs>s.png   the second asked for
 ```
 
 The first is certain and may be unpainted; the second is what the window
-settled into, if it lasted that long. `+0` is already the first and
+settled into, if it lasted that long. `office_word`'s pair is the two
+halves of that: at the instant, a window-shaped band of nothing; two
+seconds later, Office's splash with "Word" and "Starting..." in it. `+0` is already the first and
 stays single. Both are named in the log as they are written, and both of
 a window's names are kept free of an earlier window's pair (`-2`, `-3`),
 so a comparison between two runs' pictures is a comparison of the same

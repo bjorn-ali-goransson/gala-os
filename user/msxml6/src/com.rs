@@ -739,12 +739,16 @@ fn parse_into(d: &mut Doc, src: Result<String, ParseError>, url: &str) -> bool {
             true
         }
         Err(e) => {
-            let code = if e.msg.contains("no root") {
-                XML_E_MISSINGROOT
-            } else if e.msg.contains(" closes ") {
-                XML_E_ENDTAGMISMATCH
-            } else {
-                XML_E_INVALIDATROOTLEVEL
+            // MSXML groups what the reader was looking for its own
+            // way: a document with no root element at all is one error,
+            // an end tag that closes the wrong element another, and
+            // everything else is "invalid at the top level of the
+            // document". (This read the message's own words before
+            // `gala_xml::Reason` existed.)
+            let code = match e.reason {
+                gala_xml::Reason::NoRoot | gala_xml::Reason::NoStartTag => XML_E_MISSINGROOT,
+                gala_xml::Reason::ElementMatch => XML_E_ENDTAGMISMATCH,
+                _ => XML_E_INVALIDATROOTLEVEL,
             };
             let line_text = src.split('\n').nth(e.line.saturating_sub(1) as usize).unwrap_or("");
             let before: usize = src

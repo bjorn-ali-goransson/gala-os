@@ -3402,6 +3402,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msxml_test", "ole32.dll", "Windows/System32"),
     ("msxml_test", "oleaut32.dll", "Windows/System32"),
     ("msxml_test", "msxml6.dll", "Windows/System32"),
+    // XmlLite's reader (user/xmllite_test).
+    ("xmllite_test", "ntdll.dll", "Windows/System32"),
+    ("xmllite_test", "kernel32.dll", "Windows/System32"),
+    ("xmllite_test", "xmllite.dll", "Windows/System32"),
     // The Known Folder Manager through COM (user/knownfolder_test), x64
     // and x86.
     ("knownfolder_test", "ntdll.dll", "Windows/System32"),
@@ -3704,6 +3708,7 @@ const USER_PROGRAMS: &[&str] = &[
     "svc_test",
     "svcrun_test",
     "msxml_test",
+    "xmllite_test",
     "knownfolder_test",
     "windowscodecs_test",
     "d2d1_test",
@@ -6690,6 +6695,7 @@ const ARM64_TWINS: &[&str] = &[
     "svc_test",
     "svcrun_test",
     "msxml_test",
+    "xmllite_test",
     "d2d1_test",
     "knownfolder_test",
     "ucrt_test",
@@ -7367,7 +7373,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // which says the body ran and the process is over. "stub
             // refused" says the body is unwritten and the asker was
             // told the name is absent, which is the work.
-            r#"ledger: {"service":"xmllite.dll!CreateXmlReader","what":"stub refused""#,
+            r#"ledger: {"service":"testdll.dll!gala_no_body","what":"stub refused""#,
             "loader_test: ok",
             "exited with status 0x00000000",
         ],
@@ -9892,6 +9898,21 @@ const BASE_SCENARIOS: &[Scenario] = &[
             r#"ledger: {"service":"msxml6.dll!IXMLDOMDocument2::setProperty(SelectionLanguage: not a string)","what":"other""#,
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // XmlLite's reader (user/xmllite_test): CreateXmlReader, an
+        // IStream of the program's own as the input, and the whole
+        // document node by node -- the declaration, white space, a
+        // comment, elements in a default and a prefixed namespace with
+        // their attributes (the namespace declarations among them),
+        // text, an empty element, CDATA, a processing instruction and
+        // end tags -- then end of file and a document that is not well
+        // formed. Word delay-loads CreateXmlReader and ends on
+        // 0xc06d007f without it (ROADMAP OF).
+        name: "xmllite_test",
+        cmdline: "qemu_exit run=xmllite_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["xmllite_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The Windows Imaging Component (user/windowscodecs_test): the
@@ -13198,7 +13219,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // and closes it with Alt+F4, and consolerun ends with Word's own
         // status, 0. ROADMAP OF has where gala's run stops instead.
         name: "office_word",
-        cmdline: "qemu_exit persist as=system run=consolerun.exe \
+        cmdline: "qemu_exit persist as=system hook=window/winword:12=shot+2 \
+                  run=consolerun.exe \
                   args=%22C:\\Program%20Files\\Microsoft%20Office\\root\\Office16\\\
                   WINWORD.EXE%22%20/t%22C:\\Program%20Files\\Microsoft%20Office\\root\\\
                   Office16\\1033\\QuickStyles\\Default.dotx%22 \
@@ -13208,6 +13230,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
+            // The hook is armed before Word runs, so a run that comes
+            // back with no picture of Word's windows is a run where no
+            // window went up -- not one where nobody asked.
+            "hook: armed: window shown -> screendump",
             "xtask: screen ok",
             "consolerun.exe (pid 4) exited with status 0x00000000",
         ],
@@ -13218,7 +13244,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // Explorer's "New > Microsoft Excel Worksheet" copies), with
         // OFFICE_EXCEL_SCREEN for its window, as office_word.
         name: "office_excel",
-        cmdline: "qemu_exit persist as=system run=consolerun.exe \
+        cmdline: "qemu_exit persist as=system hook=window/excel:12=shot+2 \
+                  run=consolerun.exe \
                   args=%22C:\\Program%20Files\\Microsoft%20Office\\root\\Office16\\\
                   EXCEL.EXE%22%20%22C:\\Program%20Files\\Microsoft%20Office\\root\\vfs\\\
                   Windows\\SHELLNEW\\EXCEL12.XLSX%22 \

@@ -51,13 +51,77 @@ pub const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 /// DOM gives their attributes.
 pub const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
+/// What the reader was looking for where it stopped, which is more than
+/// the message says: a caller hands its own caller a different code for
+/// each, and picking that code by matching substrings of the message is
+/// how it was done before this existed.
+///
+/// The names are the XML grammar's own terms for what is missing, which
+/// is why they line up with the codes XmlLite answers a read with
+/// (`user/xmllite`'s reader maps them one to one, measured in
+/// `user/xmllite_test`); msxml6 groups them differently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reason {
+    /// The grammar is broken and nothing more precise fits.
+    #[default]
+    Syntax,
+    /// The text ran out inside an element.
+    InputEnd,
+    /// White space the grammar requires, between two attributes.
+    Whitespace,
+    /// The `;` that ends a reference, or a reference that is no number.
+    Semicolon,
+    /// The `=` after an attribute's name.
+    Equal,
+    /// The quotes around an attribute's value.
+    Quote,
+    /// A `<` where no `<` may stand (an attribute's value).
+    LessThan,
+    /// A name, or the rest of one: a tag the text ends inside of.
+    Name,
+    /// An end tag where no element is open, which in a document means
+    /// it stands where the root element belongs.
+    NoStartTag,
+    /// A comment that is not closed.
+    Comment,
+    /// A CDATA section that is not closed.
+    CdSect,
+    /// A processing instruction that is not closed, or whose target is
+    /// not followed by white space.
+    Pi,
+    /// No root element where a document must have one.
+    NoRoot,
+    /// A second root element, where a document ends after the first.
+    RootElement,
+    /// An end tag naming an element other than the open one.
+    ElementMatch,
+    /// One attribute given twice in a tag.
+    UniqueAttribute,
+    /// An XML declaration that is not the document's first node.
+    XmlDecl,
+    /// An entity no DTD declares (and these readers read no DTDs).
+    UndeclaredEntity,
+    /// A document type declaration, which these readers refuse.
+    Dtd,
+    /// A namespace prefix nothing binds.
+    UndeclaredPrefix,
+    /// A namespace declaration binding a prefix to nothing.
+    EmptyUri,
+    /// Nesting past [`MAX_DEPTH`], which is gala's own limit.
+    MaxDepth,
+    /// Bytes that are not the encoding they are taken for.
+    Encoding,
+}
+
 /// Why a document could not be read: the line (1-based), the column
-/// (1-based, in characters) where reading stopped, and what.
+/// (1-based, in characters) where reading stopped, what the reader was
+/// looking for, and what to say about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub line: u32,
     pub column: u32,
     pub msg: String,
+    pub reason: Reason,
 }
 
 impl fmt::Display for Error {
@@ -186,7 +250,7 @@ pub fn decode(bytes: &[u8]) -> Result<String, Error> {
 }
 
 fn decode_raw(bytes: &[u8]) -> Result<String, Error> {
-    let bad = |msg: &str| Error { line: 1, column: 1, msg: msg.into() };
+    let bad = |msg: &str| Error { line: 1, column: 1, msg: msg.into(), reason: Reason::Encoding };
     if let Some(rest) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
         return core::str::from_utf8(rest).map(String::from).map_err(|_| bad("not valid UTF-8"));
     }
@@ -256,6 +320,16 @@ impl<'t> Parser<'t> {
         Err(self.error_at(self.line, msg))
     }
 
+    /// As [`Parser::err`], saying what was looked for.
+    fn err_for<T>(&self, reason: Reason, msg: impl Into<String>) -> Result<T, Error> {
+        Err(self.error_for(self.line, reason, msg))
+    }
+
+    /// As [`Parser::error_at`], saying what was looked for.
+    fn error_for(&self, line: u32, reason: Reason, msg: impl Into<String>) -> Error {
+        Error { reason, ..self.error_at(line, msg) }
+    }
+
     /// An error on `line` (the column is where reading stopped when that
     /// is the current line, else 1).
     fn error_at(&self, line: u32, msg: impl Into<String>) -> Error {
@@ -265,7 +339,7 @@ impl<'t> Parser<'t> {
         } else {
             1
         };
-        Error { line, column, msg: msg.into() }
+        Error { line, column, msg: msg.into(), reason: Reason::Syntax }
     }
 
     fn starts(&self, p: &str) -> bool {
@@ -290,15 +364,16 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// Skips up to and including `end`; `what` names the construct.
-    fn skip_past(&mut self, end: &str, what: &str) -> Result<&'t str, Error> {
+    /// Skips up to and including `end`; `what` names the construct and
+    /// `reason` is what a text that ends before `end` was missing.
+    fn skip_past(&mut self, end: &str, what: &str, reason: Reason) -> Result<&'t str, Error> {
         let start = self.pos;
         match self.text[start..].find(end) {
             Some(i) => {
                 self.advance(i + end.len());
                 Ok(&self.text[start..start + i])
             }
-            None => self.err(alloc::format!("{what} not closed")),
+            None => self.err_for(reason, alloc::format!("{what} not closed")),
         }
     }
 
@@ -307,7 +382,7 @@ impl<'t> Parser<'t> {
         let mut chars = self.text[start..].char_indices();
         match chars.next() {
             Some((_, c)) if is_name_start(c) => {}
-            _ => return self.err("a name expected"),
+            _ => return self.err_for(Reason::Name, "a name expected"),
         }
         let len =
             chars.find(|&(_, c)| !is_name_char(c)).map_or(self.text.len() - start, |(i, _)| i);
@@ -337,7 +412,7 @@ impl<'t> Parser<'t> {
         self.advance(1);
         let start = self.pos;
         let Some(len) = self.text[start..].find(';').filter(|&l| l <= 12) else {
-            return self.err("an unterminated '&' reference");
+            return self.err_for(Reason::Semicolon, "an unterminated '&' reference");
         };
         let r = &self.text[start..start + len];
         let c = match r {
@@ -352,11 +427,19 @@ impl<'t> Parser<'t> {
                 } else if let Some(dec) = r.strip_prefix('#') {
                     dec.parse::<u32>().ok()
                 } else {
-                    return self.err(alloc::format!("unknown entity &{r}; (no DTDs)"));
+                    return self.err_for(
+                        Reason::UndeclaredEntity,
+                        alloc::format!("unknown entity &{r}; (no DTDs)"),
+                    );
                 };
                 match code.and_then(char::from_u32).filter(|&c| c != '\0') {
                     Some(c) => c,
-                    None => return self.err(alloc::format!("a bad character reference &{r};")),
+                    None => {
+                        return self.err_for(
+                            Reason::Semicolon,
+                            alloc::format!("a bad character reference &{r};"),
+                        );
+                    }
                 }
             }
         };
@@ -376,7 +459,8 @@ impl<'t> Parser<'t> {
                 let (target, data) = self.pi()?;
                 out.push(Content::Pi { target, data });
             } else if self.starts("<!DOCTYPE") {
-                return self.err("a document type declaration (DTDs are not allowed)");
+                return self
+                    .err_for(Reason::Dtd, "a document type declaration (DTDs are not allowed)");
             } else {
                 return Ok(());
             }
@@ -386,7 +470,7 @@ impl<'t> Parser<'t> {
     /// A comment's text (at `<!--`).
     fn comment(&mut self) -> Result<String, Error> {
         self.advance(4);
-        Ok(self.skip_past("-->", "a comment")?.into())
+        Ok(self.skip_past("-->", "a comment", Reason::Comment)?.into())
     }
 
     /// A processing instruction's target and data (at `<?`), its
@@ -394,9 +478,10 @@ impl<'t> Parser<'t> {
     fn pi(&mut self) -> Result<(String, String), Error> {
         self.advance(2);
         let target = self.name()?;
-        let body = self.skip_past("?>", "a processing instruction")?;
+        let body = self.skip_past("?>", "a processing instruction", Reason::Pi)?;
         if !body.is_empty() && !body.starts_with([' ', '\t', '\n']) {
-            return self.err(alloc::format!("white space expected after <?{target}"));
+            return self
+                .err_for(Reason::Pi, alloc::format!("white space expected after <?{target}"));
         }
         let data = body.trim_start_matches([' ', '\t', '\n']);
         Ok((target.into(), data.into()))
@@ -410,18 +495,30 @@ impl<'t> Parser<'t> {
             prolog.push(Content::Pi { target, data });
         }
         self.misc(&mut prolog)?;
-        if !self.starts("<") || self.starts("</") {
-            return self.err("no root element");
+        if self.starts("</") {
+            return self.err_for(Reason::NoStartTag, "no root element: an end tag opens the text");
+        }
+        if !self.starts("<") {
+            return self.err_for(Reason::NoRoot, "no root element");
         }
         let root = self.element()?;
         let mut epilog = Vec::new();
         self.misc(&mut epilog)?;
         if self.pos != self.s.len() {
-            return self.err("content after the root element");
+            // A second root element and anything else after the root
+            // are different errors to a caller, which is why they are
+            // different reasons: a reader answers WC_E_ROOTELEMENT for
+            // the one and WC_E_SYNTAX for the other (both measured in
+            // user/xmllite_test).
+            return if self.starts("<") && !self.starts("</") {
+                self.err_for(Reason::RootElement, "a second element after the root element")
+            } else {
+                self.err("content after the root element")
+            };
         }
         let misplaced = |c: &Content| matches!(c, Content::Pi { target, .. } if target.eq_ignore_ascii_case("xml"));
         if prolog.iter().skip(1).chain(epilog.iter()).any(misplaced) {
-            return Err(self.error_at(1, "an XML declaration not at the start"));
+            return Err(self.error_for(1, Reason::XmlDecl, "an XML declaration not at the start"));
         }
         Ok(Document { prolog, root, epilog })
     }
@@ -446,9 +543,11 @@ impl<'t> Parser<'t> {
         match found {
             Some(uri) => Ok(uri),
             None if prefix.is_empty() => Ok(String::new()),
-            None => {
-                Err(self.error_at(line, alloc::format!("undeclared namespace prefix '{prefix}'")))
-            }
+            None => Err(self.error_for(
+                line,
+                Reason::UndeclaredPrefix,
+                alloc::format!("undeclared namespace prefix '{prefix}'"),
+            )),
         }
     }
 
@@ -467,11 +566,12 @@ impl<'t> Parser<'t> {
                 }
                 self.advance(1);
                 let Some(open) = stack.pop() else {
-                    return self.err("an end tag without a start tag");
+                    return self.err_for(Reason::NoStartTag, "an end tag without a start tag");
                 };
                 if open.el.qname != name {
-                    return Err(self.error_at(
+                    return Err(self.error_for(
                         line,
+                        Reason::ElementMatch,
                         alloc::format!(
                             "</{name}> closes <{}> (line {})",
                             open.el.qname,
@@ -490,7 +590,7 @@ impl<'t> Parser<'t> {
                 }
             } else if self.starts("<![CDATA[") {
                 self.advance(9);
-                let data = self.skip_past("]]>", "a CDATA section")?;
+                let data = self.skip_past("]]>", "a CDATA section", Reason::CdSect)?;
                 match stack.last_mut() {
                     Some(o) => {
                         o.el.text.push_str(data);
@@ -501,7 +601,7 @@ impl<'t> Parser<'t> {
             } else if self.starts("<?") {
                 let (target, data) = self.pi()?;
                 if target.eq_ignore_ascii_case("xml") {
-                    return self.err("an XML declaration not at the start");
+                    return self.err_for(Reason::XmlDecl, "an XML declaration not at the start");
                 }
                 if let Some(o) = stack.last_mut() {
                     o.el.content.push(Content::Pi { target, data });
@@ -510,7 +610,7 @@ impl<'t> Parser<'t> {
                 return self.err("markup declarations are not allowed");
             } else if self.starts("<") {
                 if stack.len() >= MAX_DEPTH {
-                    return self.err("elements nested too deeply");
+                    return self.err_for(Reason::MaxDepth, "elements nested too deeply");
                 }
                 let (open, empty) = self.start_tag(&stack)?;
                 if empty {
@@ -524,7 +624,10 @@ impl<'t> Parser<'t> {
             } else if self.pos >= self.s.len() {
                 let open =
                     stack.last().map_or(("?".into(), 0), |o| (o.el.qname.clone(), o.el.line));
-                return self.err(alloc::format!("<{}> (line {}) is not closed", open.0, open.1));
+                return self.err_for(
+                    Reason::InputEnd,
+                    alloc::format!("<{}> (line {}) is not closed", open.0, open.1),
+                );
             } else {
                 let mut text = String::new();
                 self.chars_until(b"<", &mut text)?;
@@ -556,28 +659,43 @@ impl<'t> Parser<'t> {
                 break false;
             }
             if self.pos >= self.s.len() {
-                return self.err(alloc::format!("the start tag <{qname}> is not closed"));
+                return self.err_for(
+                    Reason::Name,
+                    alloc::format!("the start tag <{qname}> is not closed"),
+                );
             }
             if !had_space {
-                return self.err(alloc::format!("white space expected in <{qname}>"));
+                return self.err_for(
+                    Reason::Whitespace,
+                    alloc::format!("white space expected in <{qname}>"),
+                );
             }
             let aline = self.line;
             let an = self.name()?;
             self.skip_space();
             if !self.starts("=") {
-                return self.err(alloc::format!("'=' expected after attribute {an}"));
+                return self
+                    .err_for(Reason::Equal, alloc::format!("'=' expected after attribute {an}"));
             }
             self.advance(1);
             self.skip_space();
             let quote = match self.s.get(self.pos) {
                 Some(&q @ (b'"' | b'\'')) => q,
-                _ => return self.err(alloc::format!("a quoted value expected for attribute {an}")),
+                _ => {
+                    return self.err_for(
+                        Reason::Quote,
+                        alloc::format!("a quoted value expected for attribute {an}"),
+                    );
+                }
             };
             self.advance(1);
             let mut value = String::new();
             self.chars_until(&[quote, b'<'], &mut value)?;
             if self.s.get(self.pos) != Some(&quote) {
-                return self.err(alloc::format!("'<' in the value of attribute {an}"));
+                return self.err_for(
+                    Reason::LessThan,
+                    alloc::format!("'<' in the value of attribute {an}"),
+                );
             }
             self.advance(1);
             // Attribute values are normalized: white space becomes spaces.
@@ -586,9 +704,11 @@ impl<'t> Parser<'t> {
                 .map(|c| if matches!(c, '\t' | '\n' | '\r') { ' ' } else { c })
                 .collect();
             if raw.iter().any(|(n, _, _)| *n == an) {
-                return Err(
-                    self.error_at(aline, alloc::format!("attribute {an} given twice in <{qname}>"))
-                );
+                return Err(self.error_for(
+                    aline,
+                    Reason::UniqueAttribute,
+                    alloc::format!("attribute {an} given twice in <{qname}>"),
+                ));
             }
             raw.push((an, value, aline));
         };
@@ -598,7 +718,11 @@ impl<'t> Parser<'t> {
                 bindings.push((String::new(), v.clone()));
             } else if let Some(p) = n.strip_prefix("xmlns:") {
                 if v.is_empty() {
-                    return Err(self.error_at(line, alloc::format!("prefix {p} bound to nothing")));
+                    return Err(self.error_for(
+                        line,
+                        Reason::EmptyUri,
+                        alloc::format!("prefix {p} bound to nothing"),
+                    ));
                 }
                 bindings.push((p.into(), v.clone()));
             }
@@ -629,8 +753,9 @@ impl<'t> Parser<'t> {
                 self.resolve(stack, &bindings, p, aline)?
             };
             if attrs.iter().any(|a: &Attr| a.ns == ans && a.name == l) {
-                return Err(self.error_at(
+                return Err(self.error_for(
                     aline,
+                    Reason::UniqueAttribute,
                     alloc::format!("attribute {{{ans}}}{l} given twice in <{qname}>"),
                 ));
             }
@@ -655,7 +780,8 @@ impl<'t> Parser<'t> {
 pub enum Event {
     /// A start tag, its namespace and its attributes' resolved as
     /// [`Element`]'s are. An empty element is a start followed at once
-    /// by an [`Event::EndElement`].
+    /// by an [`Event::EndElement`], which [`Scan::empty_element`] says
+    /// in advance.
     StartElement {
         /// Namespace URI (empty when in no namespace).
         ns: String,
@@ -670,9 +796,14 @@ pub enum Event {
     /// The end of the element the scan was in (an end tag, or the
     /// second half of an empty element).
     EndElement,
-    /// Character data or a CDATA section, references replaced: one run
-    /// between markup.
+    /// Character data, references replaced: one run between markup,
+    /// and the white space outside the root element.
     Text(String),
+    /// A CDATA section's text. It is character data like
+    /// [`Event::Text`] -- a caller with no use for the difference
+    /// treats the two alike -- but a reader has to be able to say
+    /// which of the two it read.
+    CData(String),
     Comment(String),
     /// A processing instruction (the XML declaration is one, target
     /// `xml`): its target and its data, leading white space dropped.
@@ -765,6 +896,28 @@ impl Scan {
         (self.line, self.pos - self.line_start)
     }
 
+    /// Where the scan has got to as a reader reports it: the line and
+    /// the character within it, both counted from 1, which is how
+    /// XmlLite counts them. [`Scan::position`] counts bytes from 0
+    /// instead, which is what webservices' reader hands its caller.
+    ///
+    /// Called before [`Scan::next_event`] it is where the next node
+    /// starts, since every character of the document belongs to one
+    /// node.
+    pub fn line_position(&self, text: &str) -> (u32, u32) {
+        let end = self.pos.min(text.len());
+        let chars = text.get(self.line_start..end).map_or(0, |s| s.chars().count());
+        (self.line, chars as u32 + 1)
+    }
+
+    /// The start tag last handed out was an empty element (`<e/>`), so
+    /// the next event is the end it has no tag for. A reader that
+    /// reports an empty element as one node reads that end and drops
+    /// it; XmlLite's IsEmptyElement is this.
+    pub fn empty_element(&self) -> bool {
+        self.pending_end
+    }
+
     /// The local name of the element the scan is inside, innermost
     /// first, or None outside the root.
     pub fn open_name(&self) -> Option<&str> {
@@ -811,32 +964,54 @@ impl Scan {
         // document's first node.
         if self.stack.is_empty() {
             let at_start = !self.started && p.pos == 0;
+            // The white space between the markup outside the root is a
+            // node of its own, as the text inside it is: a reader hands
+            // its caller every character of the document, and one with
+            // no use for it drops a text node that is only white space
+            // (as webservices' reader does). A declaration still has to
+            // be the document's first node, which `at_start` holds from
+            // before this.
+            let from = p.pos;
             p.skip_space();
+            if p.pos > from {
+                return Ok(Event::Text(p.text[from..p.pos].into()));
+            }
             if p.starts("<!--") {
                 return Ok(Event::Comment(p.comment()?));
             }
             if p.starts("<?") {
                 let (target, data) = p.pi()?;
                 if target.eq_ignore_ascii_case("xml") && !at_start {
-                    return p.err("an XML declaration not at the start");
+                    return p.err_for(Reason::XmlDecl, "an XML declaration not at the start");
                 }
                 return Ok(Event::Pi { target, data });
             }
             if p.starts("<!DOCTYPE") {
-                return p.err("a document type declaration (DTDs are not allowed)");
+                return p
+                    .err_for(Reason::Dtd, "a document type declaration (DTDs are not allowed)");
             }
             if self.root_done {
                 if p.pos == p.s.len() {
                     return Ok(Event::End);
                 }
                 if !self.fragment {
-                    return p.err("content after the root element");
+                    // A second root element and anything else after the
+                    // root are different errors to a caller (see
+                    // `Parser::document`).
+                    return if p.starts("<") && !p.starts("</") {
+                        p.err_for(Reason::RootElement, "a second element after the root element")
+                    } else {
+                        p.err("content after the root element")
+                    };
                 }
                 // A fragment's next root element, read like the first.
                 self.root_done = false;
             }
-            if !p.starts("<") || p.starts("</") {
-                return p.err("no root element");
+            if p.starts("</") {
+                return p.err_for(Reason::NoStartTag, "no root element: an end tag opens the text");
+            }
+            if !p.starts("<") {
+                return p.err_for(Reason::NoRoot, "no root element");
             }
         }
         // Inside the root, or on its start tag.
@@ -852,9 +1027,11 @@ impl Scan {
             let open = &self.stack.last().expect("inside an element").el;
             if open.qname != name {
                 let (qname, oline) = (open.qname.clone(), open.line);
-                return Err(
-                    p.error_at(line, alloc::format!("</{name}> closes <{qname}> (line {oline})"))
-                );
+                return Err(p.error_for(
+                    line,
+                    Reason::ElementMatch,
+                    alloc::format!("</{name}> closes <{qname}> (line {oline})"),
+                ));
             }
             self.close();
             return Ok(Event::EndElement);
@@ -864,12 +1041,13 @@ impl Scan {
         }
         if p.starts("<![CDATA[") {
             p.advance(9);
-            return Ok(Event::Text(p.skip_past("]]>", "a CDATA section")?.into()));
+            let data = p.skip_past("]]>", "a CDATA section", Reason::CdSect)?;
+            return Ok(Event::CData(data.into()));
         }
         if p.starts("<?") {
             let (target, data) = p.pi()?;
             if target.eq_ignore_ascii_case("xml") {
-                return p.err("an XML declaration not at the start");
+                return p.err_for(Reason::XmlDecl, "an XML declaration not at the start");
             }
             return Ok(Event::Pi { target, data });
         }
@@ -878,7 +1056,7 @@ impl Scan {
         }
         if p.starts("<") {
             if self.stack.len() >= MAX_DEPTH {
-                return p.err("elements nested too deeply");
+                return p.err_for(Reason::MaxDepth, "elements nested too deeply");
             }
             let (open, empty) = p.start_tag(&self.stack)?;
             let event = Event::StartElement {
@@ -895,7 +1073,10 @@ impl Scan {
         if p.pos >= p.s.len() {
             let (qname, line) =
                 self.stack.last().map_or(("?".into(), 0), |o| (o.el.qname.clone(), o.el.line));
-            return p.err(alloc::format!("<{qname}> (line {line}) is not closed"));
+            return p.err_for(
+                Reason::InputEnd,
+                alloc::format!("<{qname}> (line {line}) is not closed"),
+            );
         }
         let mut text = String::new();
         p.chars_until(b"<", &mut text)?;
@@ -924,8 +1105,9 @@ mod tests {
             }
         };
 
-        let whole = alloc::format!("{}", names(&mut Scan::new()).unwrap_err());
-        assert!(whole.contains("content after the root element"), "{whole}");
+        let whole = names(&mut Scan::new()).unwrap_err();
+        assert_eq!(whole.reason, Reason::RootElement);
+        assert!(alloc::format!("{whole}").contains("after the root element"), "{whole}");
         assert_eq!(names(&mut Scan::new().allow_fragment()).unwrap(), vec!["a", "b"]);
 
         // What a fragment does not allow: text between its roots.
@@ -1030,6 +1212,151 @@ mod tests {
         assert_eq!((e.line, e.column), (2, 10));
     }
 
+    /// Scans `text` to its first error.
+    fn scan_err(text: &str) -> Error {
+        let mut scan = Scan::new();
+        loop {
+            match scan.next_event(text) {
+                Ok(Event::End) => panic!("{text}: no error"),
+                Ok(_) => {}
+                Err(e) => return e,
+            }
+        }
+    }
+
+    /// What the reader was looking for, for every way it refuses a
+    /// document. `user/xmllite_test` measures the code Windows answers
+    /// for each of these same documents, and `user/xmllite`'s reader
+    /// maps these reasons to those codes, so the three are one table in
+    /// three places: a row added here belongs there too.
+    #[test]
+    fn reasons_name_what_was_looked_for() {
+        let rows: &[(&str, Reason)] = &[
+            ("<a><b></a>", Reason::ElementMatch),
+            ("</a>", Reason::NoStartTag),
+            ("<a/><b/>", Reason::RootElement),
+            ("text<a/>", Reason::NoRoot),
+            ("<a/>text", Reason::Syntax),
+            ("<!DOCTYPE a><a/>", Reason::Dtd),
+            ("<a>", Reason::InputEnd),
+            ("<a", Reason::Name),
+            ("<a b='1'c='2'/>", Reason::Whitespace),
+            ("<a>&e;</a>", Reason::UndeclaredEntity),
+            ("<a b='<'/>", Reason::LessThan),
+            ("<a x='1' x='2'/>", Reason::UniqueAttribute),
+            ("<p:a/>", Reason::UndeclaredPrefix),
+            ("<a><!FOO></a>", Reason::Syntax),
+            ("<a b=1/>", Reason::Quote),
+            ("<?xml version='1.0'?><?xml version='1.0'?>", Reason::XmlDecl),
+            ("<a b/>", Reason::Equal),
+            ("<a>&e</a>", Reason::Semicolon),
+            ("<a>&#xZZ;</a>", Reason::Semicolon),
+            ("<!--x", Reason::Comment),
+            ("<a><![CDATA[x</a>", Reason::CdSect),
+            ("<?pi x", Reason::Pi),
+            ("<a xmlns:p=''/>", Reason::EmptyUri),
+            ("<?pi,x?><a/>", Reason::Pi),
+        ];
+        for (doc, want) in rows {
+            let e = scan_err(doc);
+            assert_eq!(e.reason, *want, "{doc}: {e}");
+        }
+        // The tree builder answers for the same documents, and MSXML
+        // groups three of them its own way (msxml6's parse error code).
+        assert_eq!(err("<a><b></a>").reason, Reason::ElementMatch);
+        assert_eq!(err("</a>").reason, Reason::NoStartTag);
+        assert_eq!(err("text<a/>").reason, Reason::NoRoot);
+        assert_eq!(err("<a/><b/>").reason, Reason::RootElement);
+        // Bytes that are not the encoding they are taken for.
+        assert_eq!(decode(&[0xff, 0xff]).unwrap_err().reason, Reason::Encoding);
+    }
+
+    /// Nesting past MAX_DEPTH is gala's own limit, not the grammar's.
+    #[test]
+    fn too_deep_is_its_own_reason() {
+        let deep = "<a>".repeat(MAX_DEPTH + 1);
+        assert_eq!(scan_err(&deep).reason, Reason::MaxDepth);
+    }
+
+    /// Every character of the document belongs to a node, the white
+    /// space outside the root element included: a reader hands its
+    /// caller the lot, and one with no use for it (webservices') drops
+    /// a text node that is only white space.
+    #[test]
+    fn white_space_outside_the_root_is_a_node() {
+        let text = "\n<!--c--> \n<r/>\n\n";
+        let mut scan = Scan::new();
+        let mut events = Vec::new();
+        loop {
+            let event = scan.next_event(text).expect("a well-formed document");
+            let done = event == Event::End;
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        assert_eq!(
+            events,
+            vec![
+                Event::Text("\n".into()),
+                Event::Comment("c".into()),
+                Event::Text(" \n".into()),
+                Event::StartElement {
+                    ns: String::new(),
+                    name: "r".into(),
+                    qname: "r".into(),
+                    attrs: Vec::new(),
+                    line: 3,
+                },
+                Event::EndElement,
+                Event::Text("\n\n".into()),
+                Event::End,
+            ]
+        );
+    }
+
+    /// An empty element is a start tag whose end has no tag of its own,
+    /// which the scan says before handing that end out.
+    #[test]
+    fn an_empty_element_is_announced() {
+        let text = "<r><e/><f></f></r>";
+        let mut scan = Scan::new();
+        assert!(matches!(scan.next_event(text), Ok(Event::StartElement { .. })));
+        assert!(!scan.empty_element(), "<r> is not empty");
+        assert!(matches!(scan.next_event(text), Ok(Event::StartElement { .. })));
+        assert!(scan.empty_element(), "<e/> is empty");
+        assert_eq!(scan.next_event(text), Ok(Event::EndElement));
+        assert!(!scan.empty_element(), "the end was handed out");
+        assert!(matches!(scan.next_event(text), Ok(Event::StartElement { .. })));
+        assert!(!scan.empty_element(), "<f> has an end tag of its own");
+    }
+
+    /// Where the scan is, the two ways its callers count it: bytes from
+    /// 0 into the line (webservices') and characters from 1 (XmlLite's).
+    /// Read before a call, it is where the next node starts.
+    #[test]
+    fn line_position_counts_characters() {
+        // The two-byte 'é' makes the byte and the character counts
+        // differ, which is the whole point of having both.
+        let text = "<r>\n  <é a='1'/>\n</r>";
+        let mut scan = Scan::new();
+        assert_eq!(scan.line_position(text), (1, 1));
+        assert!(matches!(scan.next_event(text), Ok(Event::StartElement { .. })));
+        // After <r>: line 1, three characters in.
+        assert_eq!(scan.line_position(text), (1, 4));
+        assert_eq!(scan.position(), (1, 3));
+        // The white space node, then the element: the position before
+        // the call is the first character of what the call returns.
+        assert_eq!(scan.next_event(text), Ok(Event::Text("\n  ".into())));
+        assert_eq!(scan.line_position(text), (2, 3));
+        assert_eq!(scan.position(), (2, 2));
+        assert!(matches!(scan.next_event(text), Ok(Event::StartElement { .. })));
+        // Past `<é a='1'/>`: ten characters, eleven bytes.
+        assert_eq!(scan.line_position(text), (2, 13));
+        assert_eq!(scan.position(), (2, 13));
+        assert_eq!(scan.next_event(text), Ok(Event::EndElement));
+    }
+
     /// Every node of a document, in order, as a scan hands them out.
     #[test]
     fn scan_events_in_order() {
@@ -1050,6 +1377,9 @@ mod tests {
             vec![
                 Event::Pi { target: "xml".into(), data: "version='1.0'".into() },
                 Event::Comment("before".into()),
+                // The line end between the comment and the root: white
+                // space outside the root is a node like any other.
+                Event::Text("\n".into()),
                 Event::StartElement {
                     ns: "u".into(),
                     name: "r".into(),
@@ -1080,7 +1410,7 @@ mod tests {
                 },
                 Event::EndElement,
                 Event::Text("hi".into()),
-                Event::Text("<raw>".into()),
+                Event::CData("<raw>".into()),
                 Event::Pi { target: "p".into(), data: "d".into() },
                 Event::EndElement,
                 Event::End,
