@@ -993,6 +993,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("stack_at_words_test", "kernel32.dll", "Windows/System32"),
     ("stack_at_match_test", "ntdll.dll", "Windows/System32"),
     ("stack_at_match_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_match_line_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_match_line_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -12309,6 +12311,33 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "the 1 captures asked for are spent (4 calls so far did not match stack_match=k32 two)",
             "stack: NtWriteFile: 1 captures of the 1 asked for, \
              4 calls passed over by stack_match=k32 two",
+        ],
+    },
+    Scenario {
+        // What `stack_match=` is aimed at: the write of the message a
+        // program logs when it gives up. Such a line is a record with
+        // its fields separated by tabs, and the field in question is
+        // past them -- Word's own log puts its message 91 characters in,
+        // behind four tabs -- so a capture that reads a buffer as far as
+        // its first tab, or as far as 64 characters, can never match on
+        // what the line says. The program's last write is that shape:
+        // the one capture must go to it, not to the six plain lines
+        // before it, and the quote must hold the whole line with its
+        // tabs shown.
+        name: "stack_at_match_line_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:1 \
+                  stack_match=the%20field%20in%20question events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: only calls one of whose arguments points at text containing \
+             \"the field in question\" (stack_match=)",
+            "stack:   argument 5 reads as \"stack_at_test\\ttab-separated\\t\
+             like the record Word writes\\tits own fields\\tthe field in question\"",
+            "capture 1 of 1",
+            "stack: NtWriteFile: 1 captures of the 1 asked for, \
+             6 calls passed over by stack_match=the field in question",
         ],
     },
     Scenario {

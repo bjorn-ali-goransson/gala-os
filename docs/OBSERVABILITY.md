@@ -1542,8 +1542,8 @@ stack of (who made the call), and `stack_match=<text>` the calls one of
 whose arguments points at text containing it (what the call is about).
 `stack_words=<n>` says how far up the stack to read (default 128 words,
 a kilobyte, at most 512; `kernel/src/nt/stack_at.rs`, scenarios
-`stack_at_test`, `stack_at_from_test`, `stack_at_match_test` and
-`stack_at_words_test`). It answers what the other
+`stack_at_test`, `stack_at_from_test`, `stack_at_match_test`,
+`stack_at_match_line_test` and `stack_at_words_test`). It answers what the other
 facilities leave open: the event stream says which calls a program made
 and the ledger what gala did not have, and neither says who made the
 call. A program that stops inside a DLL gala has no source for
@@ -1572,9 +1572,18 @@ stack:   (8 of the 128 stack words read from 0x1ffa08 point into an image)
   to reach the one that carries the subject: `NtWriteFile`'s buffer is
   its sixth -- and then any of them that points at four or more
   printable characters a second time, as text (`crashreport::read_text`,
-  ASCII or UTF-16, at most 64 characters). That is a service's own name
+  ASCII or UTF-16, at most 256 characters). That is a service's own name
   for what it was asked about: the name a gap was recorded under, the
-  bytes a write was about to write, the path an open failed on. Past a
+  bytes a write was about to write, the path an open failed on. A run of
+  text reaches to the first byte that is not one, and a tab is one: the
+  records a program logs separate their fields with a tab and the field
+  in question is behind them -- Word's own log puts the message it gives
+  up with 91 characters in, behind four -- so a run that ended at the
+  first tab would be a record's timestamp and never what it says. A line
+  break is not text, so a run is one line; 256 characters is the length
+  of such a record rather than of a name; and the quote renders each tab
+  it holds as `\t`, which keeps a capture on one line of the log and
+  still shows where the record's fields end. Past a
   service's own arguments the values are whatever its caller left in
   those registers and stack slots, which is why a short run of
   characters is not quoted at all and a line here is evidence rather
@@ -1601,10 +1610,15 @@ stack:   (8 of the 128 stack words read from 0x1ffa08 point into an image)
   name for the thing it was asked about. `stack_at=GalaRecordMissing
   stack_match=empty%20path` captures the call that recorded that gap and
   passes the rest over, which makes every row of the ledger a trigger.
-  The text is matched against the same runs a capture quotes (at most 64
-  characters of any of the first eight arguments, ASCII or UTF-16,
+  The text is matched against the same runs a capture quotes (at most
+  256 characters of any of the first eight arguments, ASCII or UTF-16,
   either case), so what the filter chose by is what the capture then
-  shows. `%XX` escapes are decoded, because a command-line value cannot
+  shows. Because a run holds a record's tabs, the field a program logs
+  its message in is a trigger as it stands, which is what the facility
+  is for: `stack_at=NtWriteFile stack_match=FGimmeFileFull` reaches the
+  write of that line of Word's own log and no other write
+  (`stack_at_match_line_test` arms the same thing on a line of this
+  shape that `stack_at_test` writes). `%XX` escapes are decoded, because a command-line value cannot
   carry a space and the names wanted have them: `stack_match=empty%20path`,
   `%22` for a quote, `%25` for a `%`. The two filters compose -- both
   must want a call -- and either without `stack_at=` has nothing to
