@@ -2454,7 +2454,7 @@ program that wrote nothing.
 ```
 etw: a session for Gala.Test.Arm (2542af41-3d78-596e-ff31-017dbbeacc32), level 5 and every keyword, 256 events at most (etw=)
 etw: provider Gala.Test.Arm is 2542af41-3d78-596e-ff31-017dbbeacc32
-etw: etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why="armed"
+etw: at 412 ms etwarm_test.exe Gala.Test.Arm/Started level 4 keyword 0x0, count=7, why="armed"
 etw: 1 event written to the session, from 1 provider (etw=)
 ```
 
@@ -2464,7 +2464,10 @@ etw: 1 event written to the session, from 1 provider (etw=)
 - A line per provider, at its first event, giving the name it calls
   itself by for the id in the lines after it: a run that asked for `*`
   has nothing else to read those ids by.
-- A line per event: the process that wrote it, the provider and the
+- A line per event: the uptime the event was written at, in the ms
+  the ledger and the event stream count in, so a line of the
+  program's own log lines up with what the kernel was asked for
+  around it; then the process that wrote it, the provider and the
   event by the names the program gave them, the level and keyword of
   the event's own descriptor, and every field with its own name and
   value (`kernel/src/nt/etw/tracelogging.rs`, the metadata

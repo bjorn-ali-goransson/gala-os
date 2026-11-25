@@ -534,6 +534,13 @@ fn take_line() -> Option<u32> {
     }
 }
 
+/// Uptime in ms, as the ledger and the event stream count it: a line
+/// whose event came from the program's own log is read beside them, and
+/// without the time there is nothing to line the three up by.
+fn written_ms() -> u64 {
+    super::platform::monotonic_ns() / 1_000_000
+}
+
 /// One event a session was given, as op 1's record carries it.
 pub struct Written<'a> {
     /// The program that wrote it.
@@ -577,7 +584,8 @@ pub fn record(event: &Written<'_>) -> bool {
                 );
             }
             info!(
-                "etw: {} {}/{} level {} keyword {:#x}{}",
+                "etw: at {} ms {} {}/{} level {} keyword {:#x}{}",
+                written_ms(),
                 event.process,
                 tracelogging::Text(decoded.provider),
                 tracelogging::Text(decoded.name),
@@ -598,7 +606,8 @@ pub fn record(event: &Written<'_>) -> bool {
                 "its field metadata does not read"
             };
             info!(
-                "etw: {} {} level {} keyword {:#x}, {} bytes ({why}), {}",
+                "etw: at {} ms {} {} level {} keyword {:#x}, {} bytes ({why}), {}",
+                written_ms(),
                 event.process,
                 Guid(event.guid),
                 event.level,
