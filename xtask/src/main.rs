@@ -991,6 +991,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("stack_at_from_test", "kernel32.dll", "Windows/System32"),
     ("stack_at_words_test", "ntdll.dll", "Windows/System32"),
     ("stack_at_words_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_match_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_match_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -12256,6 +12258,35 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "stack:   argument 5 reads as \"stack_at_test: k32 two\"",
             "the 2 captures asked for are spent (3 calls so far did not reach stack_from=kernel32)",
             "stack: NtWriteFile: 2 captures of the 2 asked for, 3 calls passed over by stack_from=kernel32",
+        ],
+    },
+    Scenario {
+        // The capture's other filter (`stack_match=`): `stack_from=`
+        // chooses by who made the call, which cannot separate calls one
+        // module makes about everything -- every gap a Word startup
+        // records reaches `GalaRecordMissing` through the same modules,
+        // and the one in question is behind hundreds of others. This
+        // filter chooses by what the call is about instead: the text an
+        // argument points at. The program writes six lines; only the
+        // fifth is about "k32 two", so the four calls before it are
+        // passed over without spending the one capture asked for, and
+        // the value carries a space as `%20` (a service's own name for
+        // the thing it was asked about has them).
+        name: "stack_at_match_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:1 \
+                  stack_match=k32%20two events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: only calls one of whose arguments points at text containing \"k32 two\" \
+             (stack_match=)",
+            // The one capture went to the fifth write, not the first.
+            "stack:   argument 5 reads as \"stack_at_test: k32 two\"",
+            "capture 1 of 1",
+            "the 1 captures asked for are spent (4 calls so far did not match stack_match=k32 two)",
+            "stack: NtWriteFile: 1 captures of the 1 asked for, \
+             4 calls passed over by stack_match=k32 two",
         ],
     },
     Scenario {
