@@ -3,11 +3,16 @@
 //! flags, known TODO paths), so that running a real program yields a work
 //! list ranked by how often each gap was hit (docs/OBSERVABILITY.md).
 //!
-//! Entries live in a fixed table (no allocation, usable anywhere); when it
-//! is full, further new kinds are only counted, by kind, in `dropped`, so
-//! that a dump still says what it lost (a `?full` or `?bulk` line per
-//! kind). Dumped as JSON lines (`ledger: {...}`) by `dump`, which also
-//! clears the table so that each dump covers one program.
+//! Entries live in a fixed table first (no allocation, usable anywhere,
+//! including before there is a heap) and then on the heap, which they
+//! grow into fallibly, by [`MORE_ENTRIES`] at most. A program with more
+//! distinct gaps than the fixed table holds is exactly the program this
+//! work list is for: a Word startup lost 44 rows of four kinds to
+//! `?full`, each of them a gap nothing else in the run named. What
+//! finds no room even then is still counted under its kind, so that a
+//! dump says what it lost (a `?full` or `?bulk` line per kind). Dumped
+//! as JSON lines (`ledger: {...}`) by `dump`, which also clears the
+//! table so that each dump covers one program.
 //!
 //! `ledger_except=<text>[,<text>...]` keeps the gaps whose names hold
 //! one of the texts out of the table altogether, for a program that
@@ -15,9 +20,10 @@
 //! records each text kept out (`?except`), the texts that kept out none
 //! included.
 //!
-//! Names from user mode are kept in a second fixed table; a name that
-//! finds no room there is `?user`, and one that is not plain text
-//! `?text`, which is a caller's bug and no cap of this table's.
+//! Names from user mode are kept in a second table that grows the same
+//! way; a name that finds no room even on the heap is `?user`, and one
+//! that is not plain text `?text`, which is a caller's bug and no cap
+//! of this table's.
 //! Invariants: a
 //! dump gives back the names no entry uses any more (`compact`), so the
 //! table holds only the names of the gaps since the last dump, never
@@ -28,9 +34,11 @@
 //! answered by the dump itself: `?bulk` lines are the caps working,
 //! while a `?full` line of a rarer kind says a gap was lost.
 
+use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
 
 const ENTRIES: usize = 512;
@@ -45,16 +53,55 @@ enum Service {
 
 const USER_NAMES: usize = 512;
 pub(super) const USER_NAME_LEN: usize = 96;
-/// The most names and entries bulk reports (`record_user_bulk`) may hold;
-/// the rest are kept for every other gap.
-const BULK_NAMES: usize = 384;
-const BULK_ENTRIES: usize = 384;
+/// The most names and entries bulk reports (`record_user_bulk`) may
+/// hold; the rest are kept for every other gap. Three quarters of both
+/// tables, which is the share the fixed table alone gave them (384 of
+/// 512), so growing the tables leaves the guarantee as it was: a Word
+/// startup loses 61 absent keys to the old flat 384.
+const BULK_NAMES: usize = (USER_NAMES + MORE_NAMES) * 3 / 4;
+const BULK_ENTRIES: usize = (ENTRIES + MORE_ENTRIES) * 3 / 4;
+
+/// Entries and names past the fixed tables, which the heap holds. The
+/// number is a guard against a caller that reports a new name per call,
+/// in the spirit of `stack_at=`'s cap, and not a budget: an entry is
+/// some 40 bytes and a name 112, so both tables grown to the end come
+/// to a quarter of a megabyte. A Word startup fills the fixed 512 and
+/// loses 44 rows after them, which is what these are for.
+const MORE_ENTRIES: usize = 1536;
+const MORE_NAMES: usize = 1536;
+
+/// One name from user mode: its text and whether it came from a bulk
+/// report, with `compact`'s scratch beside them.
+#[derive(Clone, Copy)]
+struct Name {
+    text: [u8; USER_NAME_LEN],
+    len: usize,
+    /// Whether the name came from a bulk report.
+    bulk: bool,
+    /// `compact`'s scratch: whether an entry still uses this name, and
+    /// where it moves to. A table that also lives on the heap cannot
+    /// carry a stack array of its own per name -- a dump runs on a
+    /// 64 KiB kernel stack -- and the rows are where the answer fits.
+    used: bool,
+    moved_to: usize,
+}
+
+impl Name {
+    const fn empty() -> Self {
+        Name { text: [0; USER_NAME_LEN], len: 0, bulk: false, used: false, moved_to: 0 }
+    }
+
+    fn text(&self) -> &[u8] {
+        &self.text[..self.len]
+    }
+}
 
 struct UserNames {
-    names: [[u8; USER_NAME_LEN]; USER_NAMES],
-    lens: [usize; USER_NAMES],
-    /// Whether each name came from a bulk report.
-    bulk: [bool; USER_NAMES],
+    /// The first `USER_NAMES` names, which need no heap.
+    fixed: [Name; USER_NAMES],
+    /// The names after them, `MORE_NAMES` at most.
+    more: Vec<Name>,
+    /// How many names there are in all, the two tables together.
     count: usize,
     /// How many of them came from bulk reports.
     bulk_count: usize,
@@ -62,29 +109,49 @@ struct UserNames {
 
 impl UserNames {
     const fn new() -> Self {
-        UserNames {
-            names: [[0; USER_NAME_LEN]; USER_NAMES],
-            lens: [0; USER_NAMES],
-            bulk: [false; USER_NAMES],
-            count: 0,
-            bulk_count: 0,
+        UserNames { fixed: [Name::empty(); USER_NAMES], more: Vec::new(), count: 0, bulk_count: 0 }
+    }
+
+    /// The name at `i`, in whichever of the two tables holds it: the
+    /// fixed table is filled first, so the indices run through it and
+    /// on into the heap.
+    fn name(&self, i: usize) -> Option<&Name> {
+        if i < USER_NAMES { self.fixed.get(i) } else { self.more.get(i - USER_NAMES) }
+    }
+
+    fn name_mut(&mut self, i: usize) -> Option<&mut Name> {
+        if i < USER_NAMES { self.fixed.get_mut(i) } else { self.more.get_mut(i - USER_NAMES) }
+    }
+
+    /// Writes `row` at `i`, which is how `compact` moves a name down.
+    fn set(&mut self, i: usize, row: Name) {
+        if let Some(slot) = self.name_mut(i) {
+            *slot = row;
         }
     }
 
     /// The index of `name`, adding it if there is room (for a bulk name,
-    /// within `BULK_NAMES`).
+    /// within `BULK_NAMES`; past the fixed table, what the heap gives).
     fn intern(&mut self, name: &[u8], bulk: bool) -> Option<usize> {
         let name = &name[..name.len().min(USER_NAME_LEN)];
-        if let Some(i) = (0..self.count).find(|&i| &self.names[i][..self.lens[i]] == name) {
+        if let Some(i) = (0..self.count).find(|&i| self.name(i).is_some_and(|n| n.text() == name)) {
             return Some(i);
         }
         let i = self.count;
-        if i == USER_NAMES || (bulk && self.bulk_count == BULK_NAMES) {
+        if i == USER_NAMES + MORE_NAMES || (bulk && self.bulk_count == BULK_NAMES) {
             return None;
         }
-        self.names[i][..name.len()].copy_from_slice(name);
-        self.lens[i] = name.len();
-        self.bulk[i] = bulk;
+        let mut row = Name::empty();
+        row.text[..name.len()].copy_from_slice(name);
+        row.len = name.len();
+        row.bulk = bulk;
+        if i < USER_NAMES {
+            self.fixed[i] = row;
+        } else if self.more.try_push(row).is_err() {
+            // A heap with nothing left reads as the table being full,
+            // which is what `?user` says; nothing else here can fail.
+            return None;
+        }
         self.count += 1;
         self.bulk_count += usize::from(bulk);
         Some(i)
@@ -98,33 +165,64 @@ fn intern(name: &[u8], bulk: bool) -> Option<usize> {
     USER.lock().intern(name, bulk)
 }
 
-/// Keeps only the names `entries` use, renumbering them.
-fn compact(entries: &mut [Option<Entry>], t: &mut UserNames) {
-    let mut used = [false; USER_NAMES];
-    for entry in entries.iter().flatten() {
-        if let Service::User(i) = entry.key.service {
-            used[i] = true;
+/// Keeps only the names the entries use, renumbering them. The marks
+/// live in the rows themselves, so a table of any size is compacted
+/// without an allocation and without a stack array of its own.
+fn compact(entries: &mut [Option<Entry>], more: &mut [Entry], t: &mut UserNames) {
+    for i in 0..t.count {
+        if let Some(row) = t.name_mut(i) {
+            row.used = false;
         }
     }
-    let mut new_index = [0usize; USER_NAMES];
+    for entry in entries.iter().flatten().chain(more.iter()) {
+        if let Service::User(i) = entry.key.service
+            && let Some(row) = t.name_mut(i)
+        {
+            row.used = true;
+        }
+    }
+    // Where each name that is still used is going, then the entries
+    // that name it, then the names themselves -- in that order, because
+    // a name's new index must still be readable while the entries are
+    // renumbered, and the move itself overwrites rows that have been
+    // read already (a name goes to `at`, which is never above `i`).
     let (mut kept, mut bulk) = (0, 0);
     for i in 0..t.count {
-        if !used[i] {
+        let Some(row) = t.name_mut(i) else { continue };
+        if !row.used {
             continue;
         }
-        t.names[kept] = t.names[i];
-        t.lens[kept] = t.lens[i];
-        t.bulk[kept] = t.bulk[i];
-        bulk += usize::from(t.bulk[i]);
-        new_index[i] = kept;
+        row.moved_to = kept;
+        bulk += usize::from(row.bulk);
         kept += 1;
+    }
+    for entry in entries.iter_mut().flatten().chain(more.iter_mut()) {
+        if let Service::User(i) = entry.key.service
+            && let Some(row) = t.name(i)
+        {
+            entry.key.service = Service::User(row.moved_to);
+        }
+    }
+    let mut at = 0;
+    for i in 0..t.count {
+        let Some(row) = t.name(i).copied() else { continue };
+        if !row.used {
+            continue;
+        }
+        t.set(at, row);
+        at += 1;
     }
     t.count = kept;
     t.bulk_count = bulk;
-    for entry in entries.iter_mut().flatten() {
-        if let Service::User(i) = entry.key.service {
-            entry.key.service = Service::User(new_index[i]);
-        }
+    // The rows past `kept` are stale, and `intern` appends at the end
+    // of the heap part, so it is cut back to the length the new count
+    // asks for -- and handed back altogether as soon as the names fit
+    // the fixed table again, which after a dump that kept nothing is at
+    // once.
+    if kept <= USER_NAMES {
+        t.more = Vec::new();
+    } else {
+        t.more.truncate(kept - USER_NAMES);
     }
 }
 
@@ -169,6 +267,8 @@ struct Dropped {
 
 struct Ledger {
     entries: [Option<Entry>; ENTRIES],
+    /// The entries after the fixed table, `MORE_ENTRIES` at most.
+    more: Vec<Entry>,
     /// Every dropped record, counted by kind.
     dropped: [Option<Dropped>; DROPPED_KINDS],
     /// How many records were dropped in all (`dropped`'s hits plus the
@@ -183,17 +283,27 @@ impl Ledger {
     /// there is room (for a bulk report, within `BULK_ENTRIES`);
     /// otherwise only `overflow` counts it.
     fn add(&mut self, key: Key, bulk: bool, at: u64) {
-        if let Some(entry) = self.entries.iter_mut().flatten().find(|e| e.key == key) {
+        if let Some(entry) =
+            self.entries.iter_mut().flatten().chain(self.more.iter_mut()).find(|e| e.key == key)
+        {
             entry.hits += 1;
             entry.last = at;
-        } else if bulk && self.bulk == BULK_ENTRIES {
-            self.drop_record(key.what, true);
-        } else if let Some(slot) = self.entries.iter_mut().find(|e| e.is_none()) {
-            *slot = Some(Entry { key, hits: 1, first: at, last: at });
-            self.bulk += usize::from(bulk);
-        } else {
-            self.drop_record(key.what, bulk);
+            return;
         }
+        if bulk && self.bulk == BULK_ENTRIES {
+            self.drop_record(key.what, true);
+            return;
+        }
+        let entry = Entry { key, hits: 1, first: at, last: at };
+        if let Some(slot) = self.entries.iter_mut().find(|e| e.is_none()) {
+            *slot = Some(entry);
+        } else if self.more.len() == MORE_ENTRIES || self.more.try_push(entry).is_err() {
+            // The guard, or a heap with nothing left to give: either
+            // way the row is lost, and the dump says so under its kind.
+            self.drop_record(key.what, bulk);
+            return;
+        }
+        self.bulk += usize::from(bulk);
     }
 
     /// Counts one record the table had no room for, under its kind.
@@ -310,6 +420,7 @@ fn holds(name: &[u8], text: &[u8]) -> bool {
 
 static LEDGER: IrqMutex<Ledger> = IrqMutex::new(Ledger {
     entries: [None; ENTRIES],
+    more: Vec::new(),
     dropped: [None; DROPPED_KINDS],
     overflow: 0,
     bulk: 0,
@@ -436,7 +547,7 @@ impl fmt::Display for Json<'_> {
             Service::Kernel(name) => f.write_str(name)?,
             Service::User(i) => {
                 let table = USER.lock();
-                let name = &table.names[i][..table.lens[i]];
+                let name = table.name(i).map_or(&[][..], Name::text);
                 f.write_str(core::str::from_utf8(name).unwrap_or("?"))?;
             }
         }
@@ -451,16 +562,17 @@ impl fmt::Display for Json<'_> {
 /// Prints every entry as a `ledger: {...}` line and clears the table.
 pub fn dump() {
     PRINTING.fetch_add(1, Ordering::SeqCst);
-    let (entries, dropped, overflow) = {
+    let (entries, more, dropped, overflow) = {
         let mut ledger = LEDGER.lock();
-        let snapshot = (ledger.entries, ledger.dropped, ledger.overflow);
+        let snapshot =
+            (ledger.entries, core::mem::take(&mut ledger.more), ledger.dropped, ledger.overflow);
         ledger.entries = [None; ENTRIES];
         ledger.dropped = [None; DROPPED_KINDS];
         ledger.overflow = 0;
         ledger.bulk = 0;
         snapshot
     };
-    for entry in entries.iter().flatten() {
+    for entry in entries.iter().flatten().chain(more.iter()) {
         crate::kprintln!("ledger: {}", Json(entry));
     }
     // What was dropped, by kind, so that a lost gap is told from the
@@ -468,7 +580,7 @@ pub fn dump() {
     // no room left, "?bulk" the bulk cap, "?" the kinds `dropped` itself
     // had no room to name.
     let mut named = 0;
-    let mut rows = entries.iter().flatten().count();
+    let mut rows = entries.iter().flatten().count() + more.len();
     for d in dropped.iter().flatten() {
         rows += 1;
         let service = if d.bulk { "?bulk" } else { "?full" };
@@ -518,7 +630,8 @@ pub fn dump() {
         let mut ledger = LEDGER.lock();
         let mut names = USER.lock();
         if PRINTING.load(Ordering::SeqCst) == 0 {
-            compact(&mut ledger.entries, &mut names);
+            let ledger = &mut *ledger;
+            compact(&mut ledger.entries, &mut ledger.more, &mut names);
         }
     }
 }
@@ -602,7 +715,7 @@ mod tests {
     }
 
     fn name(t: &UserNames, i: usize) -> &[u8] {
-        &t.names[i][..t.lens[i]]
+        t.name(i).map_or(&[][..], Name::text)
     }
 
     /// Bulk names stop at BULK_NAMES and leave the rest for other gaps; a
@@ -630,7 +743,7 @@ mod tests {
             first: 0,
             last: 0,
         });
-        compact(&mut entries, &mut t);
+        compact(&mut entries, &mut [], &mut t);
         assert_eq!((t.count, t.bulk_count), (2, 1));
         assert_eq!(name(&t, 0), b"registry:k7");
         assert_eq!(name(&t, 1), b"osppc.dll");
@@ -639,9 +752,15 @@ mod tests {
         assert!(t.intern(b"registry:one more", true).is_some());
     }
 
+    /// Every entry the ledger holds, in the fixed table and after it.
+    fn rows(ledger: &Ledger) -> usize {
+        ledger.entries.iter().flatten().count() + ledger.more.len()
+    }
+
     fn empty() -> alloc::boxed::Box<Ledger> {
         alloc::boxed::Box::new(Ledger {
             entries: [None; ENTRIES],
+            more: Vec::new(),
             dropped: [None; DROPPED_KINDS],
             overflow: 0,
             bulk: 0,
@@ -664,7 +783,78 @@ mod tests {
             false,
             0,
         );
-        assert_eq!(ledger.entries.iter().flatten().count(), BULK_ENTRIES + 1);
+        assert_eq!(rows(&ledger), BULK_ENTRIES + 1);
+    }
+
+    /// Entries past the fixed table are kept, not dropped, and the cap
+    /// on them is honest: the row that meets it is counted under its own
+    /// kind, which is what a dump's "?full" line reports.
+    #[test]
+    fn entries_grow_past_the_fixed_table() {
+        let mut ledger = empty();
+        for i in 0..ENTRIES + MORE_ENTRIES {
+            ledger.add(
+                Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 },
+                false,
+                0,
+            );
+        }
+        assert_eq!(
+            (rows(&ledger), ledger.more.len(), ledger.overflow),
+            (ENTRIES + MORE_ENTRIES, MORE_ENTRIES, 0)
+        );
+        // A hit of one of them is still found after the fixed table.
+        ledger.add(
+            Key { service: Service::Kernel("f"), what: "flag", detail: ENTRIES as u64 },
+            false,
+            7,
+        );
+        let grown = ledger.more.iter().find(|e| e.key.detail == ENTRIES as u64).unwrap();
+        assert_eq!((grown.hits, grown.last), (2, 7));
+        // And the cap says so rather than growing on.
+        ledger.add(
+            Key { service: Service::Kernel("x"), what: "missing export", detail: 0 },
+            false,
+            0,
+        );
+        assert_eq!((rows(&ledger), ledger.overflow), (ENTRIES + MORE_ENTRIES, 1));
+        let dropped: alloc::vec::Vec<_> =
+            ledger.dropped.iter().flatten().map(|d| (d.what, d.bulk, d.hits)).collect();
+        assert_eq!(dropped, [("missing export", false, 1)]);
+    }
+
+    /// Names past the fixed table are interned too, read back by the
+    /// same index, and a compaction that keeps some of them renumbers
+    /// the entries and leaves the heap part at the length the next
+    /// `intern` appends at.
+    #[test]
+    fn names_grow_past_the_fixed_table() {
+        let mut t = alloc::boxed::Box::new(UserNames::new());
+        let mut last = 0;
+        for i in 0..USER_NAMES + 2 {
+            let name = alloc::format!("dll{i}.dll!Export");
+            last = t.intern(name.as_bytes(), false).unwrap();
+        }
+        assert_eq!((last, t.count), (USER_NAMES + 1, USER_NAMES + 2));
+        assert_eq!(name(&t, USER_NAMES + 1), alloc::format!("dll{}.dll!Export", last).as_bytes());
+        // One entry naming the last of them: the compaction keeps that
+        // name alone, so it moves into the fixed table and the heap part
+        // is given back.
+        let mut entries = [None; 1];
+        entries[0] = Some(Entry {
+            key: Key { service: Service::User(last), what: "missing export", detail: 0 },
+            hits: 1,
+            first: 0,
+            last: 0,
+        });
+        compact(&mut entries, &mut [], &mut t);
+        assert_eq!((t.count, t.more.len()), (1, 0));
+        assert!(entries[0].unwrap().key.service == Service::User(0));
+        assert_eq!(name(&t, 0), alloc::format!("dll{}.dll!Export", USER_NAMES + 1).as_bytes());
+        // The next name goes after it and reads back as itself.
+        let next = t.intern(b"after.dll!Export", false).unwrap();
+        assert_eq!(next, 1);
+        assert_eq!(name(&t, 1), b"after.dll!Export");
     }
 
     /// A dropped record is still counted under its kind, and bulk drops
@@ -681,7 +871,7 @@ mod tests {
             );
         }
         // The bulk reports hold BULK_ENTRIES entries; these fill the rest.
-        for i in 0..ENTRIES - BULK_ENTRIES {
+        for i in 0..ENTRIES + MORE_ENTRIES - BULK_ENTRIES {
             ledger.add(
                 Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 },
                 false,
@@ -713,7 +903,7 @@ mod tests {
         const KINDS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP";
         assert!(KINDS.len() > DROPPED_KINDS);
         let mut ledger = empty();
-        for i in 0..ENTRIES {
+        for i in 0..ENTRIES + MORE_ENTRIES {
             ledger.add(
                 Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 },
                 false,

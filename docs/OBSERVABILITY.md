@@ -39,7 +39,7 @@ rather than free text.
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Suspensions (who stopped a thread) | `kernel/src/nt/thread.rs` | `suspend:` lines; `thread:   suspended by ...` and `parked at rip ...` in every thread dump; `thread suspend`, `thread resume` and `thread suspend refused` events (`events=thread`) |
-| Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
+| Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_match=<text>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/trace_common.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
 | Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_bytes=<n>` for the bytes at the places that read as none, `imports_except=<text>[,<text>...]` for the imports to leave unarmed, `imports_in=<image>` for the one image whose slots are armed) with `events=call`; `import` and `ret` events, each with `from`, the image whose import slot the call went through; `imports:` lines |
 | A program's own telemetry (ETW) | `kernel/src/nt/etw/mod.rs`, `user/advapi32/src/trace.rs` | `etw=<provider or name>[:<level>[:<keyword>[:<n>]]]`; `etw:` lines |
@@ -470,25 +470,34 @@ opentelemetry-proto's definitions:
 
 Every STATUS_NOT_IMPLEMENTED, STATUS_INVALID_SYSTEM_SERVICE, unknown
 information class, unsupported flag or TODO path increments a counter
-keyed by (service, what, detail) in a fixed 512-entry table. A record
-the table has no room for is still counted under its kind, so a dump
-says what it lost: one line per kind, `?full` for a table with nothing
-free left and `?bulk` for the bulk cap below, with `?` / `ledger full`
-for the kinds past the 32 the drop table itself names. When running a
-real program, this list is the work queue, ranked by how often it was
-hit (scenario `ledger_test`).
+keyed by (service, what, detail) in a table of 512 entries, and then
+on the heap, which the table grows into fallibly by at most 1536 more.
+A record there is no room for is still counted under its kind, so a
+dump says what it lost: one line per kind, `?full` for both tables full
+and `?bulk` for the bulk cap below, with `?` / `ledger full` for the
+kinds past the 32 the drop table itself names. The 1536 is a guard
+against a caller that reports a new name per call, in the spirit of
+`stack_at=`'s cap, and not a budget: a Word startup fills the fixed 512
+and loses 44 rows of four kinds after them, which is what the heap
+part is for. When running a real program, this list is the work queue,
+ranked by how often it was hit (scenario `ledger_test`).
+
 Names from user mode (`GalaRecordMissing`, the registry's absent keys)
-live in a second fixed table of 512 names; a name that finds no room is
-`?user`, and a name that is not plain text is `?text` -- a caller's bug
-and no cap of the ledger's, told apart because a row that said `?user`
-of a name read for more bytes than the caller meant sent the reader
-after a cap of the ledger's instead (`ledger_test` reports one of each). Invariants (`nt::ledger`): each dump gives back the names no
+live in a second table of 512 names that grows the same way; a name
+that finds no room is `?user`, and a name that is not plain text is
+`?text` -- a caller's bug and no cap of the ledger's, told apart
+because a row that said `?user` of a name read for more bytes than the
+caller meant sent the reader after a cap of the ledger's instead
+(`ledger_test` reports one of each).
+
+Invariants (`nt::ledger`): each dump gives back the names no
 entry uses any more, so the table holds the names of the gaps since the
 last dump, not every name of the boot; and bulk reports (the registry's
-`absent key`s, thousands in an Office install) hold at most 384 names
-and 384 entries, so a rarer gap such as a missing DLL still finds room
-for its name between two dumps. Whether those caps are right is in the
-dump: `?bulk` lines are the caps working as meant, while a `?full` line
+`absent key`s, thousands in an Office install) hold at most three
+quarters of either table (1536 of 2048), which is the share the fixed
+table alone gave them, so a rarer gap such as a missing DLL still
+finds room for its name between two dumps. Whether those caps are
+right is in the dump: `?bulk` lines are the caps working as meant, while a `?full` line
 of a rarer kind says a gap was lost and the caps need revisiting. A name
 is 96 bytes, and a registry key's is built to fit in them
 (`nt::registry_calls::absent_name`): a key under a user hive is named by
@@ -500,12 +509,12 @@ events carry every open's full name for whoever wants the hive itself.
 
 `ledger_except=<text>[,<text>...]` keeps the gaps whose names hold one
 of the texts out of the table altogether -- no name, no record and no
-hit -- so that the 512 records go to the rest. The texts are parts of a
+hit -- so that the 2048 records go to the rest. The texts are parts of a
 name and are compared without regard to case, so one text covers a
 family a program reports once in every module it loads:
 `register_frame` holds both the registering and the deregistering name
-and is 86 of the 409 records a Word startup leaves, a fifth of them and
-as many of the 512 names. What the filter is not for is a gap that is
+and is 86 of the 409 records a Word startup leaves, a fifth of them
+and as many of the 2048 names. What the filter is not for is a gap that is
 merely known, because a record it keeps out is one the next reader does
 not see: every dump says how many records each text kept out, as
 `?except` lines, the texts that kept out none included -- a name a dump
@@ -517,8 +526,9 @@ every gap is recorded, as without it, a filter that quietly excluded
 nothing reading afterwards as a table the gaps it was meant to keep out
 were entitled to fill. A dump of a program that recorded nothing says
 nothing at all, filter or no filter. Scenario `ledger_except`, whose
-program reports one gap after the 600 that fill the table without it:
-that row is in the dump only when the filter freed the slot it took.
+program reports one gap after the 2100 that fill both tables without
+it: that row is in the dump only when the filter freed the slot it
+took.
 
 - The dispatcher records unknown services and, generically, any
   STATUS_INVALID_INFO_CLASS (with the class argument, per
@@ -1522,14 +1532,18 @@ crash report:   thread 272's last calls, oldest first: NtProtectVirtualMemory=0x
 refused `NtSetInformationThread` after them that nothing else in the run
 records.
 
-### Stack captures (`stack_at=`, `stack_from=`, `stack_words=`)
+### Stack captures (`stack_at=`, `stack_from=`, `stack_match=`, `stack_words=`)
 
 `stack_at=<service>[:<n>]` logs the calling thread's user stack the first
-`n` times a process reaches that system call, and `stack_from=<module>`
-keeps only the calls a module of that name is on the stack of, while
-`stack_words=<n>` says how far up the stack to read (`n`
-default 4, at most 512; `kernel/src/nt/stack_at.rs`, scenarios
-`stack_at_test` and `stack_at_from_test`). It answers what the other
+`n` times a process reaches that system call. Two filters choose which
+of its calls those are: `stack_from=<module>` keeps the calls a module
+of that name is on the stack of (who made the call), and
+`stack_match=<text>` the calls one of whose arguments points at text
+containing it (what the call is about). `stack_words=<n>` says how far
+up the stack to read (`n` default 4, at most 512;
+`kernel/src/nt/stack_at.rs`, scenarios `stack_at_test`,
+`stack_at_from_test`, `stack_at_match_test` and
+`stack_at_words_test`). It answers what the other
 facilities leave open: the event stream says which calls a program made
 and the ledger what gala did not have, and neither says who made the
 call. A program that stops inside a DLL gala has no source for
@@ -1577,6 +1591,24 @@ stack:   (8 of the 128 stack words read from 0x1ffa08 point into an image)
   without spending a capture. The text is part of a module's name, in
   either case; without `stack_at=` there is nothing to filter and the
   option says so.
+- **`stack_match=<text>` chooses what the call is about.** A module
+  filter cannot separate the calls one module makes about everything.
+  Every gap a Word startup records reaches `GalaRecordMissing` through
+  the same two modules, so `stack_from=` keeps all of them and the one
+  gap in question -- one call of the hundreds, 38 seconds into the boot
+  -- sits behind a count no number reaches. What tells those calls
+  apart is the argument the capture already quotes: the service's own
+  name for the thing it was asked about. `stack_at=GalaRecordMissing
+  stack_match=empty%20path` captures the call that recorded that gap and
+  passes the rest over, which makes every row of the ledger a trigger.
+  The text is matched against the same runs a capture quotes (at most 64
+  characters of any of the first eight arguments, ASCII or UTF-16,
+  either case), so what the filter chose by is what the capture then
+  shows. `%XX` escapes are decoded, because a command-line value cannot
+  carry a space and the names wanted have them: `stack_match=empty%20path`,
+  `%22` for a quote, `%25` for a `%`. The two filters compose -- both
+  must want a call -- and either without `stack_at=` has nothing to
+  filter and says so.
 - **`stack_words=<n>` reaches past the service's own frame.** The
   default 128 words are several frames of a Windows DLL, but a service
   that keeps a large frame of its own buries the caller below them:
@@ -1606,21 +1638,26 @@ stack:   (8 of the 128 stack words read from 0x1ffa08 point into an image)
   writes. With neither given, every process.
 - **The count is the flood guard.** When it is spent one line says so
   (`stack: <service>: the N captures asked for are spent`, with how many
-  the filter passed over) and the capture goes quiet, so a service
+  calls each filter in force passed over, named by its option) and the
+  capture goes quiet, so a service
   called in a loop cannot bury the log. A count that is not a number, or
   is zero, refuses the whole option rather than quietly arming the
   default.
 - **The end of a run says what the trigger did**: `stack: <service>: 2
-  captures of the 2 asked for, 3 calls passed over by stack_from=...`.
-  Captures alone cannot tell a filter that matched nothing from a
-  service nobody called, and that difference is the next thing to type.
+  captures of the 2 asked for, 3 calls passed over by stack_from=...`,
+  one clause per filter in force. Captures alone cannot tell a filter
+  that matched nothing from a service nobody called, and that difference
+  is the next thing to type; with both filters given, the two counts say
+  which of them is the one that is wrong.
 - **Cost**: off unless the option is given, and then one relaxed load on
   the system-call path. A capture reads at most 128 words (1 KiB) of the
   caller's stack, or what `stack_words=` asks for up to 512 words
-  (4 KiB), a page's part at a time, and allocates nothing. With
-  `stack_from=` the stack is read before the count is claimed, so a
-  passed-over call costs that read -- it is already a call to the named
-  service, and the read is what buys the trigger its aim.
+  (4 KiB), a page's part at a time, and allocates nothing. The
+  filters are tried in the order of what they need: `stack_match=`
+  reads the arguments only, so a call it turns away costs those reads
+  and not the scan, while a call `stack_from=` turns away has had its
+  stack read, the count not yet claimed -- it is already a call to the
+  named service, and the read is what buys the trigger its aim.
 - **Limits**: the capture is at the system-call boundary, which in a
   WOW64 process is the 64-bit thunk, so a 32-bit program's own frames
   are above what is scanned and are not placed by this yet; and the
