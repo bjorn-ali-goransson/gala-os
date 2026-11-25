@@ -12043,10 +12043,18 @@ stations and desktops a program creates are refused until stage 3).
   SL_DATA_SZ). Invariants and limits: no product key is ever installed
   (SLInstallProofOfPurchase is SL_E_INVALID_PRODUCT_KEY: product keys
   are not decoded against a license's key configuration; the product-key
-  queries SL_E_PKEY_NOT_INSTALLED), so no right is granted
+  queries, SLGetPKeyId and SLGetPKeyInformation among them,
+  SL_E_PKEY_NOT_INSTALLED, which is what Windows answers for an
+  algorithm whose store holds no key -- measured, with E_INVALIDARG for
+  a NULL handle, algorithm, key string or output), so no right is
+  granted
   (SLConsumeRight SL_E_RIGHT_NOT_GRANTED), every SKU is unlicensed in
   SLGetLicensingStatusInformation (reason SL_E_PKEY_NOT_INSTALLED), no
-  policy has a value (SLGetPolicyInformationDWORD SL_E_VALUE_NOT_FOUND)
+  policy can be read (SLGetPolicyInformation and
+  SLGetPolicyInformationDWORD SL_E_RIGHT_NOT_GRANTED, which is what
+  Windows answers for any value name on a handle that consumed no right
+  -- measured, with E_INVALIDARG for what is not a handle or a NULL
+  required output, and for a NULL value name in the DWORD form alone)
   and SLPersistApplicationPolicies has nothing to keep (S_OK);
   SLPersistRTSPayloadOverride, undocumented, is E_NOTIMPL. XrML
   signatures are not verified, where Windows refuses a license that is

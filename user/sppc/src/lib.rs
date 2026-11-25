@@ -16,7 +16,8 @@
 //!   EUL's private half, takes that of another license of its SKU).
 //! - no product keys: SLInstallProofOfPurchase refuses every key, since
 //!   gala does not decode product keys against a license's key
-//!   configuration (recorded; ROADMAP OF).
+//!   configuration, and no key has an identifier for SLGetPKeyId
+//!   (recorded; ROADMAP OF).
 //!
 //! Limits: XrML signatures are not verified (a license made by anyone is
 //! taken, where Windows refuses it); a license file's identifier is a
@@ -24,7 +25,10 @@
 //! what Windows derives it from is not measured); no right is ever
 //! consumed, so no SKU is licensed: SLConsumeRight is
 //! SL_E_RIGHT_NOT_GRANTED, the status of every SKU unlicensed (reason
-//! SL_E_PKEY_NOT_INSTALLED) and no policy has a value.
+//! SL_E_PKEY_NOT_INSTALLED) and no policy can be read
+//! (SLGetPolicyInformation and its DWORD form SL_E_RIGHT_NOT_GRANTED,
+//! which is what Windows answers on a handle that consumed no right --
+//! measured).
 //!
 //! Observability: every call is recorded in the ledger as
 //! `sppc.dll!<function>(<case>)`, "other", with the HRESULT returned as
@@ -819,6 +823,28 @@ pub extern "system" fn SLConsumeRight(
     }
 }
 
+/// SLGetPolicyInformation(hSLC, pwszValueName, *peDataType, *pcbValue,
+/// **ppbValue): policies come with a consumed right, and none is. The
+/// data type is optional and the value name is never looked at: the
+/// right is answered first (measured on Windows, where the DWORD
+/// sibling refuses a NULL name and this one does not).
+#[unsafe(no_mangle)]
+pub extern "system" fn SLGetPolicyInformation(
+    handle: usize,
+    name: *const u16,
+    _data_type: *mut u32,
+    size: *mut u32,
+    value: *mut *mut u8,
+) -> i32 {
+    const F: &str = "SLGetPolicyInformation";
+    if !valid(handle) || size.is_null() || value.is_null() {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    let name = from_wide(name);
+    let case = name.as_deref().unwrap_or("no value name");
+    record(F, case, SL_E_RIGHT_NOT_GRANTED)
+}
+
 /// SLGetPolicyInformationDWORD(hSLC, pwszValueName, *pdwValue): policies
 /// come with a consumed right, and none is.
 #[unsafe(no_mangle)]
@@ -834,7 +860,7 @@ pub extern "system" fn SLGetPolicyInformationDWORD(
     if !valid(handle) || value.is_null() {
         return record(F, &name, E_INVALIDARG);
     }
-    record(F, &name, SL_E_VALUE_NOT_FOUND)
+    record(F, &name, SL_E_RIGHT_NOT_GRANTED)
 }
 
 /// SLPersistApplicationPolicies(pApplicationId, pProductSkuId, dwFlags):
@@ -877,6 +903,30 @@ pub extern "system" fn SLInstallProofOfPurchase(
     let algorithm = from_wide(algorithm).unwrap_or_default();
     let _ = record(F, &algorithm, 0);
     record(F, "product keys not decoded", SL_E_INVALID_PRODUCT_KEY)
+}
+
+/// SLGetPKeyId(hSLC, pwszPKeyAlgorithm, pwszPKeyString,
+/// cbPKeySpecificData, pbPKeySpecificData, *pPKeyId): the identifier of
+/// an installed product key, of which there is none. Windows answers
+/// SL_E_PKEY_NOT_INSTALLED for an algorithm whose store holds no key
+/// (measured, ARCHITECTURE "sppc"); the algorithm asked for is the
+/// case recorded, since which one a program uses is what the ledger is
+/// read for.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLGetPKeyId(
+    handle: usize,
+    algorithm: *const u16,
+    key: *const u16,
+    _size: u32,
+    _data: *const u8,
+    pkey: *mut Slid,
+) -> i32 {
+    const F: &str = "SLGetPKeyId";
+    if !valid(handle) || algorithm.is_null() || key.is_null() || pkey.is_null() {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    let algorithm = from_wide(algorithm).unwrap_or_default();
+    record(F, &algorithm, SL_E_PKEY_NOT_INSTALLED)
 }
 
 /// SLUninstallProofOfPurchase(hSLC, pPKeyId): none is installed.
