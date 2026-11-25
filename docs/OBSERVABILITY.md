@@ -1536,16 +1536,36 @@ call. A program that stops inside a DLL gala has no source for
 leaves nothing else to go on -- Word's `wwlib.dll` deciding to print
 "Word was unable to start" is the case it was built for.
 
-A capture is a header line and a line per stack word that points into a
+A capture is a header line, the arguments the call was made with, the
+text any of them points at, and a line per stack word that points into a
 loaded image:
 
 ```
-stack: NtWriteFile from stack_at_test.exe (pid 4, tid 8), capture 1 of 2, at 0x180001c9a (ntdll.dll+0x1c9a)
-stack:   [rsp+0x000] 0x3ff7fff5750a (kernel32.dll+0x750a)
-stack:   [rsp+0x090] 0x14000103b (stack_at_test.exe+0x103b)
-stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
+stack: NtWriteFile from stack_at_test.exe (pid 4, tid 8), capture 4 of 5, at 0x180001cfa (ntdll.dll+0x1cfa)
+stack:   arguments 0-7: 0x8, 0x0, 0x0, 0x0, 0x1ffa60, 0x14000204a, 0x18, 0x0
+stack:   argument 5 reads as "stack_at_test: k32 one"
+stack:   [rsp+0x000] 0x3ff7fff4750a (kernel32.dll+0x750a)
+stack:   [rsp+0x030] 0x14000204a (stack_at_test.exe+0x204a)
+stack:   (8 of the 128 stack words read from 0x1ffa08 point into an image)
 ```
 
+- **The arguments say what the call was about.** A stack names who
+  called, and on a service that is called about different things that is
+  only half the answer: twenty-four captures at `GalaRecordMissing` from
+  Word's `Mso20win32client.dll` named the caller every time and never
+  which gap each was recording. So a capture prints the first eight
+  arguments -- four in registers and four off the user stack, far enough
+  to reach the one that carries the subject: `NtWriteFile`'s buffer is
+  its sixth -- and then any of them that points at four or more
+  printable characters a second time, as text (`crashreport::read_text`,
+  ASCII or UTF-16, at most 64 characters). That is a service's own name
+  for what it was asked about: the name a gap was recorded under, the
+  bytes a write was about to write, the path an open failed on. Past a
+  service's own arguments the values are whatever its caller left in
+  those registers and stack slots, which is why a short run of
+  characters is not quoted at all and a line here is evidence rather
+  than proof, like the scanned stack words below it. It costs no option:
+  arming a capture arms this.
 - **`stack_from=<text>` chooses the stack, not the number.** "The first
   `n`" is the wrong shape of trigger on its own: a service another
   thread reaches in a loop spends the count before the call in question.

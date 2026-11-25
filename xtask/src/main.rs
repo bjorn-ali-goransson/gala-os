@@ -4505,16 +4505,27 @@ fn build_kernel_aarch64(release: bool) -> Result {
     drop_debug_relocations(&target_dir().join(KERNEL_TARGET_AARCH64).join(profile).join("kernel"))?;
     // Its images' programs and DLLs, built for ARM64 (always optimized,
     // as the x64 ones).
+    build_arm64_programs()
+}
+
+/// The USER_DLLS DLLs that have an ARM64 build (NOT_ARM64_DLLS have
+/// none), built for ARM64.
+fn build_arm64_dlls() -> Result {
     let mut cmd = user_build_for(USER_TARGET_ARM64);
     for dll in USER_DLLS.iter().filter(|d| !NOT_ARM64_DLLS.contains(&d.package)) {
         cmd.args(["--package", dll.package]);
     }
-    run_cmd(&mut cmd)?;
-    build_arm64_programs()
+    run_cmd(&mut cmd)
 }
 
-/// USER_PROGRAMS_ARM64, built for ARM64.
+/// USER_PROGRAMS_ARM64, built for ARM64, after the DLLs they embed --
+/// `image_test` embeds the ARM64 `testdll.dll` with `include_bytes!`,
+/// and cargo orders nothing between two packages that only a path ties
+/// together, so a tree without that DLL fails the build and a tree with
+/// an older one embeds the older bytes (which is what made the exported
+/// `user/bin/arm64/image_test.exe` differ from a cold build's).
 fn build_arm64_programs() -> Result {
+    build_arm64_dlls()?;
     let mut cmd = user_build_for(USER_TARGET_ARM64);
     for program in arm64_programs() {
         cmd.args(["--package", program]);
@@ -12232,6 +12243,12 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "capture 5 of 5",
             "(kernel32.dll+0x",
             "(stack_at_test.exe+0x",
+            // What the call was made with: NtWriteFile's buffer is its
+            // sixth argument, so the capture quotes the line the write
+            // was about to write (`\r` ends the run, as a character
+            // that is not printable).
+            "stack:   arguments 0-7: ",
+            "stack:   argument 5 reads as \"stack_at_test: raw one\"",
             "stack: NtWriteFile: the 5 captures asked for are spent",
         ],
     },
@@ -12254,6 +12271,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "stack: only calls with a module whose name contains \"kernel32\" on the stack",
             "(kernel32.dll+0x",
             "capture 2 of 2",
+            // The filter chose the two writes that went through
+            // kernel32, and the quote says which they were.
+            "stack:   argument 5 reads as \"stack_at_test: k32 one\"",
+            "stack:   argument 5 reads as \"stack_at_test: k32 two\"",
             "the 2 captures asked for are spent (3 calls so far did not reach stack_from=kernel32)",
             "stack: NtWriteFile: 2 captures of the 2 asked for, 3 calls passed over by stack_from=kernel32",
         ],

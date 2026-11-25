@@ -15,7 +15,8 @@ many of the program's files need it and what is missing."""
 import os, re, subprocess, sys
 from collections import defaultdict
 
-dlldir = sys.argv[1]
+# The directory of gala's built DLLs (`main`, or api_coverage.py, sets it).
+dlldir = None
 
 def readobj(args, path):
     return subprocess.run(["llvm-readobj", *args, path], capture_output=True, text=True).stdout
@@ -143,85 +144,92 @@ def closure(imports_dir, roots):
                 todo.append((r, "static" if how == "static" and kind == "static" else "delay"))
     return seen
 
-if len(sys.argv) > 2 and sys.argv[2] == "--dumps":
-    own = own_exports(sys.argv[4])
-    only = None
-    if len(sys.argv) > 6 and sys.argv[5] == "--roots":
-        only = closure(sys.argv[3], sys.argv[6].split(","))
-        # `--static`: only what loading needs (the start-up files' static
-        # imports), not what delay imports reach.
-        if "--static" in sys.argv[7:]:
-            only = {k: v for k, v in only.items() if v == "static"}
-        print(f"== closure of {sys.argv[6]}: {sum(1 for v in only.values() if v == 'static')} "
-              f"files loaded at start, {sum(1 for v in only.values() if v == 'delay')} more through delay imports")
-    need = defaultdict(set)      # (dll, sym) -> files
-    nodll = defaultdict(set)     # dll -> files
-    ownmiss = defaultdict(set)   # (dll, sym) of the program's own DLLs not exported
-    files = 0
-    for dirpath, _, names in os.walk(sys.argv[3]):
-        for n in names:
-            files += 1
-            rel = os.path.relpath(os.path.join(dirpath, n), sys.argv[3])[:-len(".txt")]
-            if only is not None and rel not in only:
-                files -= 1
-                continue
-            dll = None
-            static_only = "--static" in sys.argv[7:]
-            kind = None
-            with open(os.path.join(dirpath, n), encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    s = line.strip()
-                    if line.startswith("Import {"): kind = "static"
-                    elif line.startswith("DelayImport {"): kind = "delay"
-                    elif s.startswith("Name:"): dll = s[5:].strip()
-                    elif s.startswith("Symbol:") and static_only and kind == "delay": continue
-                    elif s.startswith("Symbol:"):
-                        m = re.match(r"Symbol: (\S*) \((\d+)\)", s)
-                        sym = m.group(1) if m.group(1) else f"#{m.group(2)}"
-                        d = dll.lower()
-                        if d in own:
-                            if not sym.startswith("#") and sym not in own[d]:
-                                ownmiss[(d, sym)].add(rel)
-                            continue
-                        ex = exports(resolve(d))
-                        if ex is None: nodll[resolve(d)].add(rel); continue
-                        if sym not in ex[0]: need[(resolve(d), sym)].add(rel)
-    print(f"== {files} files; {len(own)} of the program's own DLLs")
-    print("-- DLLs gala does not have (files needing each)")
-    for d, fs in sorted(nodll.items(), key=lambda kv: -len(kv[1])):
-        print(f"  {len(fs):5} {d}: {' '.join(sorted(fs)[:6])}{' ...' if len(fs) > 6 else ''}")
-    per = defaultdict(list)
-    for (d, sym), fs in need.items(): per[d].append((len(fs), sym))
-    print("-- functions gala lacks or only stubs, per DLL (files needing the most-needed)")
-    for d, syms in sorted(per.items(), key=lambda kv: -max(c for c, _ in kv[1])):
-        syms.sort(key=lambda x: (-x[0], x[1]))
-        print(f"  {d} ({len(syms)}): " + " ".join(f"{s}[{c}]" for c, s in syms))
-    if ownmiss:
-        print(f"-- imports of the program's own DLLs not in their export lists: {len(ownmiss)}")
-    sys.exit(0)
+def main():
+    global dlldir
+    dlldir = sys.argv[1]
+    if len(sys.argv) > 2 and sys.argv[2] == "--dumps":
+        own = own_exports(sys.argv[4])
+        only = None
+        if len(sys.argv) > 6 and sys.argv[5] == "--roots":
+            only = closure(sys.argv[3], sys.argv[6].split(","))
+            # `--static`: only what loading needs (the start-up files' static
+            # imports), not what delay imports reach.
+            if "--static" in sys.argv[7:]:
+                only = {k: v for k, v in only.items() if v == "static"}
+            print(f"== closure of {sys.argv[6]}: {sum(1 for v in only.values() if v == 'static')} "
+                  f"files loaded at start, {sum(1 for v in only.values() if v == 'delay')} more through delay imports")
+        need = defaultdict(set)      # (dll, sym) -> files
+        nodll = defaultdict(set)     # dll -> files
+        ownmiss = defaultdict(set)   # (dll, sym) of the program's own DLLs not exported
+        files = 0
+        for dirpath, _, names in os.walk(sys.argv[3]):
+            for n in names:
+                files += 1
+                rel = os.path.relpath(os.path.join(dirpath, n), sys.argv[3])[:-len(".txt")]
+                if only is not None and rel not in only:
+                    files -= 1
+                    continue
+                dll = None
+                static_only = "--static" in sys.argv[7:]
+                kind = None
+                with open(os.path.join(dirpath, n), encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        s = line.strip()
+                        if line.startswith("Import {"): kind = "static"
+                        elif line.startswith("DelayImport {"): kind = "delay"
+                        elif s.startswith("Name:"): dll = s[5:].strip()
+                        elif s.startswith("Symbol:") and static_only and kind == "delay": continue
+                        elif s.startswith("Symbol:"):
+                            m = re.match(r"Symbol: (\S*) \((\d+)\)", s)
+                            sym = m.group(1) if m.group(1) else f"#{m.group(2)}"
+                            d = dll.lower()
+                            if d in own:
+                                if not sym.startswith("#") and sym not in own[d]:
+                                    ownmiss[(d, sym)].add(rel)
+                                continue
+                            ex = exports(resolve(d))
+                            if ex is None: nodll[resolve(d)].add(rel); continue
+                            if sym not in ex[0]: need[(resolve(d), sym)].add(rel)
+        print(f"== {files} files; {len(own)} of the program's own DLLs")
+        print("-- DLLs gala does not have (files needing each)")
+        for d, fs in sorted(nodll.items(), key=lambda kv: -len(kv[1])):
+            print(f"  {len(fs):5} {d}: {' '.join(sorted(fs)[:6])}{' ...' if len(fs) > 6 else ''}")
+        per = defaultdict(list)
+        for (d, sym), fs in need.items(): per[d].append((len(fs), sym))
+        print("-- functions gala lacks or only stubs, per DLL (files needing the most-needed)")
+        for d, syms in sorted(per.items(), key=lambda kv: -max(c for c, _ in kv[1])):
+            syms.sort(key=lambda x: (-x[0], x[1]))
+            print(f"  {d} ({len(syms)}): " + " ".join(f"{s}[{c}]" for c, s in syms))
+        if ownmiss:
+            print(f"-- imports of the program's own DLLs not in their export lists: {len(ownmiss)}")
+        return
 
-for pe in sys.argv[2:]:
-    text = readobj(["--coff-imports"], pe)
-    missing = defaultdict(list)
-    stubbed = defaultdict(list)
-    nodll = set()
-    kind = dll = None
-    for line in text.splitlines():
-        s = line.strip()
-        if line.startswith("Import {"): kind = "static"
-        elif line.startswith("DelayImport {"): kind = "delay"
-        elif s.startswith("Name:"): dll = s[5:].strip()
-        elif s.startswith("Symbol:"):
-            m = re.match(r"Symbol: (\S*) \((\d+)\)", s)
-            sym = m.group(1) if m.group(1) else f"#{m.group(2)}"
-            ex = exports(resolve(dll))
-            if ex is None: nodll.add((kind, dll)); continue
-            real, stub = ex
-            if sym in real: continue
-            (stubbed if sym in stub else missing)[(kind, dll)].append(sym)
-    print(f"== {os.path.basename(pe)}")
-    for k, d in sorted(nodll): print(f"  no dll [{k}] {d}")
-    for (k, d), syms in sorted(missing.items()):
-        print(f"  missing [{k}] {d} ({len(syms)}): {' '.join(syms)}")
-    for (k, d), syms in sorted(stubbed.items()):
-        print(f"  stub-only [{k}] {d} ({len(syms)}): {' '.join(syms)}")
+    for pe in sys.argv[2:]:
+        text = readobj(["--coff-imports"], pe)
+        missing = defaultdict(list)
+        stubbed = defaultdict(list)
+        nodll = set()
+        kind = dll = None
+        for line in text.splitlines():
+            s = line.strip()
+            if line.startswith("Import {"): kind = "static"
+            elif line.startswith("DelayImport {"): kind = "delay"
+            elif s.startswith("Name:"): dll = s[5:].strip()
+            elif s.startswith("Symbol:"):
+                m = re.match(r"Symbol: (\S*) \((\d+)\)", s)
+                sym = m.group(1) if m.group(1) else f"#{m.group(2)}"
+                ex = exports(resolve(dll))
+                if ex is None: nodll.add((kind, dll)); continue
+                real, stub = ex
+                if sym in real: continue
+                (stubbed if sym in stub else missing)[(kind, dll)].append(sym)
+        print(f"== {os.path.basename(pe)}")
+        for k, d in sorted(nodll): print(f"  no dll [{k}] {d}")
+        for (k, d), syms in sorted(missing.items()):
+            print(f"  missing [{k}] {d} ({len(syms)}): {' '.join(syms)}")
+        for (k, d), syms in sorted(stubbed.items()):
+            print(f"  stub-only [{k}] {d} ({len(syms)}): {' '.join(syms)}")
+
+
+if __name__ == "__main__":
+    main()
