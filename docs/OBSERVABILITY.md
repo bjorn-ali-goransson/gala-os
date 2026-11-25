@@ -499,8 +499,10 @@ table alone gave them, so a rarer gap such as a missing DLL still
 finds room for its name between two dumps. Whether those caps are
 right is in the dump: `?bulk` lines are the caps working as meant, while a `?full` line
 of a rarer kind says a gap was lost and the caps need revisiting. A name
-is 96 bytes, and a registry key's is built to fit in them
-(`nt::registry_calls::absent_name`): a key under a user hive is named by
+is 160 bytes -- a row that answers "which one did it ask about" carries
+the thing it names, and the product and component msi.dll's rows name
+are 126 of them (`user/msi`) -- and a registry key's name is built to
+fit a row (`nt::registry_calls::absent_name`): a key under a user hive is named by
 the hive and not by the SID of the user whose it is, and a name too long
 even then keeps the hive it is in and the end that says which key it was
 (`registry:USER/.../Store/Tenants/Default`) -- the end alone said
@@ -520,7 +522,7 @@ not see: every dump says how many records each text kept out, as
 `?except` lines, the texts that kept out none included -- a name a dump
 does not carry must read as the filter's doing and not as a gap the
 program never hit, and a text that named nothing (a typo) says so here
-and nowhere else. Sixteen texts at most, of 96 bytes of plain text
+and nowhere else. Sixteen texts at most, of 160 bytes of plain text
 each; a value that is not one is refused outright with the reason and
 every gap is recorded, as without it, a filter that quietly excluded
 nothing reading afterwards as a table the gaps it was meant to keep out
@@ -543,8 +545,8 @@ took.
   ranking by hits buries under the thousands hit at startup. The lines
   that stand for records the table had no room for carry zeros.
 - gala's user-mode DLLs record through ntdll's `GalaRecordMissing`
-  (`dll!function` names, 96 characters kept, the ledger's own
-  length). Its kinds: `missing
+  (`dll!function` names and what the call asked about, 160 characters
+  kept, the ledger's own length). Its kinds: `missing
   export` (one a program asked for at run time and lives with,
   GetProcAddress), `missing import` (one the loader could not bind,
   which ends the load: named `<dll>!<export>(imported by <module>)`, so
@@ -611,7 +613,7 @@ took.
   program's own standard error (there being no dialog to show) carry no
   time, no process and no caller, so a run that ended that way said
   nowhere that it had. The dump and the triage's "gaps hit last" carry
-  the sentence itself, cut to the 96 characters a name keeps and with
+  the sentence itself, cut to the 160 characters a name keeps and with
   anything the ledger would refuse as a dot. Which of the program's own
   frames asked for the box is a different question, and `stack_at=`'s
   ("The stack at a system call": `stack_at=NtWriteFile stack_from=user32
@@ -792,7 +794,8 @@ took.
   (`IXMLDOMDocument2::setProperty(SelectionLanguage other than XPath):
   <text>`, `setProperty(SelectionNamespaces does not parse): <text>`,
   `set/getProperty(unknown property): <name>`, `setProperty: <name>: not
-  a number`). A value too long for the ledger's 96 characters keeps
+  a number`). A value too long for the row msxml6 builds (96 bytes of
+  the ledger's 160) keeps
   whichever end names the gap: its start, ending in `..` (an
   expression), or its end, after `..` (a namespace, a path). XSLT ("other" unless
   named): `XSLT transform (output: a string|a document|a stream)` for

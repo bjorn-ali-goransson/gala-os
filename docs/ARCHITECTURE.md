@@ -619,7 +619,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `imports_answers=<n>` | trap the return of each call through an armed slot as well, `n` calls at most, so that the stream says what a call answered and not only what it was handed: the kernel keeps the return address the call left and puts the slot's second trap address in its place, so the return faults with the answer still in the register the ABI returns it in. A thread's pending returns go back where its calls left them when gala's own ntdll says a walk of that thread's frames is beginning (exception dispatch, RtlUnwindEx), so that the program's own unwinder can walk through them; those calls are then recorded without an answer. The call the walk begins in is answered its return address instead of having it put back: a walk begins at the frame of the call that raised, named by the address that call would have returned to, which is the slot's return trap where the raise itself went through an armed slot. Needs `imports=`; costs a second fault for each call answered, and a callee that reads its own return address while that return is trapped sees the trap (scenarios `iat_ret_test`, `iat_answers`, `iat_unwind_test`, `iat_unwind`) |
 | `imports_strings=<n>` | quote the arguments of a recorded call that read as text, `n` quotes at most, beside the registers they were read from: the kernel reads up to 256 bytes at each of the four argument registers and takes the run as text where it is printable and ends in a NUL inside the window, two bytes a character or one. The quotes go into the `import` event under `"text"`, keyed by the argument's index. Where `imports_answers=` trapped the call's return, the same reading runs again at the return -- at the answer register and at the arguments that were no text at the call, those having been kept from it -- and the quotes go into the `ret` event under `"text"` keyed by `answer` and by the argument's index, which is how a buffer the call filled is read at all. Needs `imports=`; nothing knows a call's signature, so a number that points at such a run is quoted like a string the call was handed -- evidence and not proof (scenarios `import_strings_test`, `import_strings`, `import_answer_text`) |
 | `imports_bytes=<n>` | write the first 32 bytes at every place of a recorded call that reads as no text as lowercase hex, `n` dumps at most: the same window a quote is read from and the same places, in an object of its own (`"bytes"` beside `"text"` in the `import` and `ret` events, keyed by the argument's index and by `answer`). The reading of a call that says nothing in text -- a structure answered by value is the caller's own buffer handed back and a quote of it reads nothing, which is where a trace of Word's startup ends up. Text wins where the window is text and a quote is left, so the two objects never say the same window twice; a place only dumped at the call is read again at the return, because the bytes of a buffer are what the call changed. Needs `imports=` (scenario `import_answer_bytes`, with an ARM64 twin) |
-| `ledger_except=<text>[,<text>...]` | keep the gaps whose names hold one of the texts (without regard to case, a text being a part of a name) out of the missing-features ledger, so that its 512 records go to the rest: one text covers a family a program reports in every module it loads -- `register_frame` is 86 of the 409 records a Word startup leaves. An excluded gap takes no name, no record and no hit, and every dump says how many records each text kept out (`?except` lines), the texts that kept out none included, so that a name a dump does not carry reads as the filter's doing and not as a gap the program never hit. Sixteen texts at most, of 96 bytes of plain text each; a value that is not one is refused outright and every gap is recorded, as without it (OBSERVABILITY "Missing-features ledger"; scenario `ledger_except`) |
+| `ledger_except=<text>[,<text>...]` | keep the gaps whose names hold one of the texts (without regard to case, a text being a part of a name) out of the missing-features ledger, so that its 512 records go to the rest: one text covers a family a program reports in every module it loads -- `register_frame` is 86 of the 409 records a Word startup leaves. An excluded gap takes no name, no record and no hit, and every dump says how many records each text kept out (`?except` lines), the texts that kept out none included, so that a name a dump does not carry reads as the filter's doing and not as a gap the program never hit. Sixteen texts at most, of 160 bytes of plain text each; a value that is not one is refused outright and every gap is recorded, as without it (OBSERVABILITY "Missing-features ledger"; scenario `ledger_except`) |
 | `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
@@ -3552,15 +3552,20 @@ shutdown.
   (`registry:MACHINE/...`, "absent key"), which is how the seed grows;
   a name in the 32-bit view is recorded as it was resolved
   (`registry:MACHINE/SOFTWARE/WOW6432Node/...`), so a 32-bit program's
-  missing key shows which view it looked in. A row's name is 96 bytes
+  missing key shows which view it looked in. A row's name is 160 bytes
   and the key's is built to fit in them (`absent_name`, host tests):
   a key under a user hive is named `registry:USER/...` without the SID
-  of the user whose hive it is -- the same 40 bytes on every row, which
+  of the user whose hive it is -- the same 47 bytes on every row, which
   left the key's own name beginning mid-SID -- and a name too long even
   then keeps the hive it is in and the end that says which key it was,
-  `/.../` between (`registry:USER/.../Store/Tenants/Default`). Nothing
+  `/.../` between (`registry:USER/.../Licenses/Metered/Policies`). The
+  name is built in twice a row's length, because the SID is pushed into
+  it before it is dropped: built in a row's own length, those 47 bytes
+  cut the end off the very keys the elision exists to name, and an
+  Office licensing key read `registry:USER/.../ProductReleaseIds/O365`,
+  naming neither which release nor which value. Nothing
   is lost with the SID: the `key` events carry every open's full key
-  name (`registry_test` expects both shapes).
+  name (`registry_test` expects a name of each shape).
 - **advapi32** (`user/advapi32/src/registry.rs`): the Reg* functions over
   ntdll's Nt*Key services. The predefined HKEYs (zero- or sign-extended,
   as winreg.h's x64 values are) open their key on first use and keep the
@@ -6845,7 +6850,7 @@ of their own, clients of it) is the yardstick.
   (ERROR_NOT_SUPPORTED or the function's documented failure) and are
   reported with `GalaRecordMissing` (0x7f00), which feeds the kernel's
   missing-features ledger (`nt::ledger`; `ledger_test`). The ledger holds
-  512 kinds of entries (names up to 96 bytes); the JVM's JNI lookups miss
+  512 kinds of entries (names up to 160 bytes); the JVM's JNI lookups miss
   by design and fill it. Kernel-side gaps (unknown services, absent
   registry keys, unknown information classes) go to the same ledger.
 - **Exported but not implemented yet**: so that a program loads before
@@ -11916,8 +11921,19 @@ stations and desktops a program creates are refused until stage 3).
   mso chain finds out whether one was installed and puts the old one
   back. Nothing calls that handler, nothing here running an install; a
   program learns that from the install's own failure. Each "nothing
-  installed" answer is recorded (`msi.dll!<function>: nothing
-  installed`, kind other, the ordinal as detail). The exports carry
+  installed" answer is recorded, and the row names the codes the call
+  was asked about
+  (`msi.dll!MsiGetProductCodeW({A9D5E2C4-...-2E8D7B1F4A03}): nothing
+  installed`, kind other, the ordinal as detail). The ledger keys its
+  rows on that text, so one run lists every component a program wanted
+  instead of counting hits on a row that says only that something was
+  asked -- which is what reading a program that resolves its resource
+  files through Installer components, as Word does, needs. A code is
+  named as the caller spelled it (38 characters, a braced GUID's
+  length), a feature name or qualifier up to 32, anything outside
+  printable ASCII as `?`; a row naming a product and a component is 126
+  bytes, which is what a ledger name's 160 are for (`nt::ledger`,
+  `msi_test`). The exports carry
   Windows' ordinals (build.rs; ODT's setup.exe and the integrator.exe it
   runs import them by ordinal, and Word's shared code -- MSO.DLL,
   Mso30win32client.dll, Mso40UIwin32client.dll,

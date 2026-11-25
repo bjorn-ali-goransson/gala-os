@@ -52,7 +52,13 @@ enum Service {
 }
 
 const USER_NAMES: usize = 512;
-pub(super) const USER_NAME_LEN: usize = 96;
+/// The longest name a row keeps. A row that answers "which one did it
+/// ask about" carries the thing it names: a braced GUID is 38
+/// characters, and `msi.dll!MsiGetComponentPathW(<product>
+/// <component>): nothing installed` is 126 bytes of them -- a shorter
+/// name would cut such a row in the middle of a GUID, which answers the
+/// question the row exists for only halfway.
+pub(super) const USER_NAME_LEN: usize = 160;
 /// The most names and entries bulk reports (`record_user_bulk`) may
 /// hold; the rest are kept for every other gap. Three quarters of both
 /// tables, which is the share the fixed table alone gave them (384 of
@@ -64,8 +70,8 @@ const BULK_ENTRIES: usize = (ENTRIES + MORE_ENTRIES) * 3 / 4;
 /// Entries and names past the fixed tables, which the heap holds. The
 /// number is a guard against a caller that reports a new name per call,
 /// in the spirit of `stack_at=`'s cap, and not a budget: an entry is
-/// some 40 bytes and a name 112, so both tables grown to the end come
-/// to a quarter of a megabyte. A Word startup fills the fixed 512 and
+/// some 40 bytes and a name 184, so both tables grown to the end come
+/// to some 450 KiB. A Word startup fills the fixed 512 and
 /// loses 44 rows after them, which is what these are for.
 const MORE_ENTRIES: usize = 1536;
 const MORE_NAMES: usize = 1536;
@@ -716,6 +722,21 @@ mod tests {
 
     fn name(t: &UserNames, i: usize) -> &[u8] {
         t.name(i).map_or(&[][..], Name::text)
+    }
+
+    /// A row that names two braced GUIDs is kept whole. msi.dll's
+    /// answers name the product and component a call asked about, and a
+    /// name cut short in the middle of a GUID answers the question the
+    /// row exists for only halfway.
+    #[test]
+    fn a_name_that_carries_two_guids_is_kept_whole() {
+        let mut t = alloc::boxed::Box::new(UserNames::new());
+        let asked = b"msi.dll!MsiGetComponentPathW(\
+{6700E8CF-95AB-4D9C-BC2C-15840DEA7A5D} \
+{A9D5E2C4-31B7-4F0E-9C6A-2E8D7B1F4A03}): nothing installed";
+        assert_eq!(asked.len(), 126);
+        let i = t.intern(asked, false).unwrap();
+        assert_eq!(name(&t, i), asked);
     }
 
     /// Bulk names stop at BULK_NAMES and leave the rest for other gaps; a

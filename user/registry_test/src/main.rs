@@ -346,13 +346,20 @@ fn nul<T>() -> *mut T {
 }
 
 /// A NUL-terminated UTF-16 copy of `s`.
-fn w(s: &str) -> [u16; 96] {
-    let mut b = [0u16; 96];
-    for (d, ch) in b.iter_mut().zip(s.bytes()) {
+fn w(s: &str) -> [u16; WIDE] {
+    let mut b = [0u16; WIDE];
+    for (d, ch) in b.iter_mut().take(WIDE - 1).zip(s.bytes()) {
         *d = ch.into();
     }
     b
 }
+
+/// How long a name `w` copies: the keys an Office licensing store is
+/// under are 150 characters and more. The copy always stops a unit
+/// short of the end, so a longer string is cut and still terminated --
+/// unterminated, the kernel read whatever followed the buffer and the
+/// ledger row came back as `.../ProductRel(`.
+const WIDE: usize = 256;
 
 /// A NUL-terminated byte copy of `s`.
 fn a(s: &str) -> [u8; 96] {
@@ -994,20 +1001,30 @@ fn written(c: &mut Checks) -> Result<(), u32> {
         c.ok0(RegDeleteTreeW(software, w("GalaRegistryTest").as_ptr()))?;
         let r = RegOpenKeyExW(software, w("GalaRegistryTest").as_ptr(), 0, KEY_READ, &mut test);
         c.eq(r as u64, ERROR_FILE_NOT_FOUND)?;
-        // A name too long for a ledger row (the scenario expects what the
-        // row says: the hive it is in and the end that names the key).
+        // A key an Office startup's length: it fits a ledger row whole
+        // now that a row keeps 160 bytes (the scenario expects the whole
+        // name).
         let deep = w(concat!(
             r"Software\GalaRegistryTest\Licensing\LicensingNext",
             r"\Store\Tenants\Default\Subscriptions"
         ));
         let r = RegOpenKeyExW(HKEY_CURRENT_USER, deep.as_ptr(), 0, KEY_READ, &mut test);
         c.eq(r as u64, ERROR_FILE_NOT_FOUND)?;
+        // One too long even for that (the scenario expects what the row
+        // says: the hive it is in and the end that names the key).
+        let deeper = w(concat!(
+            r"Software\GalaRegistryTest\Licensing\LicensingNext\Store\Tenants\Default",
+            r"\Subscriptions\ProductReleaseIds\O365ProPlusRetail\Licenses\Metered",
+            r"\Policies\Enforcement"
+        ));
+        let r = RegOpenKeyExW(HKEY_CURRENT_USER, deeper.as_ptr(), 0, KEY_READ, &mut test);
+        c.eq(r as u64, ERROR_FILE_NOT_FOUND)?;
         RegCloseKey(software);
     }
     Ok(())
 }
 
-fn unicode(s: &[u16; 96]) -> UnicodeString {
+fn unicode(s: &[u16; WIDE]) -> UnicodeString {
     let n = s.iter().position(|&c| c == 0).unwrap_or(0) as u16;
     UnicodeString { length: 2 * n, maximum: 2 * n, buffer: s.as_ptr() }
 }
