@@ -54,6 +54,26 @@
 //! the ledger into a trigger. The two filters compose: both must want a
 //! call for it to be captured.
 //!
+//! Why `stack_at=etw` exists. A wall a program decides on inside its
+//! own code may reach no system call that is about it at all. Office's
+//! resource loader fails its caller from a precondition that is already
+//! false in the process, and the write of the line it logs that failure
+//! on hands the kernel a buffer whose text is not the line, so neither
+//! filter above reaches it: a run of 838 writes of Word's own log
+//! passed every one of them over. What the program does say in words is
+//! the line itself, and a line reaches the kernel as a trace event on
+//! the thread that logged it -- gala's advapi32 hands each one over
+//! inline (`GalaEtw`, user/advapi32/src/trace.rs) -- so the stack at
+//! that handover is the program's own path to the decision.
+//! [`LOGGED`] is the capture there: `stack_at=etw` with
+//! `stack_match=FGimmeFileFull` is "whose call path logged that", and
+//! the phrase is read from the program's log rather than guessed at.
+//! `stack_match=` then matches the bytes of the event at either width
+//! instead of what a call's arguments point at, because an event is a
+//! header and a run of values whose layout lives in a manifest outside
+//! the program. It takes a trace session to carry the lines (`etw=`),
+//! and it reads deeper than the default ([`LOGGED_WORDS`]).
+//!
 //! Scope and cost. Off unless `stack_at=` is given, and then one relaxed
 //! load on the system-call path (`armed`); a capture reads at most
 //! [`SCAN_WORDS`] words of the caller's stack, or what `stack_words=`
@@ -93,6 +113,20 @@ const MAX_SCAN_WORDS: usize = 512;
 
 /// Captures when `stack_at=` gives no count.
 const DEFAULT_CAPTURES: u32 = 4;
+
+/// The name that stands for a line the program logged rather than a
+/// system call (`stack_at=etw`): the handover of a trace event, which
+/// is where a program's own words reach the kernel. Not a service of
+/// the table's, so it names no call and cannot collide with one.
+pub(super) const LOGGED: &str = "etw";
+
+/// Words a capture at a logged line reads unless `stack_words=` says
+/// otherwise. Deeper than [`SCAN_WORDS`] because what lies between is
+/// known and large: gala's advapi32 copies the whole record onto its
+/// own frame (`etw::RECORD_MAX`, 2 KiB) before it makes the call, so
+/// the usual depth would end inside that buffer and never reach the
+/// program's frames.
+const LOGGED_WORDS: usize = MAX_SCAN_WORDS;
 
 /// Arguments a capture names. Four are in registers on x64 and the rest
 /// on the user stack (`abi::syscall_arg`), and eight is what it takes to
@@ -189,12 +223,25 @@ pub fn arm(spec: &str) {
     ASKED.store(count, Ordering::Relaxed);
     LEFT.store(count, Ordering::Relaxed);
     PASSED.store(0, Ordering::Relaxed);
+    UNMATCHED.store(0, Ordering::Relaxed);
     SPENT.store(false, Ordering::Relaxed);
+    let at_logged = name.eq_ignore_ascii_case(LOGGED);
+    // The depth the capture starts at, which `stack_words=` overrides:
+    // the options are read in a fixed order and this one is read first,
+    // so a deeper default for a logged line cannot undo what was typed.
+    WORDS.store(if at_logged { LOGGED_WORDS } else { SCAN_WORDS } as u32, Ordering::Relaxed);
     ARMED.store(true, Ordering::Relaxed);
     info!(
         "stack: armed: {name}, {count} captures of the calling thread's user stack \
          (stack_at=; the processes are the ones events_pid= and events_match= choose)"
     );
+    if at_logged {
+        info!(
+            "stack:   at {LOGGED}: the stack a line the program logged reaches the kernel on, \
+             which takes a trace session to carry the lines (etw=) and reads \
+             {LOGGED_WORDS} words, the record's own frame being in between"
+        );
+    }
 }
 
 /// Keeps the captures to the calls a module whose name contains `text`
@@ -252,11 +299,22 @@ pub fn only_matching(spec: &str) {
         stored.1 = len;
     }
     MATCHING.store(true, Ordering::Relaxed);
-    info!(
-        "stack: only calls one of whose arguments points at text containing \"{}\" \
-         (stack_match=); the others are passed over and do not spend a capture",
-        core::str::from_utf8(&text[..len]).unwrap_or("?")
-    );
+    let want = core::str::from_utf8(&text[..len]).unwrap_or("?");
+    // The same option over the two triggers, and it says which one it
+    // is in force on: at a logged line the text is matched against the
+    // event's own bytes, and a line that reads as a call's argument is
+    // not what was asked for.
+    if wanted(LOGGED) {
+        info!(
+            "stack: only the events whose bytes hold \"{want}\" (stack_match=); the others \
+             are passed over and do not spend a capture"
+        );
+    } else {
+        info!(
+            "stack: only calls one of whose arguments points at text containing \"{want}\" \
+             (stack_match=); the others are passed over and do not spend a capture"
+        );
+    }
 }
 
 /// `<n>` as a word count, or None when it is not one from 1 to
@@ -362,6 +420,58 @@ fn match_wanted(process: &Process, args: &[Option<u64>; ARGS_SHOWN]) -> bool {
     false
 }
 
+/// Whether `bytes` holds `want` as text, ignoring case, at either of
+/// the widths an event's values are written in: a byte a character, or
+/// two with the high one zero (UTF-16LE, which a program's message
+/// usually is). From any offset, because an event is a header and a run
+/// of values whose layout lives in a manifest outside the program:
+/// where its text begins is not known here, and the text is the
+/// trigger. Bytes rather than `str`: a record is what a program wrote.
+fn holds_text(bytes: &[u8], want: &[u8]) -> bool {
+    if want.is_empty() {
+        return false;
+    }
+    for stride in [1usize, 2] {
+        let span = (want.len() - 1) * stride + 1;
+        if bytes.len() < span {
+            continue;
+        }
+        for at in 0..=bytes.len() - span {
+            // The first character alone decides for almost every
+            // offset: an event is mostly bytes that are not it.
+            if !bytes[at].eq_ignore_ascii_case(&want[0]) {
+                continue;
+            }
+            let held = want.iter().enumerate().all(|(i, b)| {
+                let at = at + i * stride;
+                bytes[at].eq_ignore_ascii_case(b) && (stride == 1 || bytes[at + 1] == 0)
+            });
+            if held {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether the line the event carries holds what `stack_match=` named.
+/// True when there is no filter, as [`match_wanted`] is for a call: the
+/// trigger is then the first lines a session carries.
+fn logged_matches(data: &[u8]) -> bool {
+    if !MATCHING.load(Ordering::Relaxed) {
+        return true;
+    }
+    // Copied out from under the lock, as the call's matcher does. No
+    // user memory is read here -- the record is already on the kernel's
+    // frame, whole -- but the two matchers taking the lock the same way
+    // is one fewer thing to be careful about.
+    let (want, len) = {
+        let stored = MATCH.lock();
+        (stored.0, stored.1)
+    };
+    holds_text(data, &want[..len])
+}
+
 /// The call's first [`ARGS_SHOWN`] arguments, `None` for one that could
 /// not be read (a stack argument on a page that is not there).
 fn args_of(call: &Call<'_>) -> [Option<u64>; ARGS_SHOWN] {
@@ -393,6 +503,48 @@ pub(super) fn on_call(call: &Call<'_>, name: &str) {
         UNMATCHED.fetch_add(1, Ordering::Relaxed);
         return;
     }
+    take(call, name, &args);
+}
+
+/// A line the program logged is reaching the kernel, as the trace event
+/// carrying it (`nt::syscalls`' GalaEtw, op 1, on the thread that
+/// logged it): capture that thread's stack when the capture is armed at
+/// [`LOGGED`] and `stack_match=` wants the line. `data` is the event's
+/// values, already copied whole onto the kernel's frame.
+pub(super) fn on_logged(call: &Call<'_>, data: &[u8]) {
+    if !armed() || !wanted(LOGGED) || !crate::events::syscall_pid_wanted(call.process.id) {
+        return;
+    }
+    if LEFT.load(Ordering::Relaxed) == 0 {
+        report_spent(LOGGED);
+        return;
+    }
+    // What the line says decides before the stack is read, as the
+    // arguments do for a call: a line that is not the one asked for
+    // costs this search and not the scan.
+    if !logged_matches(data) {
+        UNMATCHED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    // GalaEtw's own arguments, which is what the call was made with:
+    // the op, the record and its length. The text one of them reads as
+    // is the record itself, so the capture quotes the line it followed.
+    take(call, LOGGED, &args_of(call));
+}
+
+/// Whether an event is wanted for a capture whatever the event stream
+/// makes of it. The stream's line budget bounds the log, and a session
+/// whose budget is out is ended (the DLL stops sending), so a trigger
+/// that let the budget answer for it would go quiet on the long run it
+/// is for -- the one where the line in question is late.
+pub(super) fn wants_events() -> bool {
+    armed() && wanted(LOGGED) && LEFT.load(Ordering::Relaxed) != 0
+}
+
+/// The wanted call's stack, captured if `stack_from=` reaches it and a
+/// capture is left. What the two triggers share: they differ in what
+/// makes a call wanted, not in what is logged once it is.
+fn take(call: &Call<'_>, name: &str, args: &[Option<u64>; ARGS_SHOWN]) {
     let regs = call.frame.return_regs();
     let mut bytes = [0u8; MAX_SCAN_WORDS * 8];
     let words = (WORDS.load(Ordering::Relaxed) as usize).clamp(1, MAX_SCAN_WORDS);
@@ -417,7 +569,7 @@ pub(super) fn on_call(call: &Call<'_>, name: &str) {
         }
     }
     let nth = ASKED.load(Ordering::Relaxed).saturating_sub(left) + 1;
-    capture(call, &regs, &bytes[..read], regs.sp(), name, nth, &args);
+    capture(call, &regs, &bytes[..read], regs.sp(), name, nth, args);
 }
 
 /// Says once that the count is spent, with what the filter passed over:
@@ -548,6 +700,17 @@ pub fn log_stats() {
     } else {
         info!("stack: {name}: {taken} captures of the {asked} asked for");
     }
+    // A capture at a logged line took nothing because nothing was
+    // logged to the kernel: the lines reach it inside a trace session
+    // and none was asked for. Which option is missing is the next thing
+    // to type, and the captures alone do not say it.
+    if name.eq_ignore_ascii_case(LOGGED) && !super::etw::wanted() {
+        warn!(
+            "stack: {LOGGED}: no trace session was asked for, so no line a program logged \
+             reached the kernel: ask for one with etw=<provider>[:<level>:...], \
+             etw=* for every provider (docs/OBSERVABILITY.md, \"Trace events\")"
+        );
+    }
 }
 
 /// Reads up to `buf` of the stack at `sp`, a page's part at a time as a
@@ -664,9 +827,58 @@ fn capture(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_CAPTURES, MAX_CAPTURES, MAX_SCAN_WORDS, NAME_LEN, contains_ignore_case, parse,
-        parse_words,
+        DEFAULT_CAPTURES, MAX_CAPTURES, MAX_SCAN_WORDS, NAME_LEN, contains_ignore_case, holds_text,
+        parse, parse_words,
     };
+
+    /// An event as the DLL hands it over: values with no layout the
+    /// kernel knows, the text somewhere inside them.
+    fn event(text: &str, wide: bool) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec![0x11, 0x00, 0xff, 0x7f, 0x03];
+        if wide {
+            bytes.extend(text.encode_utf16().flat_map(|u| u.to_le_bytes()));
+        } else {
+            bytes.extend_from_slice(text.as_bytes());
+        }
+        bytes.extend_from_slice(&[0x00, 0x2a, 0x00, 0x00]);
+        bytes
+    }
+
+    #[test]
+    fn a_logged_line_matches_at_either_width() {
+        // What the option is typed for: a phrase of the program's own
+        // log, which a manifest provider writes as UTF-16 and a
+        // string-only one as bytes.
+        for wide in [false, true] {
+            let e = event("FGimmeFileFull {\"cid\": 363}", wide);
+            assert!(holds_text(&e, b"FGimmeFileFull"));
+            assert!(holds_text(&e, b"fgimmefilefull"));
+            assert!(holds_text(&e, b"\"cid\": 363"));
+            assert!(!holds_text(&e, b"FGimmeFilePart"));
+            assert!(!holds_text(&e, b"Sorry, something went wrong"));
+        }
+    }
+
+    #[test]
+    fn a_wide_line_is_not_matched_as_every_other_byte() {
+        // The stride is the width of the text, not a way to skip bytes:
+        // the 8-bit search must not read a wide line's characters as a
+        // match for every second one of them, nor the wide search an
+        // 8-bit line.
+        let wide = event("abcdefgh", true);
+        assert!(holds_text(&wide, b"abcd"));
+        assert!(!holds_text(&wide, b"aceg"));
+        let narrow = event("a\0b\0c\0d\0", false);
+        assert!(holds_text(&narrow, b"abcd"));
+        // An empty filter is not a match for everything: an empty
+        // `stack_match=` is refused before this, and were it not, every
+        // event answering to it would be the opposite of a filter.
+        assert!(!holds_text(&wide, b""));
+        assert!(!holds_text(&[], b"a"));
+        // One character, at either width, is still the shortest search.
+        assert!(holds_text(&wide, b"h"));
+        assert!(holds_text(&narrow, b"d"));
+    }
 
     #[test]
     fn parses_a_service_and_a_count() {

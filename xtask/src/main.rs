@@ -12342,6 +12342,38 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // A capture at a line the program logged rather than at a
+        // system call (`stack_at=etw`). Office narrates a startup into
+        // its own log and says there in words what it gave up on, and
+        // the event carrying one of those lines reaches the kernel on
+        // the logging thread's own stack (advapi32's EventWrite hands
+        // it over inline). So the program's own words become the
+        // trigger: `stack_match=` is matched against the bytes of the
+        // event rather than against a call's arguments, at either
+        // width, and the capture follows the event's own line. The
+        // program writes four events (user/etwraw_test, the shape every
+        // event Word's startup writes has); only the first carries this
+        // text, as UTF-16, so the other three are passed over and three
+        // of the four captures are left.
+        name: "stack_at_event_test",
+        cmdline: "qemu_exit run=etwraw_test.exe etw=* stack_at=etw:4 \
+                  stack_match=manifest%20event events_match=etwraw_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "etwraw_test: ok",
+            "exited with status 0x00000000",
+            "stack: armed: etw, 4 captures",
+            "stack: only the events whose bytes hold \"manifest event\" (stack_match=)",
+            // The event's line, and then who wrote it.
+            "strings: \"a manifest event's message\"",
+            "stack: etw from etwraw_test.exe",
+            "capture 1 of 4",
+            "(etwraw_test.exe+0x",
+            "stack: etw: 1 captures of the 4 asked for, \
+             3 calls passed over by stack_match=manifest event",
+        ],
+    },
+    Scenario {
         // What `stack_match=` is aimed at: the write of the message a
         // program logs when it gives up. Such a line is a record with
         // its fields separated by tabs, and the field in question is
@@ -14877,6 +14909,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("etw_from_elsewhere", "etwarm_test"),
     ("etwfields_armed", "etwfields_test"),
     ("etwraw_armed", "etwraw_test"),
+    ("stack_at_event_test", "etwraw_test"),
     ("etw_armed_all", "etwarm_test"),
     ("etwlock_armed", "etwlock_test"),
     ("events_from", "process_test"),
