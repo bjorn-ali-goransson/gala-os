@@ -32,10 +32,10 @@ const UNKNOWN_SERVICE: u32 = 0x0fff;
 const GALA_RECORD_MISSING: u32 = 0x7f00;
 /// What a report is about: 5 is "other" (`ledger::user_what`).
 const WHAT_OTHER: u64 = 5;
-/// More records than the ledger's table holds entries (512), each its own
-/// entry (one name, a detail of its own), so the table fills up and the
-/// rest are dropped under their kind.
-const FILL_RECORDS: u64 = 600;
+/// More records than the ledger's tables hold entries (512 fixed and
+/// 1536 the heap gives), each its own entry (one name, a detail of its
+/// own), so both fill up and the rest are dropped under their kind.
+const FILL_RECORDS: u64 = 2100;
 /// The name they are recorded under; printable ASCII, as the ledger asks.
 const FILL_NAME: &[u8] = b"ledger_test.exe!fill";
 /// The name of the one gap reported after the table is full. The table
