@@ -32,9 +32,16 @@
 //! install's own failure, not from the handler's silence.
 //!
 //! Each answer that stands for "Windows Installer has nothing here" is
-//! recorded in the ledger (`msi.dll!<function>: nothing installed`, kind
-//! "other", detail the call's ordinal), so a program that goes on to fail
-//! because it expected an installed product says what it asked.
+//! recorded in the ledger, and the row names the codes the call was
+//! asked about: `msi.dll!MsiGetProductCodeW({A9D5E2C4-...-2E8D7B1F4A03}):
+//! nothing installed`, kind "other", detail the call's ordinal. The
+//! ledger keys its rows on that text, so one run lists every component
+//! a program wanted instead of counting hits on a row that says only
+//! that something was asked -- Word resolves its resource files through
+//! Installer components, and the row is what says which ones. A code is
+//! named as the caller spelled it (38 characters at most, a braced
+//! GUID's length), a feature name or qualifier up to 32, and anything
+//! outside printable ASCII as `?`.
 //!
 //! A database on disk is a different matter: it is a file in a published
 //! format, and reading one asks nothing of an installer. MsiOpenDatabaseW
@@ -187,20 +194,104 @@ static UI_WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// ordinal as the detail, so a program that fails because of the gap
 /// says what it asked for.
 fn record_gap(name: &[u8], tail: &[u8], what: u32, detail: u64) {
-    let mut text = [0u8; 96];
-    let mut n = 0;
-    for part in [&b"msi.dll!"[..], name, tail] {
-        let take = part.len().min(text.len() - n);
-        text[n..n + take].copy_from_slice(&part[..take]);
-        n += take;
-    }
-    // SAFETY: a valid buffer; the service only reads it.
-    unsafe { GalaRecordMissing(text.as_ptr(), n, what, detail) };
+    let mut row = Row::new(name);
+    row.put(tail);
+    row.record(what, detail);
 }
 
-/// Records an answer of "nothing installed" (module comment).
+/// The longest row the ledger keeps whole (its `USER_NAME_LEN`).
+const ROW_LEN: usize = 160;
+
+/// How much of a code a row names: a braced GUID's 38 characters.
+const CODE_LEN: usize = 38;
+
+/// How much of a feature name or qualifier a row names. Neither is a
+/// GUID or bounded by anything, and the codes beside them have to fit in
+/// the same row.
+const NAME_LEN: usize = 32;
+
+/// A gap row being built: `msi.dll!<function>` and whatever the call
+/// names after it.
+struct Row {
+    text: [u8; ROW_LEN],
+    n: usize,
+}
+
+impl Row {
+    fn new(name: &[u8]) -> Self {
+        let mut row = Row { text: [0; ROW_LEN], n: 0 };
+        row.put(b"msi.dll!");
+        row.put(name);
+        row
+    }
+
+    /// Appends as much of `part` as there is room for.
+    fn put(&mut self, part: &[u8]) {
+        let take = part.len().min(self.text.len() - self.n);
+        self.text[self.n..self.n + take].copy_from_slice(&part[..take]);
+        self.n += take;
+    }
+
+    /// Appends a string the caller named, `cap` bytes of it at most,
+    /// with anything outside printable ASCII written as `?` so the row
+    /// stays one readable line. One body for both string widths, as
+    /// `is_guid`: the ANSI functions name their own bytes.
+    fn put_asked<T: Copy + Into<u32>>(&mut self, p: *const T, cap: usize) {
+        if p.is_null() {
+            self.put(b"null");
+            return;
+        }
+        for i in 0..cap {
+            // SAFETY: the caller's NUL-terminated string, read no
+            // further than its NUL.
+            let c: u32 = unsafe { *p.add(i) }.into();
+            if c == 0 {
+                return;
+            }
+            self.put(&[if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' }]);
+        }
+    }
+
+    /// Records the row (`GalaRecordMissing`'s kind and detail).
+    fn record(&self, what: u32, detail: u64) {
+        // SAFETY: a valid buffer; the service only reads it.
+        unsafe { GalaRecordMissing(self.text.as_ptr(), self.n, what, detail) };
+    }
+}
+
+/// Records an answer of "nothing installed" (module comment) for a call
+/// that was asked about nothing in particular.
 fn nothing_installed(name: &[u8], ordinal: u64) {
     record_gap(name, b": nothing installed", 5, ordinal);
+}
+
+/// The same, naming the one code the call was asked about.
+fn asked_about<T: Copy + Into<u32>>(name: &[u8], ordinal: u64, code: *const T) {
+    let mut row = Row::new(name);
+    row.put(b"(");
+    row.put_asked(code, CODE_LEN);
+    row.put(b"): nothing installed");
+    row.record(5, ordinal);
+}
+
+/// The same for a call asked about two things -- a product and the
+/// component, feature or qualifier under it -- named in the call's own
+/// order and parted by a space, as the ledger's other rows do
+/// (`gdi32.dll!D3DKMTQueryAdapterInfo(QUERYREGISTRY VulkanDriverName)`).
+fn asked_about_two<T: Copy + Into<u32>>(
+    name: &[u8],
+    ordinal: u64,
+    first: *const T,
+    second: *const T,
+    second_cap: usize,
+) {
+    let mut row = Row::new(name);
+    row.put(b"(");
+    row.put_asked(first, CODE_LEN);
+    row.put(b" ");
+    row.put_asked(second, second_cap);
+    row.put(b"): nothing installed");
+    row.record(5, ordinal);
 }
 
 /// Whether `p` is a braced GUID string, `{XXXXXXXX-XXXX-XXXX-XXXX-
@@ -401,7 +492,7 @@ pub extern "system" fn MsiQueryProductStateW(product: *const u16) -> i32 {
     if !is_guid(product) {
         return INSTALLSTATE_INVALIDARG;
     }
-    nothing_installed(b"MsiQueryProductStateW", 113);
+    asked_about(b"MsiQueryProductStateW", 113, product);
     INSTALLSTATE_UNKNOWN
 }
 
@@ -430,7 +521,7 @@ pub extern "system" fn MsiGetComponentPathW(
     if !is_guid(product) || !is_guid(component) || (!path.is_null() && size.is_null()) {
         return INSTALLSTATE_INVALIDARG;
     }
-    nothing_installed(b"MsiGetComponentPathW", 173);
+    asked_about_two(b"MsiGetComponentPathW", 173, product, component, CODE_LEN);
     INSTALLSTATE_UNKNOWN
 }
 
@@ -444,7 +535,7 @@ pub extern "system" fn MsiLocateComponentW(
     if !is_guid(component) || (!path.is_null() && size.is_null()) {
         return INSTALLSTATE_INVALIDARG;
     }
-    nothing_installed(b"MsiLocateComponentW", 90);
+    asked_about(b"MsiLocateComponentW", 90, component);
     INSTALLSTATE_UNKNOWN
 }
 
@@ -460,7 +551,7 @@ pub extern "system" fn MsiConfigureProductExW(
     if !is_guid(product) {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiConfigureProductExW", 190);
+    asked_about(b"MsiConfigureProductExW", 190, product);
     ERROR_UNKNOWN_PRODUCT
 }
 
@@ -470,7 +561,7 @@ pub extern "system" fn MsiConfigureProductExW(
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn MsiProvideQualifiedComponentExW(
     component: *const u16,
-    _qualifier: *const u16,
+    qualifier: *const u16,
     _mode: u32,
     _product: *const u16,
     _unused1: u32,
@@ -481,7 +572,7 @@ pub extern "system" fn MsiProvideQualifiedComponentExW(
     if !is_guid(component) {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiProvideQualifiedComponentExW", 203);
+    asked_about_two(b"MsiProvideQualifiedComponentExW", 203, component, qualifier, NAME_LEN);
     ERROR_UNKNOWN_COMPONENT
 }
 
@@ -499,7 +590,7 @@ pub extern "system" fn MsiEnumComponentQualifiersW(
     if !is_guid(component) {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiEnumComponentQualifiersW", 39);
+    asked_about(b"MsiEnumComponentQualifiersW", 39, component);
     ERROR_UNKNOWN_COMPONENT
 }
 
@@ -534,7 +625,7 @@ fn feature_state(product: *const u16, feature: *const u16, name: &[u8], ordinal:
     if !is_guid(product) || feature.is_null() {
         return INSTALLSTATE_INVALIDARG;
     }
-    nothing_installed(name, ordinal);
+    asked_about_two(name, ordinal, product, feature, NAME_LEN);
     INSTALLSTATE_UNKNOWN
 }
 
@@ -578,7 +669,7 @@ pub extern "system" fn MsiReinstallFeatureW(
     if !is_guid(product) || feature.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiReinstallFeatureW", 129);
+    asked_about_two(b"MsiReinstallFeatureW", 129, product, feature, NAME_LEN);
     ERROR_UNKNOWN_PRODUCT
 }
 
@@ -605,7 +696,7 @@ pub extern "system" fn MsiGetUserInfoW(
     {
         return USERINFOSTATE_INVALIDARG;
     }
-    nothing_installed(b"MsiGetUserInfoW", 82);
+    asked_about(b"MsiGetUserInfoW", 82, product);
     USERINFOSTATE_UNKNOWN
 }
 
@@ -621,7 +712,7 @@ pub extern "system" fn MsiEnumClientsW(
     if !is_guid(component) || product.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiEnumClientsW", 37);
+    asked_about(b"MsiEnumClientsW", 37, component);
     ERROR_UNKNOWN_COMPONENT
 }
 
@@ -632,7 +723,7 @@ pub extern "system" fn MsiGetProductCodeW(component: *const u16, product: *mut u
     if !is_guid(component) || product.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiGetProductCodeW", 66);
+    asked_about(b"MsiGetProductCodeW", 66, component);
     ERROR_UNKNOWN_COMPONENT
 }
 
@@ -642,7 +733,7 @@ pub extern "system" fn MsiGetProductCodeA(component: *const u8, product: *mut u8
     if !is_guid(component) || product.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiGetProductCodeA", 65);
+    asked_about(b"MsiGetProductCodeA", 65, component);
     ERROR_UNKNOWN_COMPONENT
 }
 
@@ -651,7 +742,7 @@ pub extern "system" fn MsiGetProductCodeA(component: *const u8, product: *mut u8
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiProvideQualifiedComponentW(
     component: *const u16,
-    _qualifier: *const u16,
+    qualifier: *const u16,
     _mode: u32,
     _path: *mut u16,
     _size: *mut u32,
@@ -659,7 +750,7 @@ pub extern "system" fn MsiProvideQualifiedComponentW(
     if !is_guid(component) {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiProvideQualifiedComponentW", 109);
+    asked_about_two(b"MsiProvideQualifiedComponentW", 109, component, qualifier, NAME_LEN);
     ERROR_UNKNOWN_COMPONENT
 }
 
@@ -675,7 +766,7 @@ pub extern "system" fn MsiGetComponentPathA(
     if !is_guid(product) || !is_guid(component) || (!path.is_null() && size.is_null()) {
         return INSTALLSTATE_INVALIDARG;
     }
-    nothing_installed(b"MsiGetComponentPathA", 172);
+    asked_about_two(b"MsiGetComponentPathA", 172, product, component, CODE_LEN);
     INSTALLSTATE_UNKNOWN
 }
 

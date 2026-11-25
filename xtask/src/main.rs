@@ -8335,11 +8335,13 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "registry_test: ok",
             // The keys a program looked for and did not find, as the
             // ledger names them (`nt::registry_calls::absent_name`): the
-            // hive and not the SID of the user whose it is, and for a
-            // name too long for a row the hive it is in and the end that
-            // says which key it was.
+            // hive and not the SID of the user whose it is, a key of an
+            // Office startup's length whole, and for a name too long
+            // even for a 160-byte row the hive it is in and the end that
+            // says which key it was -- the end the SID used to cut off.
             r#"ledger: {"service":"registry:USER/Software/GalaRegistryTest","what":"absent key""#,
-            r#"ledger: {"service":"registry:USER/.../GalaRegistryTest/Licensing/LicensingNext/Store/Tenants/Default/Subscriptions","what":"absent key""#,
+            r#"ledger: {"service":"registry:USER/Software/GalaRegistryTest/Licensing/LicensingNext/Store/Tenants/Default/Subscriptions","what":"absent key""#,
+            r#"ledger: {"service":"registry:USER/.../Licensing/LicensingNext/Store/Tenants/Default/Subscriptions/ProductReleaseIds/O365ProPlusRetail/Licenses/Metered/Policies/Enforcement","what":"absent key""#,
             "exited with status 0x00000000",
         ],
     },
@@ -9235,7 +9237,19 @@ const BASE_SCENARIOS: &[Scenario] = &[
         name: "msi_test",
         cmdline: "qemu_exit run=msi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["msi_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "msi_test: ok",
+            // Every answer of "nothing installed" names the codes it was
+            // asked about, which is what makes one run list the
+            // components a program wanted instead of counting hits on a
+            // row that says nothing (`user/msi`).
+            r#""service":"msi.dll!MsiGetProductCodeW({A9D5E2C4-31B7-4F0E-9C6A-2E8D7B1F4A03}): nothing installed""#,
+            r#""service":"msi.dll!MsiGetComponentPathW({6700E8CF-95AB-4D9C-BC2C-15840DEA7A5D} {A9D5E2C4-31B7-4F0E-9C6A-2E8D7B1F4A03}): nothing installed""#,
+            r#""service":"msi.dll!MsiProvideQualifiedComponentW({A9D5E2C4-31B7-4F0E-9C6A-2E8D7B1F4A03} qualifier): nothing installed""#,
+            r#""service":"msi.dll!MsiQueryFeatureStateW({6700E8CF-95AB-4D9C-BC2C-15840DEA7A5D} Feature): nothing installed""#,
+            r#""service":"msi.dll!MsiGetProductCodeA({A9D5E2C4-31B7-4F0E-9C6A-2E8D7B1F4A03}): nothing installed""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // webservices.dll's XML reader as ODT's setup.exe reads the

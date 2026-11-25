@@ -44,8 +44,10 @@ const BUDGET: u32 = 4096;
 const MAX_BUDGET: u32 = 1 << 20;
 
 /// The longest `trace_from=` value kept, which also bounds what the DLL
-/// compares against. The ledger's own names are this long
-/// (`ledger::USER_NAME_LEN`), and the value names one of them.
+/// compares against. A value names a `<dll>!<export>` and nothing
+/// Windows ships comes near this; a ledger name is longer
+/// (`ledger::USER_NAME_LEN`) because its rows carry what a call asked
+/// about as well as the function's name.
 pub const NAME_LEN: usize = 96;
 
 /// The most argument words one call records. Every COM method gala

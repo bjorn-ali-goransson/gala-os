@@ -444,16 +444,28 @@ fn emit_value(call: &Call<'_>, said: Valued<'_>) {
 /// Records an absent key in the ledger: the keys real programs look for.
 fn note_absent(start: KeyId, name: &[u16]) {
     let base = registry::with(|r| r.full_name(start)).unwrap_or_default();
-    let mut entry = [0u8; 96];
+    let mut entry = [0u8; ROW_LEN];
     let n = absent_name(&base, name, &mut entry);
     super::super::ledger::record_user_bulk(&entry[..n], "absent key", 0);
 }
 
+/// What a row keeps, the ledger's own length: a key's name is built to
+/// fit it, and grows with it.
+const ROW_LEN: usize = super::super::ledger::USER_NAME_LEN;
+
+/// Where the name is built, before it is cut to a row. Twice a row,
+/// because a user hive's SID is pushed into the name before it is
+/// dropped again: built in a row's own length, those 47 bytes cut the
+/// end off the very keys the elision exists to name -- an Office
+/// licensing key read as `registry:USER/.../ProductReleaseIds/O365`,
+/// which says neither which release nor which value.
+const PATH_LEN: usize = 2 * ROW_LEN;
+
 /// `registry:<key>` in `out`, how many bytes it took: the key the open
 /// was relative to, without the `\REGISTRY\` every name starts with, and
 /// then the name that was not found.
-fn absent_name(base: &[u16], name: &[u16], out: &mut [u8; 96]) -> usize {
-    let mut path = [0u8; 160];
+fn absent_name(base: &[u16], name: &[u16], out: &mut [u8; ROW_LEN]) -> usize {
+    let mut path = [0u8; PATH_LEN];
     let mut n = 0;
     let mut push = |c: u16| {
         if n < path.len() {
@@ -476,8 +488,8 @@ fn absent_name(base: &[u16], name: &[u16], out: &mut [u8; 96]) -> usize {
     for &c in name {
         push(c);
     }
-    // A user hive is named by the SID of the user whose it is: 40 of the
-    // 87 bytes a name has, and the same 40 on every row, which left the
+    // A user hive is named by the SID of the user whose it is: 47 of the
+    // bytes a name has, and the same 47 on every row, which left the
     // name itself starting mid-SID. The row says USER and leaves the SID
     // out; the `key` events carry the full name (`emit_key`) for whoever
     // wants the hive and not the key.
@@ -1135,7 +1147,7 @@ mod tests {
     fn absent(base: &str, name: &str) -> String {
         let base: Vec<u16> = base.encode_utf16().collect();
         let name: Vec<u16> = name.encode_utf16().collect();
-        let mut out = [0u8; 96];
+        let mut out = [0u8; ROW_LEN];
         let n = absent_name(&base, &name, &mut out);
         String::from(core::str::from_utf8(&out[..n]).unwrap())
     }
@@ -1154,7 +1166,7 @@ mod tests {
 
     #[test]
     fn a_user_key_is_named_without_the_sid_that_is_the_same_on_every_row() {
-        // The SID is 40 of the 87 bytes a name has, and the same 40 on
+        // The SID is 47 of the bytes a name has, and the same 47 on
         // every row: keeping it, the name began mid-SID.
         assert_eq!(
             absent(&format!(r"{USER_HIVE}\Software\Microsoft\Office\16.0\Word\Options"), "Vpref"),
@@ -1170,16 +1182,60 @@ mod tests {
         );
     }
 
+    /// A key under an Office licensing store, which is where the long
+    /// ones are: too long even for a 160-byte row, so the row keeps the
+    /// hive it is in and the end that names the key. The end alone said
+    /// neither which hive nor, with a SID in front of it, which key.
     #[test]
     fn a_key_too_long_keeps_the_hive_it_is_in_and_the_end_that_names_it() {
         let long = format!(
-            "{USER_HIVE}{}",
-            r"\Software\Microsoft\Office\16.0\Common\Licensing\Store\Tenants\Default"
+            r"\REGISTRY\MACHINE\SOFTWARE{}{}",
+            r"\Microsoft\Office\16.0\Common\Licensing\Store\Tenants\Default",
+            r"\Subscriptions\ProductReleaseIds\O365ProPlusRetail\Licenses\Metered",
         );
         let got = absent(&long, "ProductReleaseId");
-        assert!(got.len() <= 96, "{got}");
+        assert!(got.len() <= ROW_LEN, "{got}");
+        assert!(got.starts_with("registry:MACHINE/.../"), "{got}");
+        assert!(got.ends_with("/Metered/ProductReleaseId"), "{got}");
+    }
+
+    /// A key of an Office startup's length fits a row whole, which is
+    /// what a row of 160 bytes is for: at 96 this one was elided and
+    /// read `registry:USER/.../GalaRegistryTest/...`, naming no hive
+    /// path a seed could be written from.
+    #[test]
+    fn a_key_an_office_startup_asks_for_fits_a_row_whole() {
+        assert_eq!(
+            absent(
+                &format!(
+                    "{USER_HIVE}{}",
+                    r"\Software\Microsoft\Office\16.0\Common\Licensing\Store\Tenants\Default"
+                ),
+                "ProductReleaseId",
+            ),
+            "registry:USER/Software/Microsoft/Office/16.0/Common/Licensing\
+/Store/Tenants/Default/ProductReleaseId"
+        );
+    }
+
+    /// A long key under a user hive keeps the end that names it. The
+    /// SID is left out of the row, but it is pushed into the name
+    /// before it is dropped, so a buffer no larger than a row let those
+    /// 47 bytes cut the end off the very keys the elision exists to
+    /// name (`registry:USER/.../ProductReleaseIds/O365`, which says
+    /// neither which release nor which value).
+    #[test]
+    fn a_long_user_key_keeps_the_end_that_names_it() {
+        let got = absent(
+            &format!(
+                "{USER_HIVE}{}{}",
+                r"\Software\GalaRegistryTest\Licensing\LicensingNext\Store\Tenants",
+                r"\Default\Subscriptions\ProductReleaseIds\O365ProPlusRetail\Licenses\Metered\Policies",
+            ),
+            "Enforcement",
+        );
         assert!(got.starts_with("registry:USER/.../"), "{got}");
-        assert!(got.ends_with("/ProductReleaseId"), "{got}");
+        assert!(got.ends_with("/Metered/Policies/Enforcement"), "{got}");
     }
 
     #[test]
