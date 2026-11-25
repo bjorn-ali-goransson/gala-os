@@ -509,40 +509,55 @@ fn read_c_string(addr: u64, out: &mut [u8], read: &dyn Fn(u64, &mut [u8]) -> boo
     len
 }
 
-/// The text at `addr` into `out`: printable ASCII, or UTF-16 whose
-/// characters are printable ASCII (narrowed), up to a NUL or the first
-/// other character; its length (0: no text there). A stack capture
-/// quotes a call's arguments with it (`super::stack_at`).
+/// Whether `b` is part of a run of text. A tab is: the records a program
+/// logs separate their fields with one and the field in question is
+/// behind them -- Word's own log puts the message it gives up with 91
+/// characters in, behind four tabs -- so a run that ended at the first
+/// tab would be a record's first field and never what it says. A line
+/// break is not, so a run is one line and a quote of it stays one line
+/// of the log.
+fn text_byte(b: u8) -> bool {
+    b == b' ' || b == b'\t' || b.is_ascii_graphic()
+}
+
+/// The text at `addr` into `out`: printable ASCII (with tabs,
+/// [`text_byte`]), or UTF-16 whose characters are that (narrowed), up to
+/// a NUL or the first other byte; its length (0: no text there). Read in
+/// pieces that stay within a page, as far as `out` has room, because a
+/// stack capture quotes a call's arguments with this (`super::stack_at`)
+/// and the buffer of a write is as long as the line it holds.
 pub(super) fn read_text(addr: u64, out: &mut [u8], read: &dyn Fn(u64, &mut [u8]) -> bool) -> usize {
     let mut raw = [0u8; 2 * CXX_NAME];
-    // As much as is readable: the whole buffer, else up to the page's end.
-    let room = (0x1000 - (addr & 0xfff)) as usize;
-    let len = if read(addr, &mut raw) {
-        raw.len()
-    } else if room < raw.len() && read(addr, &mut raw[..room]) {
-        room
-    } else {
-        return 0;
-    };
-    let raw = &raw[..len];
-    let printable = |b: u8| b == b' ' || b.is_ascii_graphic();
-    let wide = raw.len() >= 4 && raw[1] == 0 && raw[3] == 0 && printable(raw[0]);
-    let mut n = 0;
-    if wide {
-        for pair in raw.chunks_exact(2) {
-            if pair[1] != 0 || !printable(pair[0]) || n == out.len() {
-                break;
-            }
-            out[n] = pair[0];
-            n += 1;
+    let mut n = 0; // characters narrowed into `out`
+    let mut taken = 0; // bytes of the text behind them
+    let mut wide = None;
+    while n < out.len() {
+        let at = addr + taken;
+        // What is left to narrow, two bytes a character at the widest,
+        // and never past the page: a read that would span two pages is
+        // this loop's next turn instead, so text on a page whose
+        // neighbour is not there is still read.
+        let piece = raw.len().min((out.len() - n) * 2).min((0x1000 - (at & 0xfff)) as usize);
+        if piece == 0 || !read(at, &mut raw[..piece]) {
+            break;
         }
-    } else {
-        for &b in raw {
-            if !printable(b) || n == out.len() {
-                break;
+        let got = &raw[..piece];
+        // The run's first bytes decide, once, which encoding it is in.
+        let is_wide =
+            *wide.get_or_insert(got.len() >= 4 && got[1] == 0 && got[3] == 0 && text_byte(got[0]));
+        let (step, chars) = if is_wide { (2, got.len() / 2) } else { (1, got.len()) };
+        let before = n;
+        for i in 0..chars {
+            let (b, pad) = (got[i * step], step == 2 && got[i * step + 1] != 0);
+            if pad || !text_byte(b) || n == out.len() {
+                return n;
             }
             out[n] = b;
             n += 1;
+            taken += step as u64;
+        }
+        if n == before {
+            break; // a piece too short to hold one character
         }
     }
     n
@@ -1441,6 +1456,42 @@ mod tests {
         let n = read_text(0xffc, &mut out, &read);
         assert_eq!(&out[..n], b"end!");
         assert_eq!(read_text(0x1000, &mut out, &read), 0);
+    }
+
+    #[test]
+    fn a_record_is_read_past_its_tabs_and_past_one_bufferful() {
+        // A line of a program's own log: fields separated by tabs, the
+        // message past them, and longer than one read of the buffer.
+        let mut mem = [0u8; 0x1000];
+        let line = b"18:26:53.453\tWINWORD (0xc)\t0x10\tOffice Resource Loading\tMedium\tnhtrp\t\
+                     FGimmeFileFull {\"failureCode\": 3974850, \"fileId\": 7, \"callerId\": 4}\r\n";
+        let text = &line[..line.len() - 2]; // the run ends at the line break
+        assert!(text.len() > 2 * CXX_NAME, "{} characters", text.len());
+        mem[..line.len()].copy_from_slice(line);
+        // The same line as UTF-16, which is how a service is handed a
+        // Windows string.
+        let wide_at = 0x400;
+        for (i, &b) in text.iter().enumerate() {
+            mem[wide_at + 2 * i] = b;
+        }
+        let read = |addr: u64, out: &mut [u8]| {
+            let Some(src) = mem.get(addr as usize..addr as usize + out.len()) else {
+                return false;
+            };
+            out.copy_from_slice(src);
+            true
+        };
+        // Every field is in the run: it ends at the line break, not at
+        // the first tab (12 characters in) nor at 2 * CXX_NAME.
+        let mut out = [0u8; 256];
+        let n = read_text(0, &mut out, &read);
+        assert_eq!(&out[..n], text);
+        let n = read_text(wide_at as u64, &mut out, &read);
+        assert_eq!(&out[..n], text);
+        // A buffer with less room is filled and no more.
+        let mut short = [0u8; 20];
+        assert_eq!(read_text(0, &mut short, &read), 20);
+        assert_eq!(&short, b"18:26:53.453\tWINWORD");
     }
 
     #[test]

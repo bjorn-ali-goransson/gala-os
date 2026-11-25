@@ -14,6 +14,12 @@
 //! - `stack_at_test` (no filter, five captures) must capture all three
 //!   of each kind in turn, so both this program and kernel32 are named,
 //!   and must say the count is spent on the sixth write.
+//! - `stack_at_match_line_test` (`stack_match=` on a field of the last
+//!   write) must capture that write and quote the whole line: its
+//!   fields are separated by tabs and the one in question is 71
+//!   characters in, which is the shape of the records a program logs and
+//!   the only thing that says the capture reads a line rather than its
+//!   first field.
 //! - `stack_at_from_test` (`stack_from=kernel32`, two captures) must
 //!   pass the three raw writes over without spending a capture -- the
 //!   line that says the count is spent says how many were passed over,
@@ -58,6 +64,14 @@ fn out(text: &[u8]) -> bool {
     ok != 0 && written as usize == text.len()
 }
 
+/// A line of a program's own log: fields separated by tabs, the one in
+/// question 71 characters in. Word's own log lines are this shape -- the
+/// message it writes when it gives up is 91 characters in, behind four
+/// tabs -- and a capture aimed at the write of an error message is what
+/// the facility is for.
+const LOG_LINE: &[u8] =
+    b"stack_at_test\ttab-separated\tlike the record Word writes\tits own fields\tthe field in question\r\n";
+
 fn main() -> u32 {
     // Straight to the system call first, before kernel32 has been called
     // at all, so these stacks cannot have a word of it left on them.
@@ -79,6 +93,15 @@ fn main() -> u32 {
         if !out(line) {
             return i as u32 + 4;
         }
+    }
+    // Last, after the line that says this program is ok, the log record
+    // `stack_at_match_line_test` matches a field of. It comes last so
+    // that the counts the other scenarios read -- how many calls each
+    // filter passed over before the captures were spent -- are the same
+    // as before: a call that arrives once the count is gone is not one
+    // a filter turned away.
+    if ntrt::write_file(handle, LOG_LINE) != 0 {
+        return 7;
     }
     0
 }

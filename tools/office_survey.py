@@ -7,7 +7,9 @@ export tables are the PE headers' own lists):
   <out>/version.txt          Click-to-Run's version, channel and products
   <out>/files.tsv            every PE file: path, size, machine
   <out>/imports/<path>.txt   `llvm-readobj --coff-imports` of each PE
-  <out>/exports/<name>.txt   the export names of each Office DLL
+                             (only where llvm-readobj is installed)
+  <out>/exports/<name>.txt   the export names of each Office DLL (read
+                             here when llvm-readobj is not installed)
   <out>/com.tsv              COM classes Office registers (its virtual
                              registry and the real one): CLSID, server
                              kind, server path, ProgID
@@ -35,6 +37,77 @@ READOBJ = next(
 def readobj(args, path):
     return subprocess.run([READOBJ, *args, path], capture_output=True, text=True,
                           errors="replace").stdout
+
+
+def have_readobj():
+    """Whether llvm-readobj runs here. The imports need it; the exports
+    do not (`export_names`), so a machine without LLVM still surveys the
+    DLLs gala's loader is measured against."""
+    try:
+        return subprocess.run([READOBJ, "--version"], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+READOBJ_OK = have_readobj()
+
+
+def export_names(path):
+    """The names a DLL exports, in the order the export name table holds
+    them, which is the order llvm-readobj prints and the PE format keeps
+    sorted by name.
+
+    llvm-readobj's list where it is installed, and otherwise the export
+    directory read here: the PE header's own name and ordinal arrays,
+    which is metadata and not code (CLEAN_ROOM), as `machine` above
+    already reads the file header. The two agree -- `--coff-exports`
+    prints one `Name:` per named export -- so which one ran does not
+    change what a survey says.
+    """
+    if READOBJ_OK:
+        return [l.split(":", 1)[1].strip()
+                for l in readobj(["--coff-exports"], path).splitlines()
+                if l.strip().startswith("Name:")]
+    with open(path, "rb") as f:
+        data = f.read()
+    pe = int.from_bytes(data[0x3C:0x40], "little")
+    nsec = int.from_bytes(data[pe + 6:pe + 8], "little")
+    opt_size = int.from_bytes(data[pe + 20:pe + 22], "little")
+    opt = pe + 24
+    # The data directories follow the optional header, of which PE32+
+    # (0x20b) has eight bytes more than PE32; the export directory is
+    # the first entry of either.
+    dirs = opt + (112 if int.from_bytes(data[opt:opt + 2], "little") == 0x20B else 96)
+    edir = int.from_bytes(data[dirs:dirs + 4], "little")
+    if not edir:
+        return []
+    secs = []
+    for i in range(nsec):
+        s = opt + opt_size + i * 40
+        vsize = int.from_bytes(data[s + 8:s + 12], "little")
+        vaddr = int.from_bytes(data[s + 12:s + 16], "little")
+        rsize = int.from_bytes(data[s + 16:s + 20], "little")
+        raddr = int.from_bytes(data[s + 20:s + 24], "little")
+        secs.append((vaddr, max(vsize, rsize), raddr))
+
+    def off(rva):
+        """The file offset an address holds. Every address wanted here
+        lies in the section the export directory is in."""
+        for vaddr, size, raddr in secs:
+            if vaddr <= rva < vaddr + size:
+                return raddr + (rva - vaddr)
+        raise ValueError("address %#x is in no section of %s" % (rva, path))
+
+    e = off(edir)
+    count = int.from_bytes(data[e + 24:e + 28], "little")
+    if not count:
+        return []  # exported by ordinal only: there is no name array
+    anames = off(int.from_bytes(data[e + 32:e + 36], "little"))
+    names = []
+    for i in range(count):
+        o = off(int.from_bytes(data[anames + 4 * i:anames + 4 * i + 4], "little"))
+        names.append(data[o:data.index(b"\0", o)].decode("latin1"))
+    return names
 
 
 def machine(path):
@@ -91,12 +164,11 @@ for root in ROOTS:
             files.append(f"{rel}\t{os.path.getsize(p)}\t{m}")
             if m != "x64":
                 continue
-            write(os.path.join("imports", rel + ".txt"), readobj(["--coff-imports"], p))
+            if READOBJ_OK:
+                write(os.path.join("imports", rel + ".txt"), readobj(["--coff-imports"], p))
             if n.lower().endswith(".dll"):
-                names_ = [l.split(":", 1)[1].strip() for l in
-                          readobj(["--coff-exports"], p).splitlines()
-                          if l.strip().startswith("Name:")]
-                write(os.path.join("exports", n.lower() + ".txt"), "\n".join(names_) + "\n")
+                write(os.path.join("exports", n.lower() + ".txt"),
+                      "\n".join(export_names(p)) + "\n")
 write("files.tsv", "\n".join(sorted(files)) + "\n")
 
 # COM classes: Click-to-Run's virtual registry, then the real one's

@@ -139,8 +139,12 @@ const ARGS_SHOWN: usize = 8;
 /// The longest text a capture quotes from an argument, and the shortest
 /// run that is quoted at all: a run of three characters or fewer is as
 /// likely the low bytes of a number as a name
-/// (`crashreport::read_text`).
-const ARG_TEXT: usize = 64;
+/// (`crashreport::read_text`). The length is that of a record a program
+/// logs: Word's own log lines run to about 160 characters and put the
+/// message it gives up with 91 in, so a quote cut at a name's length
+/// would show the timestamp of the write this facility is aimed at and
+/// none of what it says.
+const ARG_TEXT: usize = 256;
 const ARG_TEXT_LEAST: usize = 4;
 
 /// The most a count may ask for. A number is typed on purpose, so this
@@ -732,6 +736,24 @@ fn read_stack(process: &Process, sp: u64, buf: &mut [u8]) -> usize {
 /// that is not there).
 struct Args<'a>(&'a [Option<u64>; ARGS_SHOWN]);
 
+/// A run of text as one line of the log: a tab shown as `\t`, so a
+/// record whose fields a tab separates is quoted whole, where its fields
+/// end stays visible, and nothing a program wrote can break the line it
+/// is quoted on.
+struct Quoted<'a>(&'a [u8]);
+
+impl core::fmt::Display for Quoted<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for &b in self.0 {
+            match b {
+                b'\t' => f.write_str("\\t")?,
+                _ => f.write_str(core::str::from_utf8(&[b]).unwrap_or("?"))?,
+            }
+        }
+        Ok(())
+    }
+}
+
 impl core::fmt::Display for Args<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         for (i, value) in self.0.iter().enumerate() {
@@ -783,10 +805,7 @@ fn capture(
         let mut text = [0u8; ARG_TEXT];
         let chars = super::crashreport::read_text(value, &mut text, &read);
         if chars >= ARG_TEXT_LEAST {
-            info!(
-                "stack:   argument {i} reads as \"{}\"",
-                core::str::from_utf8(&text[..chars]).unwrap_or("?")
-            );
+            info!("stack:   argument {i} reads as \"{}\"", Quoted(&text[..chars]));
         }
     }
     let mut shown = 0;

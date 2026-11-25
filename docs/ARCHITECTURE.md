@@ -9815,8 +9815,39 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 - Mouse input from the desktop goes to the deepest visible, enabled
   child under the pointer, or the capture window, with lParam in its
   client coordinates; keys go to the focus window (SetFocus/GetFocus
-  with WM_KILLFOCUS/WM_SETFOCUS; a shown top-level window takes the
-  focus).
+  with WM_KILLFOCUS/WM_SETFOCUS; a top-level window takes the focus as
+  part of being activated, so a show that activates nothing --
+  SW_SHOWNOACTIVATE, SW_SHOWMINNOACTIVE, SW_SHOWNA -- leaves both the
+  active window and the focus where they are).
+- The focus and the active window are a thread's, not the process's:
+  every thread has an input state of its own (`input.rs`), and
+  AttachThreadInput joins two threads' into one that both then read and
+  write. That is what SetFocus and GetActiveWindow answer from, and what
+  bounds them: a window of a thread the caller shares no input state
+  with cannot take the focus (0 with ERROR_ACCESS_DENIED), while the
+  threads that share one see the same focus and the same active window.
+  Joining takes the state of the thread being attached to, and parting
+  leaves both threads with what the joined state held -- Windows does
+  not give the attached thread its own back (`threadinput_test`, the
+  same 43 checks and the same transcript on Windows 11 and under gala).
+  SetFocus answers the window it took the focus from, except where the
+  window's top-level window was not the state's active one: the call
+  activates it first and so answers that window itself.
+  AttachThreadInput refuses a thread attached to itself, thread 0, a
+  thread that does not exist and a thread with no message queue, each
+  with ERROR_INVALID_PARAMETER; gala reads "has a message queue" as a
+  thread with an input state of its own or one that owns a window. Two
+  limits: an input state follows a thread id, which the kernel may reuse
+  once that thread is gone, and only this process's threads can be
+  attached -- user32's state is per process, so a thread of another one
+  is refused with a ledger row that says gala could not see it rather
+  than that Windows would have.
+- The active window is per input state and the foreground window is the
+  desktop's one notion of what is in front, so the two part company: a
+  thread's active window stays its own while another thread's window is
+  in the foreground. `window.rs::activate` moves both, and SetFocus only
+  the input state's, because WM_ACTIVATE's DefWindowProc calls SetFocus
+  and sending activation from there would come back into the call.
 - Siblings keep a Z order: children are added at the bottom, so
   GW_CHILD/GW_HWNDNEXT walk them in creation order (the dialog tab
   order). DestroyWindow hides the window (no WM_SHOWWINDOW: a

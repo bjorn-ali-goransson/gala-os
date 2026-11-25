@@ -11,6 +11,6 @@ Installers:
   InstallerType: nullsoft
   Scope: user
   InstallerUrl: https://packages.gala.invalid/pknsis-1.0.0.exe
-  InstallerSha256: 2CAC0EF636CF5CAE25E12D9A9CE468DEFE1ED9E0C53E765CBBD40D9D5EEB3470
+  InstallerSha256: FC2D333439DE74CA948667A037599B944C955885D4CA36941183D646FD84BB9E
 ManifestType: singleton
 ManifestVersion: 1.6.0
