@@ -4277,7 +4277,7 @@ fn gala_etw(call: &mut Call<'_>) -> NtStatus {
             };
             let (provider_meta, rest) = record[HEAD..end].split_at(provider_len);
             let (event_meta, data) = rest.split_at(event_len);
-            let keep = super::etw::record(&super::etw::Written {
+            let logged = super::etw::record(&super::etw::Written {
                 process: call.process.name,
                 guid: &guid,
                 level,
@@ -4288,7 +4288,19 @@ fn gala_etw(call: &mut Call<'_>) -> NtStatus {
                 data,
                 flags,
             });
-            if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
+            // The capture at a line the program logged (`stack_at=etw`)
+            // is here because this is the one moment the program's own
+            // words and its own stack are both in reach: it is the
+            // logging thread that is in this call. It follows every
+            // event, logged or not, and keeps the session alive when
+            // the stream's budget would end it: the budget bounds the
+            // log, not the trigger.
+            super::stack_at::on_logged(call, data);
+            if logged || super::stack_at::wants_events() {
+                NtStatus::SUCCESS
+            } else {
+                NtStatus::NO_MORE_ENTRIES
+            }
         }
         _ => NtStatus::INVALID_PARAMETER,
     }

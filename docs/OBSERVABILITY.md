@@ -1542,8 +1542,10 @@ stack of (who made the call), and `stack_match=<text>` the calls one of
 whose arguments points at text containing it (what the call is about).
 `stack_words=<n>` says how far up the stack to read (default 128 words,
 a kilobyte, at most 512; `kernel/src/nt/stack_at.rs`, scenarios
-`stack_at_test`, `stack_at_from_test`, `stack_at_match_test` and
-`stack_at_words_test`). It answers what the other
+`stack_at_test`, `stack_at_from_test`, `stack_at_match_test`,
+`stack_at_words_test` and `stack_at_event_test`). The service named may
+also be `etw`, which is no system call but a line the program logged
+(below). It answers what the other
 facilities leave open: the event stream says which calls a program made
 and the ledger what gala did not have, and neither says who made the
 call. A program that stops inside a DLL gala has no source for
@@ -1609,6 +1611,32 @@ stack:   (8 of the 128 stack words read from 0x1ffa08 point into an image)
   `%22` for a quote, `%25` for a `%`. The two filters compose -- both
   must want a call -- and either without `stack_at=` has nothing to
   filter and says so.
+- **`stack_at=etw` triggers on a line the program logged.** A wall a
+  program decides on inside its own code may reach no system call that
+  is about it: Click-to-Run's resource loader fails Word from a
+  precondition already false in the process, and the write of the line
+  it says so on hands the kernel a buffer whose text is not that line,
+  so `stack_match=` passed all 838 of that startup's log writes over.
+  What the program does say in words is the line itself, and a line
+  reaches the kernel as a trace event on the very thread that logged it
+  -- gala's advapi32 hands each record over inline, before `EventWrite`
+  returns -- so the stack there is that thread's own path to the thing
+  it is narrating. `stack_at=etw:4 stack_match=FGimmeFileFull` is "whose
+  call path logged that", with the phrase read out of the program's own
+  log rather than guessed. Three things differ from a capture at a call:
+  `stack_match=` searches the event's bytes rather than its arguments,
+  at either width (a byte a character or UTF-16, from any offset,
+  because where a manifest provider's values keep their text is written
+  in a manifest outside the program); the scan starts at 512 words
+  rather than 128, because advapi32 copies the whole record onto the
+  frame in between, and `stack_words=` still overrides it; and the lines
+  in reach are the ones a trace session carries, so `etw=` is wanted as
+  well -- armed without one the trigger can see nothing, and the end of
+  the run says so rather than leaving a silent run to be read as "nobody
+  logged it". The stream's own line budget does not bound the trigger: a
+  program is told its session is over once the budget is spent, so while
+  a capture is armed the kernel keeps answering the writes, and the
+  budget bounds the log rather than what it is read for.
 - **`stack_words=<n>` reaches past the service's own frame.** The
   default 128 words are several frames of a Windows DLL, but a service
   that keeps a large frame of its own buries the caller below them:
@@ -1657,7 +1685,10 @@ stack:   (8 of the 128 stack words read from 0x1ffa08 point into an image)
   reads the arguments only, so a call it turns away costs those reads
   and not the scan, while a call `stack_from=` turns away has had its
   stack read, the count not yet claimed -- it is already a call to the
-  named service, and the read is what buys the trigger its aim.
+  named service, and the read is what buys the trigger its aim. At `etw`
+  the text is looked for in the record already on the kernel's frame (at
+  most 2 KiB), twice over -- once a byte a character, once UTF-16 --
+  each pass skipping every offset whose first byte cannot start it.
 - **Limits**: the capture is at the system-call boundary, which in a
   WOW64 process is the 64-bit thunk, so a 32-bit program's own frames
   are above what is scanned and are not placed by this yet; and the
