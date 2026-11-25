@@ -6,10 +6,18 @@
 //! - SLOpen gives S_OK and a handle, SLClose S_OK (measured on Windows,
 //!   ROADMAP issue #60);
 //! - asking about an application, SKU, license file or product key that
-//!   is not installed fails, as does installing a blob that is not a
+//!   is not installed fails, its identifier among the questions, as
+//!   does installing a blob that is not a
 //!   license, uninstalling a license file that is not installed and
 //!   installing a product key that is not one;
-//! - a NULL output pointer fails.
+//! - a NULL output pointer fails;
+//! - the policy getters answer SL_E_RIGHT_NOT_GRANTED while no right has
+//!   been consumed on the handle, whatever the value name, and
+//!   E_INVALIDARG for what is not a handle or a NULL required output
+//!   (measured on Windows 11 24H2, build 26100; the data type of
+//!   SLGetPolicyInformation is optional, and the two differ over the
+//!   value name: the DWORD form refuses a NULL one, its sibling answers
+//!   the right first and never looks).
 //!
 //! The error codes of those failures are printed as `sppc_test: info`
 //! lines (FAILED is checked), to be compared with a Windows run.
@@ -94,6 +102,13 @@ unsafe extern "system" {
         status: *mut *mut LicensingStatus,
     ) -> i32;
     fn SLGetPolicyInformationDWORD(h: Handle, name: *const u16, value: *mut u32) -> i32;
+    fn SLGetPolicyInformation(
+        h: Handle,
+        name: *const u16,
+        data_type: *mut u32,
+        size: *mut u32,
+        value: *mut *mut u8,
+    ) -> i32;
     fn SLGetInstalledProductKeyIds(
         h: Handle,
         sku: *const Guid,
@@ -101,6 +116,14 @@ unsafe extern "system" {
         ids: *mut *mut Guid,
     ) -> i32;
     fn SLInstallProofOfPurchase(
+        h: Handle,
+        algorithm: *const u16,
+        key: *const u16,
+        size: u32,
+        data: *const u8,
+        pkey_id: *mut Guid,
+    ) -> i32;
+    fn SLGetPKeyId(
         h: Handle,
         algorithm: *const u16,
         key: *const u16,
@@ -119,6 +142,9 @@ unsafe extern "system" {
 }
 
 const S_OK: i32 = 0;
+const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+/// SL_E_RIGHT_NOT_GRANTED.
+const SL_E_RIGHT_NOT_GRANTED: i32 = 0xc004_f013u32 as i32;
 /// SLIDTYPE.
 const SL_ID_APPLICATION: u32 = 0;
 const SL_ID_PRODUCT_SKU: u32 = 1;
@@ -262,6 +288,13 @@ impl Checks {
         Err(self.0)
     }
 
+    /// An HRESULT that must be exactly `want`, printed as `info <what>`.
+    #[track_caller]
+    fn code(&mut self, what: &[u8], hr: i32, want: i32) -> Result<(), u32> {
+        info(what, hr);
+        self.ok(hr == want, hr as u32 as u64)
+    }
+
     /// A failed HRESULT, printed as `info <what>`.
     #[track_caller]
     fn failed(&mut self, what: &[u8], hr: i32) -> Result<(), u32> {
@@ -331,11 +364,38 @@ fn run() -> Result<(), u32> {
         SLGetLicenseInformation(h, &NOBODY, name.as_ptr(), &mut ty, &mut size, &mut value)
     };
     c.failed(b"information of a license not installed", hr)?;
+    // The policies of a right nobody consumed: not a value that is
+    // missing, a right that was never granted.
     let mut v = 0u32;
     let name = wide("sppc_test-no-such-policy");
     // SAFETY: our handle, name and output.
     let hr = unsafe { SLGetPolicyInformationDWORD(h, name.as_ptr(), &mut v) };
-    c.failed(b"a policy no license has", hr)?;
+    c.code(b"a policy no right grants", hr, SL_E_RIGHT_NOT_GRANTED)?;
+    // SAFETY: not a handle; our name and output.
+    let hr = unsafe { SLGetPolicyInformationDWORD(0, name.as_ptr(), &mut v) };
+    c.code(b"SLGetPolicyInformationDWORD of what is not a handle", hr, E_INVALIDARG)?;
+    // SAFETY: our handle and name; a NULL output.
+    let hr = unsafe { SLGetPolicyInformationDWORD(h, name.as_ptr(), null_mut()) };
+    c.code(b"SLGetPolicyInformationDWORD with a NULL output", hr, E_INVALIDARG)?;
+    // SAFETY: our handle and output; a NULL name.
+    let hr = unsafe { SLGetPolicyInformationDWORD(h, null(), &mut v) };
+    c.code(b"SLGetPolicyInformationDWORD with a NULL value name", hr, E_INVALIDARG)?;
+    // SAFETY: our handle, name and outputs.
+    let hr = unsafe { SLGetPolicyInformation(h, name.as_ptr(), &mut ty, &mut size, &mut value) };
+    c.code(b"a policy of any type no right grants", hr, SL_E_RIGHT_NOT_GRANTED)?;
+    // SAFETY: our handle, name and outputs; the data type is optional.
+    let hr = unsafe { SLGetPolicyInformation(h, name.as_ptr(), null_mut(), &mut size, &mut value) };
+    c.code(b"a policy without the optional data type", hr, SL_E_RIGHT_NOT_GRANTED)?;
+    // The right is answered before the name is looked at.
+    // SAFETY: our handle and outputs; a NULL name.
+    let hr = unsafe { SLGetPolicyInformation(h, null(), &mut ty, &mut size, &mut value) };
+    c.code(b"a policy with a NULL value name", hr, SL_E_RIGHT_NOT_GRANTED)?;
+    // SAFETY: not a handle; our name and outputs.
+    let hr = unsafe { SLGetPolicyInformation(0, name.as_ptr(), &mut ty, &mut size, &mut value) };
+    c.code(b"SLGetPolicyInformation of what is not a handle", hr, E_INVALIDARG)?;
+    // SAFETY: our handle and name; NULL required outputs.
+    let hr = unsafe { SLGetPolicyInformation(h, name.as_ptr(), &mut ty, null_mut(), null_mut()) };
+    c.code(b"SLGetPolicyInformation with NULL outputs", hr, E_INVALIDARG)?;
     // SAFETY: our handle and identifier; no right named.
     let hr = unsafe {
         SLGetLicensingStatusInformation(h, &NOBODY, null(), null(), &mut n, &mut null_mut())
@@ -355,6 +415,12 @@ fn run() -> Result<(), u32> {
     let hr =
         unsafe { SLInstallProofOfPurchase(h, alg.as_ptr(), key.as_ptr(), 0, null(), &mut pkey) };
     c.failed(b"install a product key no license configures", hr)?;
+    // SAFETY: our handle, strings and output.
+    let hr = unsafe { SLGetPKeyId(h, alg.as_ptr(), key.as_ptr(), 0, null(), &mut pkey) };
+    c.failed(b"the identifier of a product key not installed", hr)?;
+    // SAFETY: our handle and strings; a NULL output.
+    let hr = unsafe { SLGetPKeyId(h, alg.as_ptr(), key.as_ptr(), 0, null(), null_mut()) };
+    c.failed(b"SLGetPKeyId with a NULL output", hr)?;
     // A NULL output.
     // SAFETY: our handle; a NULL output.
     let hr = unsafe { SLInstallLicense(h, LICENSE.len() as u32, LICENSE.as_ptr(), null_mut()) };
