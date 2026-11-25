@@ -18,6 +18,16 @@
 //!   SLGetPolicyInformation is optional, and the two differ over the
 //!   value name: the DWORD form refuses a NULL one, its sibling answers
 //!   the right first and never looks).
+//! - the application policies are missing, since nothing persists any:
+//!   SLLoadApplicationPolicies answers SL_E_APPLICATION_POLICIES_MISSING
+//!   and hands out no context, so SLGetApplicationPolicy and
+//!   SLUnloadApplicationPolicies answer
+//!   SL_E_APPLICATION_POLICIES_NOT_LOADED for whatever context they are
+//!   given, after E_INVALIDARG for a NULL one, a NULL value name or a
+//!   NULL required output -- the arguments are checked before the
+//!   context is looked up, and the data type stays optional (measured on
+//!   Windows 11 24H2, build 26100, where no application has persisted
+//!   policies).
 //!
 //! The error codes of those failures are printed as `sppc_test: info`
 //! lines (FAILED is checked), to be compared with a Windows run.
@@ -109,6 +119,20 @@ unsafe extern "system" {
         size: *mut u32,
         value: *mut *mut u8,
     ) -> i32;
+    fn SLLoadApplicationPolicies(
+        app: *const Guid,
+        sku: *const Guid,
+        flags: u32,
+        context: *mut Handle,
+    ) -> i32;
+    fn SLGetApplicationPolicy(
+        context: Handle,
+        name: *const u16,
+        data_type: *mut u32,
+        size: *mut u32,
+        value: *mut *mut u8,
+    ) -> i32;
+    fn SLUnloadApplicationPolicies(context: Handle, flags: u32) -> i32;
     fn SLGetInstalledProductKeyIds(
         h: Handle,
         sku: *const Guid,
@@ -145,6 +169,10 @@ const S_OK: i32 = 0;
 const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
 /// SL_E_RIGHT_NOT_GRANTED.
 const SL_E_RIGHT_NOT_GRANTED: i32 = 0xc004_f013u32 as i32;
+/// SL_E_APPLICATION_POLICIES_MISSING.
+const SL_E_APPLICATION_POLICIES_MISSING: i32 = 0xc004_f072u32 as i32;
+/// SL_E_APPLICATION_POLICIES_NOT_LOADED.
+const SL_E_APPLICATION_POLICIES_NOT_LOADED: i32 = 0xc004_f073u32 as i32;
 /// SLIDTYPE.
 const SL_ID_APPLICATION: u32 = 0;
 const SL_ID_PRODUCT_SKU: u32 = 1;
@@ -396,6 +424,46 @@ fn run() -> Result<(), u32> {
     // SAFETY: our handle and name; NULL required outputs.
     let hr = unsafe { SLGetPolicyInformation(h, name.as_ptr(), &mut ty, null_mut(), null_mut()) };
     c.code(b"SLGetPolicyInformation with NULL outputs", hr, E_INVALIDARG)?;
+    // The application policies: nothing persists any, so none is loaded
+    // and no context exists to query.
+    let mut context: Handle = 0;
+    // SAFETY: our identifier and output; the SKU is optional.
+    let hr = unsafe { SLLoadApplicationPolicies(&APP, null(), 0, &mut context) };
+    c.code(b"load the policies of an application", hr, SL_E_APPLICATION_POLICIES_MISSING)?;
+    c.ok(context == 0, context as u64)?;
+    // SAFETY: our output; a NULL application identifier.
+    let hr = unsafe { SLLoadApplicationPolicies(null(), null(), 0, &mut context) };
+    c.code(b"load the policies of no application", hr, E_INVALIDARG)?;
+    // SAFETY: our identifier; a NULL output.
+    let hr = unsafe { SLLoadApplicationPolicies(&APP, null(), 0, null_mut()) };
+    c.code(b"load the policies into a NULL context", hr, E_INVALIDARG)?;
+    // A context that was never handed out: the arguments are checked
+    // first, then the context is looked up.
+    // SAFETY: not a context; our name and outputs.
+    let hr = unsafe { SLGetApplicationPolicy(1, name.as_ptr(), &mut ty, &mut size, &mut value) };
+    c.code(b"an application policy of no context", hr, SL_E_APPLICATION_POLICIES_NOT_LOADED)?;
+    // SAFETY: not a context; our name and outputs; the type is optional.
+    let hr = unsafe { SLGetApplicationPolicy(1, name.as_ptr(), null_mut(), &mut size, &mut value) };
+    c.code(
+        b"an application policy without the data type",
+        hr,
+        SL_E_APPLICATION_POLICIES_NOT_LOADED,
+    )?;
+    // SAFETY: our name and outputs; a NULL context.
+    let hr = unsafe { SLGetApplicationPolicy(0, name.as_ptr(), &mut ty, &mut size, &mut value) };
+    c.code(b"an application policy of a NULL context", hr, E_INVALIDARG)?;
+    // SAFETY: not a context; our outputs; a NULL name.
+    let hr = unsafe { SLGetApplicationPolicy(1, null(), &mut ty, &mut size, &mut value) };
+    c.code(b"an application policy with a NULL value name", hr, E_INVALIDARG)?;
+    // SAFETY: not a context; our name; NULL required outputs.
+    let hr = unsafe { SLGetApplicationPolicy(1, name.as_ptr(), &mut ty, null_mut(), null_mut()) };
+    c.code(b"an application policy with NULL outputs", hr, E_INVALIDARG)?;
+    // SAFETY: not a context.
+    let hr = unsafe { SLUnloadApplicationPolicies(1, 0) };
+    c.code(b"unload the policies of no context", hr, SL_E_APPLICATION_POLICIES_NOT_LOADED)?;
+    // SAFETY: a NULL context.
+    let hr = unsafe { SLUnloadApplicationPolicies(0, 0) };
+    c.code(b"unload the policies of a NULL context", hr, E_INVALIDARG)?;
     // SAFETY: our handle and identifier; no right named.
     let hr = unsafe {
         SLGetLicensingStatusInformation(h, &NOBODY, null(), null(), &mut n, &mut null_mut())

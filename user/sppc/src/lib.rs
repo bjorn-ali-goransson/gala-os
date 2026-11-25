@@ -28,7 +28,10 @@
 //! SL_E_PKEY_NOT_INSTALLED) and no policy can be read
 //! (SLGetPolicyInformation and its DWORD form SL_E_RIGHT_NOT_GRANTED,
 //! which is what Windows answers on a handle that consumed no right --
-//! measured).
+//! measured). Nothing is persisted for the fast policy path either, so
+//! SLLoadApplicationPolicies answers SL_E_APPLICATION_POLICIES_MISSING
+//! and hands out no context, leaving SLGetApplicationPolicy and
+//! SLUnloadApplicationPolicies at SL_E_APPLICATION_POLICIES_NOT_LOADED.
 //!
 //! Observability: every call is recorded in the ledger as
 //! `sppc.dll!<function>(<case>)`, "other", with the HRESULT returned as
@@ -133,6 +136,8 @@ const E_INVALID_DATA: i32 = 0x8007_000d_u32 as i32;
 const SL_E_LICENSE_FILE_NOT_INSTALLED: i32 = 0xc004_f011_u32 as i32;
 const SL_E_VALUE_NOT_FOUND: i32 = 0xc004_f012_u32 as i32;
 const SL_E_RIGHT_NOT_GRANTED: i32 = 0xc004_f013_u32 as i32;
+const SL_E_APPLICATION_POLICIES_MISSING: i32 = 0xc004_f072_u32 as i32;
+const SL_E_APPLICATION_POLICIES_NOT_LOADED: i32 = 0xc004_f073_u32 as i32;
 const SL_E_PKEY_NOT_INSTALLED: i32 = 0xc004_f014_u32 as i32;
 const SL_E_INVALID_PRODUCT_KEY: i32 = 0xc004_f050_u32 as i32;
 const SL_E_PRODUCT_SKU_NOT_INSTALLED: i32 = 0xc004_f069_u32 as i32;
@@ -876,6 +881,58 @@ pub extern "system" fn SLPersistApplicationPolicies(
         return record(F, "invalid argument", E_INVALIDARG);
     }
     record(F, "nothing consumed", S_OK)
+}
+
+/// SLLoadApplicationPolicies(pApplicationId, pProductSkuId, dwFlags,
+/// *phPolicyContext): SLPersistApplicationPolicies keeps nothing, so
+/// there is nothing to load and no context is handed out (measured on
+/// Windows, where an application that has persisted no policies answers
+/// SL_E_APPLICATION_POLICIES_MISSING and leaves the context alone).
+#[unsafe(no_mangle)]
+pub extern "system" fn SLLoadApplicationPolicies(
+    app: *const Slid,
+    _sku: *const Slid,
+    _flags: u32,
+    context: *mut usize,
+) -> i32 {
+    const F: &str = "SLLoadApplicationPolicies";
+    if app.is_null() || context.is_null() {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    record(F, "nothing persisted", SL_E_APPLICATION_POLICIES_MISSING)
+}
+
+/// SLGetApplicationPolicy(hPolicyContext, pwszValueName, *peDataType,
+/// *pcbValue, **ppbValue): no context is ever loaded, so none is found.
+/// The arguments are checked before the context is looked up (measured
+/// on Windows: a NULL context, value name or required output is
+/// E_INVALIDARG even for a context that does not exist, while the data
+/// type stays optional).
+#[unsafe(no_mangle)]
+pub extern "system" fn SLGetApplicationPolicy(
+    context: usize,
+    name: *const u16,
+    _data_type: *mut u32,
+    size: *mut u32,
+    value: *mut *mut u8,
+) -> i32 {
+    const F: &str = "SLGetApplicationPolicy";
+    if context == 0 || name.is_null() || size.is_null() || value.is_null() {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    let name = from_wide(name).unwrap_or_default();
+    record(F, &name, SL_E_APPLICATION_POLICIES_NOT_LOADED)
+}
+
+/// SLUnloadApplicationPolicies(hPolicyContext, dwFlags): releases what
+/// SLLoadApplicationPolicies never handed out.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLUnloadApplicationPolicies(context: usize, _flags: u32) -> i32 {
+    const F: &str = "SLUnloadApplicationPolicies";
+    if context == 0 {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    record(F, "no context loaded", SL_E_APPLICATION_POLICIES_NOT_LOADED)
 }
 
 /// SLPersistRTSPayloadOverride: not documented (its arguments unknown).
