@@ -20,19 +20,24 @@ import {
   type Program,
   type Status,
 } from "./content";
+import { CoverageBody } from "./Coverage";
+import { RoadmapBody } from "./Roadmap";
 import { Flow, LayerStack, Progress, TestLoop, WindowPaths } from "./Diagrams";
 import { Both, LangProvider, localize, pagePath, translate, useLang, useT, type Lang } from "./i18n";
 import { Section } from "./Section";
 
 
+// Every section, in the footer; the header has room for those marked `top`.
 const nav = [
-  { id: "how", label: "How it works" },
+  { id: "how", label: "How it works", top: true },
   { id: "beyond", label: "Beyond a reboot" },
-  { id: "components", label: "Components" },
-  { id: "now", label: "In progress" },
-  { id: "runs", label: "What runs" },
+  { id: "components", label: "Components", top: true },
+  { id: "now", label: "In progress", top: true },
+  { id: "runs", label: "What runs", top: true },
+  { id: "coverage", label: "API coverage", top: true },
+  { id: "roadmap", label: "Roadmap", top: true },
   { id: "tooling", label: "Tooling" },
-  { id: "try", label: "Try it" },
+  { id: "try", label: "Try it", top: true },
   { id: "usb", label: "From a USB stick" },
 ];
 
@@ -181,7 +186,7 @@ function Page() {
             </span>
           </a>
           <nav className="top-nav" aria-label={t("Sections")}>
-            {nav.map((n) => (
+            {nav.filter((n) => n.top).map((n) => (
               <a key={n.id} href={`#${n.id}`}>
                 {t(n.label)}
               </a>
@@ -477,6 +482,26 @@ function Page() {
                 </li>
               ))}
             </ul>
+          </Section>
+
+          <Section
+            id="coverage"
+            title={t("API coverage")}
+            intro={t(
+              "How much of Windows' API gala's own DLLs provide, measured two ways: against all of Windows, and against what real programs import.",
+            )}
+          >
+            <CoverageBody />
+          </Section>
+
+          <Section
+            id="roadmap"
+            title={t("Roadmap")}
+            intro={t(
+              "Every item of gala's roadmap and where it stands, read from the roadmap itself when this page is built.",
+            )}
+          >
+            <RoadmapBody />
           </Section>
 
           <Section

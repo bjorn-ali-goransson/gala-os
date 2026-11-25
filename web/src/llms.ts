@@ -21,6 +21,8 @@ import {
   windowsPrograms,
   type Program,
 } from "./content";
+import { coverage, pct } from "./Coverage";
+import { roadmap, roadmapStateLabel } from "./roadmap";
 
 function programs(out: string[], list: Program[]) {
   for (const p of list) {
@@ -96,6 +98,43 @@ export function llmsText(): string {
   out.push("");
   for (const p of planned) out.push(`- **${p.name}**: ${p.what}`);
   out.push("");
+
+  out.push("## API coverage");
+  out.push("");
+  const c = coverage;
+  out.push(
+    `gala's ${c.gala.dlls} DLLs export ${c.gala.real} of the ${c.windows.exports} named functions of ` +
+      `the ${c.windows.dlls} 64-bit DLLs in ${c.windows.product}'s System32 (build ${c.windows.build}), ` +
+      `${pct(c.gala.real, c.windows.exports, 1)}%, legacy included, and ${c.gala.stubs} more as stubs that only ` +
+      `report failure. Of the Windows functions each program below imports (static imports, resolved before ` +
+      `the program runs; then with its delay imports, resolved on first call), gala exports for real:`,
+  );
+  out.push("");
+  for (const p of c.programs) {
+    out.push(
+      `- **${p.name}**: ${pct(p.static.real, p.static.imports)}% of static imports ` +
+        `(${p.static.real} of ${p.static.imports}), ${pct(p.real, p.imports)}% with delay imports (${p.real} of ${p.imports})`,
+    );
+  }
+  out.push("");
+  out.push(
+    "Read from import and export tables only: functions found with GetProcAddress and COM methods are not " +
+      "seen, and an export that exists may do only part of its job. " +
+      `Measured ${c.measured}, gala at commit ${c.galaCommit}.`,
+  );
+  out.push("");
+
+  out.push("## Roadmap");
+  out.push("");
+  for (const g of roadmap) {
+    out.push(`### ${g.title}`);
+    out.push("");
+    for (const i of g.items) {
+      const id = i.id ? `${i.id}: ` : "";
+      out.push(`- ${id}${i.title} (${roadmapStateLabel[i.state].toLowerCase()})`);
+    }
+    out.push("");
+  }
 
   out.push("## Tooling");
   out.push("");

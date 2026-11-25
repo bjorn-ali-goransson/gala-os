@@ -599,7 +599,22 @@ write) no count gets to the call in question, and raising it only moves
 the flood. The count is the flood guard behind that, and the end of the
 run says how many captures were taken and how many calls the filter
 passed over -- 0 and the rest means the module was not on any of those
-stacks, so try the next one. Reach for this before
+stacks, so try the next one.
+
+When the call at that moment is one a service is reached about hundreds
+of times -- `GalaRecordMissing`, which every ledger row goes through --
+no module filter separates them, because they all arrive through the
+same modules. `stack_match=` picks by what the call is about instead:
+the text an argument points at, which for that service is the name the
+gap was recorded under, so a `ledger:` row is itself the trigger
+(`%20` for the space, since a value cannot carry one):
+
+```sh
+XTASK_CMDLINE='stack_at=GalaRecordMissing stack_match=empty%20path \
+  stack_from=wwlib events_match=WINWORD' cargo xtask boot-test 'office_word$'
+```
+
+Reach for this before
 adding records by hand to a DLL -- it costs a run, needs nothing of the
 program, and works for Microsoft's DLLs too.
 
@@ -1736,6 +1751,19 @@ where the site learns it.
   otherwise runs the output through Jekyll, which drops files beginning
   with an underscore). The Website workflow asserts both survive a build.
 - Screenshots live in `web/public/shots/` and are listed in `content.ts` (`shots`).
+- **The roadmap section is read from `docs/ROADMAP.md`** (`web/src/roadmap.ts`,
+  imported with Vite's `?raw`): every row of the "Status at a glance"
+  tables that have a State column, with its ID, title and state. A
+  State cell must start with done, in progress, planned, later or
+  parked (or name a step done, which counts as in progress); any other
+  fails the build naming the row. A new or retitled row needs its title
+  in `ar.ts` like any English text, so keep titles short and put the
+  detail in the Note column. `website.yml` runs on changes to
+  `docs/ROADMAP.md` for this reason, and ci.yml's `changes` job already
+  counts the roadmap as website-only.
+- **The API coverage section draws `web/src/coverage.json`**
+  (`src/Coverage.tsx`), which is measured, not built: see "API coverage"
+  below.
 - **Two languages.** The page is English at `/` and Arabic at `/ar/`
   (`dir="rtl"`), each linking to the other and carrying `hreflang`
   alternates. English is the source: every text is written in English in
@@ -1756,7 +1784,8 @@ where the site learns it.
   written by hand, where it would be wrong the moment the page changed)
   and `llms.txt` (a plain-text brief of the whole site, generated from
   `content.ts` by `src/llms.ts`, in English). None of them is a second copy of
-  the facts: all come from `content.ts`.
+  the facts: all come from `content.ts`, `roadmap.ts` and
+  `coverage.json`.
 - Page counts come from Ali Web Services: a `defer` script in
   `web/index.html` carrying the site's public id (THIRD_PARTY "The
   website"). It is the only third-party request the page makes (the
@@ -1771,6 +1800,46 @@ where the site learns it.
   regression would cost: the domain files, real markup rather than an
   empty shell, the Arabic page present and right to left, the crawler files agreeing with each other, and the
   analytics script still carrying its site id.
+
+### API coverage
+
+The website's coverage figures (`web/src/coverage.json`) come from
+`tools/api_coverage.py`, which counts by `tools/import_survey.py`'s rules
+(API set names mapped, forwards followed, a `.gstub` export is a stub
+and does not count):
+
+- **The whole of Windows**: the named exports of System32's 64-bit DLLs
+  on build 26100, API set contract DLLs left out. The
+  `windows-exports` workflow (`tools/windows_exports.py`, on CI's
+  windows-2025 runner) writes them as an artifact: `version.txt`,
+  `exports.tsv`, `dlls.tsv` (every DLL read and its count) and
+  `errors.txt`. A DLL whose export table names nothing is listed there
+  with llvm-readobj's "RVA 0x0 for export ordinal table" and is not a
+  failure; the workflow fails when kernel32, user32 or ntdll give no
+  exports. It runs on a push that changes it, or by hand
+  (workflow_dispatch). The files are written with Unix line ends.
+- **Each program**: the static and delay imports of its executables
+  and of its own DLLs they lead to, from `target/prebuilt/<dir>`
+  (`PROGRAMS`), and Office's from the Office survey's `imports/` dumps
+  (an artifact of the `office-survey` workflow, kept 30 days: run it
+  again when it has expired). A program that loads its engine with
+  LoadLibrary names that DLL as a root (chrome.dll, .NET's host and
+  runtime, jvm.dll, Office's WWLIB.DLL and PPCORE.DLL): no import table
+  leads to it. The Visual C++ redistributable is the program's own and
+  not counted.
+- To refresh: build gala's x64 DLLs at the commit to record (`cargo
+  build --release --target x86_64-pc-windows-msvc -p <every USER_DLLS
+  package>`), download the two artifacts, then
+
+  ```sh
+  python3 -I tools/api_coverage.py target/x86_64-pc-windows-msvc/release \
+      <windows-exports dir> target/prebuilt [<office-survey dir>] > web/src/coverage.json
+  ```
+
+  The JSON records the date and gala's commit, which the page shows.
+- Neither figure sees GetProcAddress lookups or COM methods, and an
+  export that exists may do only part of its job; the page says so.
+  Recording the lookups is ROADMAP AG step 9.
 
 ### Being found
 
@@ -2225,10 +2294,14 @@ its program through LdrInitializeThunk (`arm_startup_test`).
   cannot do on ARM64 (x86 code: WOW64, straddle_test's x86 instructions)
   is x64's part of the test, or the scenario is left out of ARM64_TWINS
   with the reason beside the list.
-- `build_kernel_aarch64` builds USER_DLLS (but NOT_ARM64_DLLS), then
-  `arm64_programs()`, for ARM64; the aarch64 kernel's images carry those
-  in place of the x64 builds. A program that embeds a DLL embeds its own
-  machine's (`image_test`: `target/<target>/release/testdll.dll`).
+- `build_arm64_programs` builds USER_DLLS (but NOT_ARM64_DLLS) and
+  then `arm64_programs()`, so every caller gets the DLLs before the
+  programs that embed them -- `export-tests` builds the ARM64 programs
+  without the aarch64 kernel, and on a tree that had no ARM64 DLLs yet
+  it failed outright. The aarch64 kernel's images carry those builds in
+  place of the x64 ones. A program that embeds a DLL embeds its own
+  machine's (`image_test`: `target/<target>/release/testdll.dll`, which
+  the rule below forbids and ROADMAP's stopgaps carry).
 - `export-tests` copies them to `user/bin/arm64/` (CI checks they match
   their sources, as user/bin's); `run-all.ps1` runs only the x64
   programs beside it, an ARM64 Windows runs these.

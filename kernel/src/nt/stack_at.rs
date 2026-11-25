@@ -2,8 +2,10 @@
 //! `stack_at=<service>[:<n>]` logs the calling thread's user stack the
 //! first `n` times a process reaches that system call, and
 //! `stack_from=<text>` keeps only the calls a module whose name contains
-//! `text` is on the stack of. `stack_words=<n>` reads further up the
-//! stack than the default, for a service whose own frame is large.
+//! `text` is on the stack of, and `stack_match=<text>` only the calls
+//! one of whose arguments points at text containing `text`.
+//! `stack_words=<n>` reads further up the stack than the default, for a
+//! service whose own frame is large.
 //!
 //! What it answers: a program stops and nothing gala owns records a gap,
 //! because the decision was made inside a DLL whose source we do not
@@ -12,6 +14,13 @@
 //! window, the first failing open -- each becomes a call path named
 //! `<module>+<offset>`, which is the part of the DLL to look at and the
 //! gala call it reached last.
+//!
+//! A capture also says what the call was made with: the first
+//! [`ARGS_SHOWN`] arguments, and the text any of them points at. That is
+//! what turns "who called this" into "who called this, and for what" --
+//! the name a gap was recorded under (`GalaRecordMissing`), the bytes a
+//! write was about to write, the path an open failed on -- without a
+//! trigger per service.
 //!
 //! The stack is scanned, not unwound: every word of it that points into
 //! a loaded image is named. That brings dead values from earlier frames
@@ -32,6 +41,18 @@
 //! over without spending the count (it is counted, and the line that
 //! says the count is spent says how many were passed over, so a filter
 //! that matches nothing is visible rather than silent).
+//!
+//! Why `stack_match=` exists as well. A module filter cannot separate
+//! the calls one module makes about everything. Every gap a Word
+//! startup records reaches `GalaRecordMissing` through the same two
+//! modules, so `stack_from=` keeps all of them and the gap in question
+//! -- one call of the hundreds, late in the boot -- is behind a count
+//! no number reaches. What tells those calls apart is the argument: the
+//! service's own name for the thing it was asked about, which a capture
+//! already quotes. `stack_match=empty%20path` captures the call that
+//! recorded that gap and passes the rest over, which turns every row of
+//! the ledger into a trigger. The two filters compose: both must want a
+//! call for it to be captured.
 //!
 //! Scope and cost. Off unless `stack_at=` is given, and then one relaxed
 //! load on the system-call path (`armed`); a capture reads at most
@@ -73,11 +94,31 @@ const MAX_SCAN_WORDS: usize = 512;
 /// Captures when `stack_at=` gives no count.
 const DEFAULT_CAPTURES: u32 = 4;
 
+/// Arguments a capture names. Four are in registers on x64 and the rest
+/// on the user stack (`abi::syscall_arg`), and eight is what it takes to
+/// reach the ones that say what a call is about: `NtWriteFile`'s buffer
+/// is its sixth. Past a service's own arguments the values are whatever
+/// its caller left there, as the scanned stack words are: a line is
+/// evidence, not proof.
+const ARGS_SHOWN: usize = 8;
+
+/// The longest text a capture quotes from an argument, and the shortest
+/// run that is quoted at all: a run of three characters or fewer is as
+/// likely the low bytes of a number as a name
+/// (`crashreport::read_text`).
+const ARG_TEXT: usize = 64;
+const ARG_TEXT_LEAST: usize = 4;
+
 /// The most a count may ask for. A number is typed on purpose, so this
 /// is a guard against a typo rather than a budget: when the calls in
 /// between cannot be told apart by `stack_from=`, the one in question
 /// can still be deep into the hundreds.
 const MAX_CAPTURES: u32 = 512;
+
+/// The longest `stack_match=` text. A capture quotes at most
+/// [`ARG_TEXT`] characters of an argument, so a longer text could never
+/// be contained in what it is compared against.
+const MATCH_LEN: usize = ARG_TEXT;
 
 /// The longest service name the option keeps (the table's are shorter).
 const NAME_LEN: usize = 47;
@@ -94,6 +135,11 @@ static FROM: crate::sync::IrqMutex<([u8; FROM_LEN], usize)> =
     crate::sync::IrqMutex::new(([0; FROM_LEN], 0));
 /// Whether `stack_from=` is in force (read before taking its lock).
 static FILTERED: AtomicBool = AtomicBool::new(false);
+/// The text `stack_match=` gave, decoded, empty when it was not given.
+static MATCH: crate::sync::IrqMutex<([u8; MATCH_LEN], usize)> =
+    crate::sync::IrqMutex::new(([0; MATCH_LEN], 0));
+/// Whether `stack_match=` is in force (read before taking its lock).
+static MATCHING: AtomicBool = AtomicBool::new(false);
 /// Captures asked for, and how many are left.
 static ASKED: AtomicU32 = AtomicU32::new(0);
 static LEFT: AtomicU32 = AtomicU32::new(0);
@@ -101,6 +147,9 @@ static LEFT: AtomicU32 = AtomicU32::new(0);
 static WORDS: AtomicU32 = AtomicU32::new(SCAN_WORDS as u32);
 /// Calls of the service that `stack_from=` passed over.
 static PASSED: AtomicU32 = AtomicU32::new(0);
+/// Calls of the service that `stack_match=` passed over. Counted apart
+/// from [`PASSED`] so a line can say which filter turned a call away.
+static UNMATCHED: AtomicU32 = AtomicU32::new(0);
 /// Whether the line saying the count is spent has been logged.
 static SPENT: AtomicBool = AtomicBool::new(false);
 
@@ -172,6 +221,40 @@ pub fn only_from(text: &str) {
     );
 }
 
+/// Keeps the captures to the calls one of whose first [`ARGS_SHOWN`]
+/// arguments points at text containing `text` (a `stack_match=` value).
+/// The value's `%XX` escapes are decoded, because the text wanted is a
+/// service's own name for a thing and those carry spaces
+/// (`stack_match=empty%20path`). Ignored without `stack_at=`, as
+/// `stack_from=` is: a filter alone captures nothing.
+pub fn only_matching(spec: &str) {
+    let mut text = [0u8; MATCH_LEN];
+    let len = crate::cmdline::percent_decode_fixed(spec, &mut text).unwrap_or(0);
+    if len == 0 {
+        warn!(
+            "stack: stack_match={spec} is not 1 to {MATCH_LEN} characters \
+             (the most a capture quotes of an argument) once its %XX escapes are \
+             decoded: no filter"
+        );
+        return;
+    }
+    if !armed() {
+        warn!("stack: stack_match={spec} without stack_at=<service>: nothing to filter");
+        return;
+    }
+    {
+        let mut stored = MATCH.lock();
+        stored.0[..len].copy_from_slice(&text[..len]);
+        stored.1 = len;
+    }
+    MATCHING.store(true, Ordering::Relaxed);
+    info!(
+        "stack: only calls one of whose arguments points at text containing \"{}\" \
+         (stack_match=); the others are passed over and do not spend a capture",
+        core::str::from_utf8(&text[..len]).unwrap_or("?")
+    );
+}
+
 /// `<n>` as a word count, or None when it is not one from 1 to
 /// [`MAX_SCAN_WORDS`] (a depth that silently stayed the default would
 /// be read as the one that was asked for).
@@ -215,10 +298,12 @@ fn wanted(name: &str) -> bool {
         && name.as_bytes().iter().zip(want).all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
-/// Whether `text` contains `want`, ignoring case (module names are
-/// written as the image was named, a command line is not).
-fn contains_ignore_case(text: &str, want: &[u8]) -> bool {
-    let text = text.as_bytes();
+/// Whether `text` contains `want`, ignoring case (a module name is
+/// written as the image was named and an argument's text as the service
+/// was given it, a command line is neither). Bytes rather than `str`:
+/// what an argument points at is read from the program's memory and is
+/// not known to be UTF-8.
+fn contains_ignore_case(text: &[u8], want: &[u8]) -> bool {
     text.len() >= want.len()
         && (0..=text.len() - want.len()).any(|i| {
             text[i..i + want.len()].iter().zip(want).all(|(a, b)| a.eq_ignore_ascii_case(b))
@@ -237,7 +322,7 @@ fn from_wanted(process: &Process, ip: u64, stack: &[u8]) -> bool {
         .chain(stack.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().unwrap_or([0; 8]))));
     for addr in names {
         if let Some(m) = module_at(process, addr)
-            && contains_ignore_case(m.name(), want)
+            && contains_ignore_case(m.name().as_bytes(), want)
         {
             return true;
         }
@@ -245,8 +330,46 @@ fn from_wanted(process: &Process, ip: u64, stack: &[u8]) -> bool {
     false
 }
 
+/// Whether the text one of the call's arguments points at contains what
+/// `stack_match=` named. True when there is no filter. Reads the same
+/// runs a capture quotes, so what the filter chooses by is what the
+/// capture then shows.
+fn match_wanted(process: &Process, args: &[Option<u64>; ARGS_SHOWN]) -> bool {
+    if !MATCHING.load(Ordering::Relaxed) {
+        return true;
+    }
+    // The text is copied out from under its lock before a word of user
+    // memory is read: such a read waits for a page that may not be
+    // there, and a lock may not be held across a wait (which the
+    // kernel's lockdep says in as many words, and did).
+    let (want, len) = {
+        let stored = MATCH.lock();
+        (stored.0, stored.1)
+    };
+    let want = &want[..len];
+    let read = |addr: u64, out: &mut [u8]| process.read(addr, out).is_ok();
+    for value in args.iter().filter_map(|v| *v) {
+        let mut text = [0u8; ARG_TEXT];
+        let chars = super::crashreport::read_text(value, &mut text, &read);
+        if chars >= ARG_TEXT_LEAST && contains_ignore_case(&text[..chars], want) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The call's first [`ARGS_SHOWN`] arguments, `None` for one that could
+/// not be read (a stack argument on a page that is not there).
+fn args_of(call: &Call<'_>) -> [Option<u64>; ARGS_SHOWN] {
+    let mut args = [None; ARGS_SHOWN];
+    for (i, slot) in args.iter_mut().enumerate() {
+        *slot = call.arg(i).ok();
+    }
+    args
+}
+
 /// A system call `name` is starting: capture the caller's stack if this
-/// is the service asked for, the filter wants it and a capture is left.
+/// is the service asked for, the filters want it and a capture is left.
 /// Called from the dispatcher only when [`armed`].
 pub(super) fn on_call(call: &Call<'_>, name: &str) {
     if !wanted(name) || !crate::events::syscall_pid_wanted(call.process.id) {
@@ -256,6 +379,14 @@ pub(super) fn on_call(call: &Call<'_>, name: &str) {
     // costs the service nothing but this load.
     if LEFT.load(Ordering::Relaxed) == 0 {
         report_spent(name);
+        return;
+    }
+    // What the call is about decides before its stack is read:
+    // `stack_match=` needs the arguments only, so a call it turns away
+    // costs the service those reads and not the scan.
+    let args = args_of(call);
+    if !match_wanted(&call.process, &args) {
+        UNMATCHED.fetch_add(1, Ordering::Relaxed);
         return;
     }
     let regs = call.frame.return_regs();
@@ -282,7 +413,7 @@ pub(super) fn on_call(call: &Call<'_>, name: &str) {
         }
     }
     let nth = ASKED.load(Ordering::Relaxed).saturating_sub(left) + 1;
-    capture(&call.process, &regs, &bytes[..read], regs.sp(), name, nth);
+    capture(call, &regs, &bytes[..read], regs.sp(), name, nth, &args);
 }
 
 /// Says once that the count is spent, with what the filter passed over:
@@ -293,20 +424,102 @@ fn report_spent(name: &str) {
         return;
     }
     let asked = ASKED.load(Ordering::Relaxed);
-    let passed = PASSED.load(Ordering::Relaxed);
-    if FILTERED.load(Ordering::Relaxed) {
-        let stored = FROM.lock();
-        let want = core::str::from_utf8(&stored.0[..stored.1]).unwrap_or("?");
+    let filters = Filters::now();
+    if filters.any() {
         info!(
             "stack: {name}: the {asked} captures asked for are spent \
-             ({passed} calls so far did not reach stack_from={want}); \
-             ask for more with stack_at={name}:<n>"
+             ({}); ask for more with stack_at={name}:<n>",
+            filters.skipped(true)
         );
     } else {
         info!(
             "stack: {name}: the {asked} captures asked for are spent; ask for more with \
              stack_at={name}:<n>"
         );
+    }
+}
+
+/// The filters' texts copied out from under their locks, with what each
+/// has passed over. A line is formatted from this rather than from the
+/// locks themselves: the log takes a lock of its own, and a formatter
+/// that held one of these while it did would be taking the two in the
+/// opposite order to every other reader of them.
+struct Filters {
+    from: [u8; FROM_LEN],
+    from_len: usize,
+    from_passed: u32,
+    text: [u8; MATCH_LEN],
+    text_len: usize,
+    text_passed: u32,
+}
+
+impl Filters {
+    /// The filters as they stand, each empty when it is not in force.
+    fn now() -> Self {
+        let mut f = Self {
+            from: [0; FROM_LEN],
+            from_len: 0,
+            from_passed: PASSED.load(Ordering::Relaxed),
+            text: [0; MATCH_LEN],
+            text_len: 0,
+            text_passed: UNMATCHED.load(Ordering::Relaxed),
+        };
+        if FILTERED.load(Ordering::Relaxed) {
+            let stored = FROM.lock();
+            f.from_len = stored.1;
+            f.from[..stored.1].copy_from_slice(&stored.0[..stored.1]);
+        }
+        if MATCHING.load(Ordering::Relaxed) {
+            let stored = MATCH.lock();
+            f.text_len = stored.1;
+            f.text[..stored.1].copy_from_slice(&stored.0[..stored.1]);
+        }
+        f
+    }
+
+    /// Whether either filter is in force.
+    fn any(&self) -> bool {
+        self.from_len != 0 || self.text_len != 0
+    }
+
+    /// What they have passed over, as a line writes it. `so_far` is the
+    /// spent line's wording, which counts the calls not captured yet;
+    /// the closing line's is the whole run's.
+    fn skipped(&self, so_far: bool) -> Skipped<'_> {
+        Skipped { filters: self, so_far }
+    }
+}
+
+/// [`Filters::skipped`]'s clauses: one per filter in force, in the
+/// order the options are read.
+struct Skipped<'a> {
+    filters: &'a Filters,
+    so_far: bool,
+}
+
+impl core::fmt::Display for Skipped<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let f_ = self.filters;
+        let mut clauses = 0;
+        for (len, text, passed, verb, option) in [
+            (f_.from_len, &f_.from[..], f_.from_passed, "reach", "stack_from"),
+            (f_.text_len, &f_.text[..], f_.text_passed, "match", "stack_match"),
+        ] {
+            if len == 0 {
+                continue;
+            }
+            if clauses != 0 {
+                f.write_str(", ")?;
+            }
+            clauses += 1;
+            let want = core::str::from_utf8(&text[..len]).unwrap_or("?");
+            if self.so_far {
+                write!(f, "{passed} calls so far did not {verb} {option}={want}")?;
+            } else {
+                write!(f, "{passed} calls passed over by {option}={want}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -322,12 +535,11 @@ pub fn log_stats() {
     let name = core::str::from_utf8(&stored.0[..stored.1]).unwrap_or("?");
     let asked = ASKED.load(Ordering::Relaxed);
     let taken = asked.saturating_sub(LEFT.load(Ordering::Relaxed));
-    if FILTERED.load(Ordering::Relaxed) {
-        let from = FROM.lock();
-        let want = core::str::from_utf8(&from.0[..from.1]).unwrap_or("?");
+    let filters = Filters::now();
+    if filters.any() {
         info!(
-            "stack: {name}: {taken} captures of the {asked} asked for, {} calls passed over by stack_from={want}",
-            PASSED.load(Ordering::Relaxed)
+            "stack: {name}: {taken} captures of the {asked} asked for, {}",
+            filters.skipped(false)
         );
     } else {
         info!("stack: {name}: {taken} captures of the {asked} asked for");
@@ -352,9 +564,39 @@ fn read_stack(process: &Process, sp: u64, buf: &mut [u8]) -> usize {
     at.wrapping_sub(sp) as usize
 }
 
-/// Logs where `regs` came from: the instruction, then every word of the
-/// already read `stack` that points into a loaded image.
-fn capture(process: &Process, regs: &UserRegs, stack: &[u8], sp: u64, name: &str, nth: u32) {
+/// A capture's arguments as the log writes them: hexadecimal, in order,
+/// and `?` for one that could not be read (a stack argument on a page
+/// that is not there).
+struct Args<'a>(&'a [Option<u64>; ARGS_SHOWN]);
+
+impl core::fmt::Display for Args<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, value) in self.0.iter().enumerate() {
+            if i != 0 {
+                f.write_str(", ")?;
+            }
+            match value {
+                Some(v) => write!(f, "{v:#x}")?,
+                None => f.write_str("?")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Logs what `regs` was called with and where it came from: the
+/// arguments and the text they point at, the instruction, then every
+/// word of the already read `stack` that points into a loaded image.
+fn capture(
+    call: &Call<'_>,
+    regs: &UserRegs,
+    stack: &[u8],
+    sp: u64,
+    name: &str,
+    nth: u32,
+    args: &[Option<u64>; ARGS_SHOWN],
+) {
+    let process = &call.process;
     let tid = super::thread::current()
         .and_then(|t| match &t.body {
             super::object::ObjectBody::Thread(t) => Some(t.id),
@@ -368,6 +610,22 @@ fn capture(process: &Process, regs: &UserRegs, stack: &[u8], sp: u64, name: &str
         ASKED.load(Ordering::Relaxed),
         At::of(process, regs.ip())
     );
+    // What the call was made with, before the stack it was made from:
+    // the values on one line, and a line per argument that points at
+    // text, which is what a service's own name for the thing it was
+    // asked about reads as.
+    info!("stack:   arguments 0-{}: {}", ARGS_SHOWN - 1, Args(args));
+    let read = |addr: u64, out: &mut [u8]| process.read(addr, out).is_ok();
+    for (i, value) in args.iter().enumerate().filter_map(|(i, v)| v.map(|v| (i, v))) {
+        let mut text = [0u8; ARG_TEXT];
+        let chars = super::crashreport::read_text(value, &mut text, &read);
+        if chars >= ARG_TEXT_LEAST {
+            info!(
+                "stack:   argument {i} reads as \"{}\"",
+                core::str::from_utf8(&text[..chars]).unwrap_or("?")
+            );
+        }
+    }
     let mut shown = 0;
     for (i, word) in stack.chunks_exact(8).enumerate() {
         let mut value = [0u8; 8];
@@ -435,12 +693,12 @@ mod tests {
     fn the_filter_is_a_name_fragment_either_case() {
         // `stack_from=wwlib` is how the option is meant to be typed:
         // part of a module's name, in whichever case it comes to hand.
-        assert!(contains_ignore_case("wwlib.dll", b"wwlib"));
-        assert!(contains_ignore_case("WWLIB.DLL", b"wwlib"));
-        assert!(contains_ignore_case("kernel32.dll", b"NEL32"));
-        assert!(contains_ignore_case("d3d11.dll", b"d3d11.dll"));
-        assert!(!contains_ignore_case("d3d11.dll", b"wwlib"));
+        assert!(contains_ignore_case(b"wwlib.dll", b"wwlib"));
+        assert!(contains_ignore_case(b"WWLIB.DLL", b"wwlib"));
+        assert!(contains_ignore_case(b"kernel32.dll", b"NEL32"));
+        assert!(contains_ignore_case(b"d3d11.dll", b"d3d11.dll"));
+        assert!(!contains_ignore_case(b"d3d11.dll", b"wwlib"));
         // Not a fragment of itself the wrong way round.
-        assert!(!contains_ignore_case("wwlib", b"wwlib.dll"));
+        assert!(!contains_ignore_case(b"wwlib", b"wwlib.dll"));
     }
 }

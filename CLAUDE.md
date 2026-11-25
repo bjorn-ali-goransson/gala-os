@@ -47,13 +47,18 @@
   a snapshot (at your own risk)".
 - **When a program stops and nothing records a gap**, do not reach
   for records typed by hand: arm the user-mode stack capture
-  (`stack_at=<service>[:<n>]` with `stack_from=<module>`,
+  (`stack_at=<service>[:<n>]` with `stack_from=<module>` or
+  `stack_match=<text>`,
   OBSERVABILITY "Stack captures", WORKFLOW "When a program stops inside
   a DLL") on the call the program makes at that moment - the write of
   its error message, the first failing open, the free of its window -
   and read the call path out of the `stack:` lines. Name the module in
   `stack_from=`: on a service someone else calls in a loop no count
-  reaches the call in question, and raising it only moves the flood. It is the kernel's answer to "who called this", costs a run,
+  reaches the call in question, and raising it only moves the flood.
+  Where the service is one every ledger row goes through
+  (`GalaRecordMissing`), no module tells its calls apart: name the text
+  instead, `stack_match=empty%20path`, which makes a `ledger:` row the
+  trigger. It is the kernel's answer to "who called this", costs a run,
   needs nothing of the program and works for Microsoft's DLLs as well
   as gala's.
 - Test program sources are checked in, and so are their binaries in

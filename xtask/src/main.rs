@@ -994,6 +994,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("stack_at_from_test", "kernel32.dll", "Windows/System32"),
     ("stack_at_words_test", "ntdll.dll", "Windows/System32"),
     ("stack_at_words_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_match_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_match_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -4509,16 +4511,27 @@ fn build_kernel_aarch64(release: bool) -> Result {
     drop_debug_relocations(&target_dir().join(KERNEL_TARGET_AARCH64).join(profile).join("kernel"))?;
     // Its images' programs and DLLs, built for ARM64 (always optimized,
     // as the x64 ones).
+    build_arm64_programs()
+}
+
+/// The USER_DLLS DLLs that have an ARM64 build (NOT_ARM64_DLLS have
+/// none), built for ARM64.
+fn build_arm64_dlls() -> Result {
     let mut cmd = user_build_for(USER_TARGET_ARM64);
     for dll in USER_DLLS.iter().filter(|d| !NOT_ARM64_DLLS.contains(&d.package)) {
         cmd.args(["--package", dll.package]);
     }
-    run_cmd(&mut cmd)?;
-    build_arm64_programs()
+    run_cmd(&mut cmd)
 }
 
-/// USER_PROGRAMS_ARM64, built for ARM64.
+/// USER_PROGRAMS_ARM64, built for ARM64, after the DLLs they embed --
+/// `image_test` embeds the ARM64 `testdll.dll` with `include_bytes!`,
+/// and cargo orders nothing between two packages that only a path ties
+/// together, so a tree without that DLL fails the build and a tree with
+/// an older one embeds the older bytes (which is what made the exported
+/// `user/bin/arm64/image_test.exe` differ from a cold build's).
 fn build_arm64_programs() -> Result {
+    build_arm64_dlls()?;
     let mut cmd = user_build_for(USER_TARGET_ARM64);
     for program in arm64_programs() {
         cmd.args(["--package", program]);
@@ -12204,9 +12217,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
     Scenario {
         // The ledger's exclusion filter (`ledger_except=`): a gap whose
         // name holds one of the texts is not recorded at all, so the
-        // table's slots go to the rest. The program above fills the
-        // 512-entry table with 600 gaps under one name and reports one
-        // more afterwards, which a full table drops (`ledger_test`
+        // tables' slots go to the rest. The program above fills the
+        // 2048 entries (512 fixed and 1536 the heap gives) with 2100
+        // gaps under one name and reports one more afterwards, which
+        // full tables drop (`ledger_test`
         // expects the `?full` line that says so); with that one name
         // excluded, the later gap has a slot, which is what says the
         // filter freed the table and did not only hide what it matched.
@@ -12226,11 +12240,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
              no slot of the table and no hit",
             "ledger_test: ok",
             "exited with status 0x00000000",
-            // The gap after the 600, which only a freed table records.
+            // The gap after the 2100, which only freed tables record.
             r#"ledger: {"service":"ledger_test.exe!after","what":"other","detail":0,"hits":1,"#,
             // What each text kept out, the one that kept out nothing
             // included.
-            r#"ledger: {"service":"?except","what":"LEDGER_TEST.EXE!FILL","detail":0,"hits":600,"#,
+            r#"ledger: {"service":"?except","what":"LEDGER_TEST.EXE!FILL","detail":0,"hits":2100,"#,
             r#"ledger: {"service":"?except","what":"no_such_gap","detail":0,"hits":0,"#,
             // The two gaps this program asks of Windows as well are
             // recorded as ever: the filter kept out the name it was
@@ -12260,6 +12274,12 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "capture 5 of 5",
             "(kernel32.dll+0x",
             "(stack_at_test.exe+0x",
+            // What the call was made with: NtWriteFile's buffer is its
+            // sixth argument, so the capture quotes the line the write
+            // was about to write (`\r` ends the run, as a character
+            // that is not printable).
+            "stack:   arguments 0-7: ",
+            "stack:   argument 5 reads as \"stack_at_test: raw one\"",
             "stack: NtWriteFile: the 5 captures asked for are spent",
         ],
     },
@@ -12282,8 +12302,41 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "stack: only calls with a module whose name contains \"kernel32\" on the stack",
             "(kernel32.dll+0x",
             "capture 2 of 2",
+            // The filter chose the two writes that went through
+            // kernel32, and the quote says which they were.
+            "stack:   argument 5 reads as \"stack_at_test: k32 one\"",
+            "stack:   argument 5 reads as \"stack_at_test: k32 two\"",
             "the 2 captures asked for are spent (3 calls so far did not reach stack_from=kernel32)",
             "stack: NtWriteFile: 2 captures of the 2 asked for, 3 calls passed over by stack_from=kernel32",
+        ],
+    },
+    Scenario {
+        // The capture's other filter (`stack_match=`): `stack_from=`
+        // chooses by who made the call, which cannot separate calls one
+        // module makes about everything -- every gap a Word startup
+        // records reaches `GalaRecordMissing` through the same modules,
+        // and the one in question is behind hundreds of others. This
+        // filter chooses by what the call is about instead: the text an
+        // argument points at. The program writes six lines; only the
+        // fifth is about "k32 two", so the four calls before it are
+        // passed over without spending the one capture asked for, and
+        // the value carries a space as `%20` (a service's own name for
+        // the thing it was asked about has them).
+        name: "stack_at_match_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:1 \
+                  stack_match=k32%20two events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: only calls one of whose arguments points at text containing \"k32 two\" \
+             (stack_match=)",
+            // The one capture went to the fifth write, not the first.
+            "stack:   argument 5 reads as \"stack_at_test: k32 two\"",
+            "capture 1 of 1",
+            "the 1 captures asked for are spent (4 calls so far did not match stack_match=k32 two)",
+            "stack: NtWriteFile: 1 captures of the 1 asked for, \
+             4 calls passed over by stack_match=k32 two",
         ],
     },
     Scenario {
