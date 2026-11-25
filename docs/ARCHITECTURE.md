@@ -12056,7 +12056,19 @@ stations and desktops a program creates are refused until stage 3).
   application, SKU, license file or license queried, or all of them,
   mapped to the identifiers asked for; none is SL_E_VALUE_NOT_FOUND),
   SLGetLicenseInformation (`licenseId`, `fileId` or an infoStr value as
-  SL_DATA_SZ). Invariants and limits: no product key is ever installed
+  SL_DATA_SZ; an identifier as a value has no braces, where a license
+  file's name and a ledger row keep them -- measured),
+  SLGetProductSkuInformation (a SKU holds no values of its own, so the
+  answer is its generic public end-user license's -- the one license of
+  the SKU whose `licenseType` is `msft:sl/EUL/GENERIC/PUBLIC`, over its
+  proof-of-licence, phone, store and private siblings, measured on seven
+  Windows and Office SKUs: `Name` and `Description` are that license's
+  `productName` and `productDescription`, and every other name reads as
+  in SLGetLicenseInformation, so a name no license carries -- `Channel`,
+  `Version`, `LicenseStatus` -- is SL_E_VALUE_NOT_FOUND, as is an
+  unknown SKU, while a NULL handle, SKU, value name or required output
+  is E_INVALIDARG before the SKU is looked up and the data type stays
+  optional). Invariants and limits: no product key is ever installed
   (SLInstallProofOfPurchase is SL_E_INVALID_PRODUCT_KEY: product keys
   are not decoded against a license's key configuration; the product-key
   queries, SLGetPKeyId and SLGetPKeyInformation among them,
@@ -12069,8 +12081,9 @@ stations and desktops a program creates are refused until stage 3).
   policy can be read (SLGetPolicyInformation and
   SLGetPolicyInformationDWORD SL_E_RIGHT_NOT_GRANTED, which is what
   Windows answers for any value name on a handle that consumed no right
-  -- measured, with E_INVALIDARG for what is not a handle or a NULL
-  required output, and for a NULL value name in the DWORD form alone)
+  -- measured, with E_INVALIDARG for what is not a handle, a NULL
+  required output or a NULL value name, which both forms look at before
+  the right)
   and SLPersistApplicationPolicies has nothing to keep (S_OK), which
   leaves the fast policy path with nothing to load:
   SLLoadApplicationPolicies is SL_E_APPLICATION_POLICIES_MISSING and
