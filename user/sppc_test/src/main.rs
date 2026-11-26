@@ -29,6 +29,15 @@
 //!   Windows 11 24H2, build 26100, where no application has persisted
 //!   policies).
 //!
+//! - no plugin can be registered: SLRegisterPlugin and
+//!   SLUnregisterPlugin, which no public header declares, answer
+//!   SL_E_LUA_ACCESSDENIED once their pointers and their handle are
+//!   good (measured on Windows 11 24H2, build 26100, as the standard
+//!   user Office runs as -- an elevated caller is not measured, and
+//!   this test is not one), E_INVALIDARG for a NULL handle or a NULL
+//!   pointer, the pointers first, and RPC_NT_SS_CONTEXT_MISMATCH for a
+//!   handle that is not one, their handles being RPC context handles.
+//!
 //! The error codes of those failures are printed as `sppc_test: info`
 //! lines (FAILED is checked), to be compared with a Windows run.
 //!
@@ -171,6 +180,8 @@ unsafe extern "system" {
         size: *mut u32,
         value: *mut *mut u8,
     ) -> i32;
+    fn SLRegisterPlugin(h: Handle, plugin: *const u8, out: *mut u8) -> i32;
+    fn SLUnregisterPlugin(h: Handle, plugin: *const u8) -> i32;
 }
 
 const S_OK: i32 = 0;
@@ -183,6 +194,10 @@ const SL_E_RIGHT_NOT_GRANTED: i32 = 0xc004_f013u32 as i32;
 const SL_E_APPLICATION_POLICIES_MISSING: i32 = 0xc004_f072u32 as i32;
 /// SL_E_APPLICATION_POLICIES_NOT_LOADED.
 const SL_E_APPLICATION_POLICIES_NOT_LOADED: i32 = 0xc004_f073u32 as i32;
+/// SL_E_LUA_ACCESSDENIED (slerror.h): the caller is not elevated.
+const SL_E_LUA_ACCESSDENIED: i32 = 0xc004_f025u32 as i32;
+/// RPC_NT_SS_CONTEXT_MISMATCH (ntstatus.h): not a context handle.
+const RPC_NT_SS_CONTEXT_MISMATCH: i32 = 0xc003_0005u32 as i32;
 /// SLIDTYPE.
 const SL_ID_APPLICATION: u32 = 0;
 const SL_ID_PRODUCT_SKU: u32 = 1;
@@ -548,6 +563,46 @@ fn run() -> Result<(), u32> {
     // SAFETY: our handle; a NULL output.
     let hr = unsafe { SLInstallLicense(h, LICENSE.len() as u32, LICENSE.as_ptr(), null_mut()) };
     c.failed(b"SLInstallLicense with a NULL output", hr)?;
+
+    // The plugin registration Office's licensing asks for, which no
+    // public header declares (sppc's SLRegisterPlugin records what was
+    // measured of it). Nothing can be registered without elevation,
+    // which the caller has not, and both pointers are checked before
+    // the handle.
+    let mut slot = 0usize;
+    let out = (&raw mut slot).cast::<u8>();
+    let name = wide("sppc_test-plugin");
+    let plugin = name.as_ptr().cast::<u8>();
+    // SAFETY: our handle, name and output.
+    let hr = unsafe { SLRegisterPlugin(h, plugin, out) };
+    c.code(b"register a plugin", hr, SL_E_LUA_ACCESSDENIED)?;
+    // SAFETY: our handle and name; a NULL output.
+    let hr = unsafe { SLRegisterPlugin(h, plugin, null_mut()) };
+    c.code(b"register a plugin with a NULL output", hr, E_INVALIDARG)?;
+    // SAFETY: our handle and output; a NULL name.
+    let hr = unsafe { SLRegisterPlugin(h, null(), out) };
+    c.code(b"register a NULL plugin", hr, E_INVALIDARG)?;
+    // SAFETY: our name and output; a NULL handle.
+    let hr = unsafe { SLRegisterPlugin(0, plugin, out) };
+    c.code(b"register a plugin on a NULL handle", hr, E_INVALIDARG)?;
+    // SAFETY: not a handle; our output; a NULL name.
+    let hr = unsafe { SLRegisterPlugin(1, null(), out) };
+    c.code(b"a NULL plugin on what is not a handle", hr, E_INVALIDARG)?;
+    // SAFETY: not a handle; our name and output.
+    let hr = unsafe { SLRegisterPlugin(1, plugin, out) };
+    c.code(b"register a plugin on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: our handle and name.
+    let hr = unsafe { SLUnregisterPlugin(h, plugin) };
+    c.code(b"unregister a plugin", hr, SL_E_LUA_ACCESSDENIED)?;
+    // SAFETY: our handle; a NULL name.
+    let hr = unsafe { SLUnregisterPlugin(h, null()) };
+    c.code(b"unregister a NULL plugin", hr, E_INVALIDARG)?;
+    // SAFETY: our name; a NULL handle.
+    let hr = unsafe { SLUnregisterPlugin(0, plugin) };
+    c.code(b"unregister a plugin on a NULL handle", hr, E_INVALIDARG)?;
+    // SAFETY: not a handle; our name.
+    let hr = unsafe { SLUnregisterPlugin(1, plugin) };
+    c.code(b"unregister a plugin on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
 
     round_trip(&mut c, h)?;
 
