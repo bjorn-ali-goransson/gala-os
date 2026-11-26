@@ -12762,8 +12762,39 @@ Roman, ... are found as Selawik, as in gdi32. Every object reachable from
 it is static (AddRef/Release count nothing): factory, collection, family
 (also the font list), fonts, faces (metrics, glyph indices and design
 metrics, font tables in place), files with the local file loader (paths)
-and streams, localized strings (en-us). Each factory method not built
-yet records its own name (`dwrite.dll!IDWriteFactory::<method>`).
+and streams, localized strings (en-us). Each method not built yet
+records its own name, interface and all
+(`dwrite.dll!IDWriteFactory3::GetSystemFontSet`), and a call about an
+interface gala has not got names the whole IID
+(`dwrite.dll!QueryInterface({GUID}): refused`), the first dword naming
+an interface only to a reader who already has the list to match it
+against.
+
+The factory's later revisions (IDWriteFactory1 through 7, each only
+adding methods to the one before) are on Windows the same object, which
+answers every one of their IIDs through QueryInterface and through
+DWriteCreateFactory -- measured, not assumed. gala answers a revision
+when the methods that revision adds exist, and refuses it until then
+(E_NOINTERFACE, the whole IID recorded), the one place DirectWrite
+diverges on purpose: a program asks for the revision it would like and
+takes a fallback when it is refused, while a method answering E_NOTIMPL
+is an answer it did not plan for. Chromium is the measurement -- it asks
+for IDWriteFactory2, and with that answered its first call of it
+(GetSystemFontFallback) ends the browser on a CHECK, where the refusal
+costs it only its font fallback. The vtable is IDWriteFactory7's whole
+length all the same: a program that takes the factory for a later
+revision on the Windows version alone, rather than asking, lands on a
+slot that records the method's name where a word past the end of the
+table would be called as a function, and that is where a revision's
+methods go when one is implemented. Its GDI interop object (`GetGdiInterop`, one per factory on
+Windows, so one static object here), which bridges a font and a
+LOGFONT, answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself;
+none of its methods is built, each recording its own name, so the run of
+a program that wants one names it. Test: `dwrite_test` step 11, which
+takes either answer for a revision -- Windows' object or gala's refusal
+-- because that program runs on Windows too (`user/windows/ci-passing.txt`);
+the refusal itself is pinned by the `dwrite_test` scenario, which expects
+the ledger row with the IID in it.
 
 Custom font files and collections (the renderer's font proxy: its
 collection loader enumerates the browser's handles to the system's font
@@ -12815,7 +12846,10 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
   compatible targets, effects or command lists ("Direct2D" lists them).
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
-  rotation, skew or sideways runs; no text layout, IDWriteFactory1+.
+  rotation, skew or sideways runs; no text layout. The later factory
+  revisions are refused (none of their methods is implemented), and the
+  GDI interop object answers for itself but implements none of its own
+  ("DirectWrite").
 - Mitigation policies are kept, not enforced; no sandbox (stage 3).
 - One Windows Runtime class (PackageManager, with no packages); no
   shell namespace objects, no COM proxies (see their sections).
