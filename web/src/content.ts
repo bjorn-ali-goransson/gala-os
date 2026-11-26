@@ -77,7 +77,7 @@ export const componentGroups: ComponentGroup[] = [
         name: "Networking",
         path: "kernel/src/net",
         status: "works",
-        what: "A virtio network card and a TCP/IP stack (smoltcp), with loopback. TCP and UDP, IPv4 and the IPv6 loopback.",
+        what: "A virtio network card or a USB Ethernet adapter (CDC-ECM or NCM) and a TCP/IP stack (smoltcp), with loopback. TCP and UDP, IPv4 and the IPv6 loopback.",
       },
       {
         name: "Screen and input",
@@ -1025,6 +1025,6 @@ export const usb: {
   limits: [
     "It is tested in virtual machines, booted from a USB stick under BIOS and UEFI, but not yet on physical PCs: expect some not to start it. What the screen shows when one stops is worth reporting.",
     "The keyboard and mouse work as PS/2 devices, or as USB ones plugged in before gala starts (gala's own USB driver reads them, tested in virtual machines; no USB hubs yet, so a keyboard behind a hub or a dock is not seen unless the firmware presents it as PS/2).",
-    "There is no network on a physical PC yet, and no sound.",
+    "There is no network on a physical PC yet (a USB Ethernet adapter is driven, tested in virtual machines, but gala does not yet ask for an address by DHCP), and no sound.",
   ],
 };

@@ -485,8 +485,8 @@ mod live {
             commit: crate::nt::charge::committed().0 * platform::PAGE_SIZE,
             disk_read,
             disk_written,
-            net_received: crate::net::virtio_net::RX_BYTES.load(Ordering::Relaxed),
-            net_sent: crate::net::virtio_net::TX_BYTES.load(Ordering::Relaxed),
+            net_received: crate::net::card::RX_BYTES.load(Ordering::Relaxed),
+            net_sent: crate::net::card::TX_BYTES.load(Ordering::Relaxed),
             has_disk,
             has_network: crate::net::has_card(),
             ..Perf::default()

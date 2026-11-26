@@ -250,7 +250,7 @@ has a section under "Open items".
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b, the RDP server, next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
-| USB | USB: xHCI, keyboards, mice and storage | in progress | xHCI and HID keyboards and mice done (polled, root ports at boot: `usb_input`); next device interrupts, hubs and hot plug, the tablet, storage |
+| USB | USB: xHCI, keyboards, mice and storage | in progress | xHCI and HID keyboards and mice done (polled, root ports at boot: `usb_input`), a CDC-ECM/NCM Ethernet adapter (`usb_net`); next device interrupts, hubs and hot plug, the tablet, storage |
 | IN | The installer: gala onto a machine's disk | in progress (steps 1-4's command: `gala setup` installs, the disk boots: `install_to_disk`) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
 | HW | A real laptop: gala on hardware, waiting for updates | in progress | the target of IN and R8/R9 (the owner): AHCI and NVMe disks (drivers done in QEMU, step 1), USB keyboards and mice (done in QEMU, item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
@@ -1468,8 +1468,11 @@ ports at boot are enumerated, a keyboard is read in the boot protocol,
 a mouse through its report descriptor, and both go into the desktop's
 input as the PS/2 driver's events do. Scenario `usb_input`
 (`usbinput_test` on q35 with `qemu-xhci`, `usb-kbd`, `usb-mouse` and
-no PS/2 controller) types and clicks through QEMU's monitor; host
-tests drive the driver against a model of a controller. A machine with
+no PS/2 controller) types and clicks through QEMU's monitor. A USB
+Ethernet adapter (CDC-ECM or NCM) is the network card where there is
+no virtio-net card (scenario `usb_net`: QEMU's `usb-net`, an echo
+over TCP). Host tests drive the driver against a model of a
+controller. A machine with
 no PS/2 devices and no USB ones still gets the diagnosis (`input: the
 PS/2 controller (ports 0x60 and 0x64) never answered`, scenario
 `no_i8042`). The image boots from a USB stick through the firmware,
@@ -1570,10 +1573,10 @@ waits on DR):
 
 **The cheap way to a network on real hardware** meanwhile, which this
 item does not need: a USB Ethernet adapter over CDC-ECM or NCM on item
-USB's stack, both documented class specifications and no vendor driver
-at all. It gives a real machine a wired network as soon as USB's steps
-1 and 2 are in, and it exercises layer 1 above (a second interface
-that comes and goes).
+USB's stack, done in QEMU (`usb_net`, ARCHITECTURE "USB"; set up at
+boot, used when there is no virtio-net card, the static address until
+layer 1's DHCP). Left: a real adapter on the owner's laptop, and layer
+1 above (an interface that comes and goes).
 
 **Done when** (each layer): its tests pass; the lease, the scan
 results, the supplicant's state machine and every association failure
@@ -8343,8 +8346,9 @@ on x86-64). The disk is virtio-blk, NVMe or AHCI (step 1's drivers,
 tested in QEMU: `disk_test_ahci`, `disk_test_nvme`, their resets,
 `persist_nvme`; not yet on a real machine). USB keyboards and mice
 work through gala's xHCI driver (item USB, `usb_input`; polled, root
-ports at boot); with neither PS/2 nor USB devices the input thread says
-so and stops.
+ports at boot), and a USB Ethernet adapter is the network card where
+there is no virtio-net one (`usb_net`); with neither PS/2 nor USB
+input devices the input thread says so and stops.
 
 **Next** (each test first, in QEMU with the same device, then on the
 owner's laptop):
@@ -8358,8 +8362,9 @@ owner's laptop):
 2. Input: item USB's xHCI and HID keyboards and mice, done in QEMU;
    left: its device interrupts, hubs and hot plug, and the owner's
    laptop's keyboard and touchpad.
-3. A network: a wired USB Ethernet adapter (CDC-ECM/NCM) first, with
-   WF layer 1's DHCP; then Wi-Fi (item WF).
+3. A network: a wired USB Ethernet adapter (CDC-ECM/NCM), done in
+   QEMU (`usb_net`); left: WF layer 1's DHCP (the address is still
+   QEMU's static one), a real adapter on the laptop; then Wi-Fi (item WF).
 4. The screen: the firmware's framebuffer (GOP) on x86-64; on ARM
    laptops what their firmware gives.
 5. Power: the lid, the battery's state, the backlight, sleep (ACPI).

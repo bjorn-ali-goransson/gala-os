@@ -1,8 +1,9 @@
 //! The driver against a model of an xHCI controller: its registers, a
 //! command ring and an event ring it walks and writes in guest memory, and
-//! two full-speed HID devices (a boot keyboard on port 1, a wheel mouse on
-//! port 2) that answer endpoint 0's requests and send the reports a test
-//! gives them.
+//! full-speed devices that answer endpoint 0's requests: HID devices (a
+//! boot keyboard, a wheel mouse) that send the reports a test gives them,
+//! and a CDC Ethernet adapter (ECM or NCM, in its second configuration)
+//! whose bulk endpoints carry the frames a test gives and takes.
 
 use super::*;
 use crate::disk::hw::fake::{Clock, FakeMem, Phys, Shared};
@@ -30,7 +31,16 @@ const WHEEL_MOUSE: &[u8] = &[
 enum What {
     Keyboard,
     Mouse,
+    Net(cdc::Model),
 }
+
+/// The adapter's MAC address and its string (iMACAddress 3).
+const MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+const MAC_STRING: &str = "525400123456";
+/// The adapter's bulk endpoints (0x81 IN, 0x02 OUT): their DCIs.
+const NET_IN_DCI: u8 = 3;
+const NET_OUT_DCI: u8 = 4;
+const NET_MPS: usize = 64;
 
 /// A ring the model reads: where it is and the cycle it expects.
 #[derive(Default, Clone, Copy)]
@@ -83,6 +93,23 @@ struct FakeDevice {
     interval: u32,
     /// Requests that changed state: (request type, request, value).
     requests: Vec<(u8, u8, u16)>,
+    /// The data of requests out (SET_NTB_INPUT_SIZE's).
+    data_out: Vec<Vec<u8>>,
+    /// Endpoint 0 stalls SET_ETHERNET_PACKET_FILTER.
+    filter_stalls: bool,
+    /// Reset Endpoint ran on endpoint 0 since it halted.
+    ep0_reset: bool,
+    /// The bulk endpoints of an adapter.
+    bulk_in: Cursor,
+    bulk_out: Cursor,
+    /// Bulk OUT transfers are left queued (a busy device) until
+    /// `Bus::take_out`.
+    out_paused: bool,
+    /// The bytes of the transfer out being read, the transfers out
+    /// whole (a TRB with IOC ends one), and each TRB's length.
+    out_partial: Vec<u8>,
+    sent: Vec<Vec<u8>>,
+    out_trbs: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -211,6 +238,25 @@ impl Model {
                     self.device(slot).mps0 = mps0;
                     1
                 }
+                TRB_CONFIGURE_ENDPOINT if read(4).count_ones() == 3 => {
+                    // An adapter's two bulk endpoints.
+                    let add = read(4);
+                    let (i, o) = (u32::from(NET_IN_DCI), u32::from(NET_OUT_DCI));
+                    assert_eq!(add, 1 | 1 << i | 1 << o, "configure: add flags");
+                    assert_eq!(read(32) >> 27, o, "context entries");
+                    let mut cursors = [Cursor::default(); 2];
+                    for (n, (dci, ty)) in [(i, 6), (o, 2)].into_iter().enumerate() {
+                        let e = u64::from((1 + dci) * 32);
+                        assert_eq!(read(e + 4) >> 3 & 7, ty, "endpoint type of DCI {dci}");
+                        assert_eq!(read(e + 4) >> 16, NET_MPS as u32, "max packet");
+                        let deq = u64::from(read(e + 8)) | u64::from(read(e + 12)) << 32;
+                        cursors[n] = Cursor::from(deq);
+                    }
+                    let d = self.device(slot);
+                    assert!(matches!(d.what, What::Net(_)));
+                    (d.bulk_in, d.bulk_out) = (cursors[0], cursors[1]);
+                    1
+                }
                 TRB_CONFIGURE_ENDPOINT => {
                     let add = read(4);
                     assert_eq!(add & 1, 1, "configure: the slot context's add flag");
@@ -224,6 +270,22 @@ impl Model {
                     d.dci = dci as u8;
                     d.interval = interval;
                     d.intr = Cursor::from(deq);
+                    1
+                }
+                TRB_RESET_ENDPOINT => {
+                    assert_eq!(trb[3] >> 16 & 0x1f, 1, "reset of endpoint 0");
+                    let d = self.device(slot);
+                    assert!(d.halted, "reset of an endpoint not halted");
+                    d.ep0_reset = true;
+                    1
+                }
+                TRB_SET_TR_DEQUEUE => {
+                    assert_eq!(trb[3] >> 16 & 0x1f, 1, "dequeue of endpoint 0");
+                    let d = self.device(slot);
+                    assert!(d.ep0_reset, "dequeue set before the endpoint was reset");
+                    d.ep0 = Cursor::from(param(&trb));
+                    d.halted = false;
+                    d.ep0_reset = false;
                     1
                 }
                 _ => 9, // TRB error
@@ -250,10 +312,17 @@ impl Model {
                     TRB_SETUP => {
                         assert_ne!(trb[3] & TRB_IDT, 0);
                         d.setup = [trb[0], trb[1]];
-                        if d.stalls {
+                        let filter = trb[0] & 0xffff == 0x4321;
+                        if d.stalls || d.filter_stalls && filter {
                             d.halted = true;
                             events.push([at as u32, (at >> 32) as u32, 6 << 24]);
                         }
+                    }
+                    TRB_DATA if d.setup[0] & 0x80 == 0 => {
+                        let len = (trb[2] & 0x1ffff) as usize;
+                        let mut data = std::vec![0u8; len];
+                        phys.borrow_mut().read(param(&trb), &mut data);
+                        d.data_out.push(data);
                     }
                     TRB_DATA => {
                         let len = (trb[2] & 0x1ffff) as usize;
@@ -292,6 +361,44 @@ impl Model {
             );
         }
     }
+
+    /// An adapter reads the transfers queued on its bulk OUT endpoint.
+    fn bulk_out(&mut self, phys: &Shared, slot: u8) {
+        let mut events = Vec::new();
+        {
+            let d = self.device(slot);
+            if d.out_paused {
+                return;
+            }
+            while let Some((at, trb)) = d.bulk_out.next(phys) {
+                assert_eq!(trb_type(&trb), TRB_NORMAL);
+                let len = (trb[2] & 0x1ffff) as usize;
+                // A packet short of the largest ends the transfer; a
+                // zero-length one is that short packet.
+                let mut data = std::vec![0u8; len];
+                if len != 0 {
+                    phys.borrow_mut().read(param(&trb), &mut data);
+                }
+                d.out_partial.extend_from_slice(&data);
+                d.out_trbs.push(len);
+                if trb[3] & TRB_IOC != 0 {
+                    d.sent.push(core::mem::take(&mut d.out_partial));
+                    events.push(at);
+                }
+            }
+        }
+        for at in events {
+            self.event(
+                phys,
+                [
+                    at as u32,
+                    (at >> 32) as u32,
+                    1 << 24,
+                    TRB_TRANSFER_EVENT << 10 | u32::from(NET_OUT_DCI) << 16 | u32::from(slot) << 24,
+                ],
+            );
+        }
+    }
 }
 
 impl FakeDevice {
@@ -310,13 +417,58 @@ impl FakeDevice {
             dci: 0,
             interval: 0,
             requests: Vec::new(),
+            data_out: Vec::new(),
+            filter_stalls: false,
+            ep0_reset: false,
+            bulk_in: Cursor::default(),
+            bulk_out: Cursor::default(),
+            out_paused: false,
+            out_partial: Vec::new(),
+            sent: Vec::new(),
+            out_trbs: Vec::new(),
         }
+    }
+
+    /// An adapter's configurations: the first a vendor's (RNDIS-like,
+    /// which gala leaves alone), the second the CDC one.
+    fn net_config(model: cdc::Model, index: u16) -> Vec<u8> {
+        let mps = NET_MPS as u8;
+        let mut c = std::vec![9, 2, 0, 0, 2, index as u8 + 1, 0, 0xc0, 50];
+        let (subclass, data_protocol) = match (index, model) {
+            (0, _) => (0x02, 0),
+            (_, cdc::Model::Ecm) => (0x06, 0),
+            (_, cdc::Model::Ncm) => (0x0d, 1),
+        };
+        c.extend_from_slice(&[9, 4, 0, 0, 1, 2, subclass, if index == 0 { 0xff } else { 0 }, 0]);
+        c.extend_from_slice(&[5, 0x24, 0x00, 0x10, 0x01]); // header
+        c.extend_from_slice(&[5, 0x24, 0x06, 0, 1]); // union: data interface 1
+        if index != 0 {
+            c.extend_from_slice(&[13, 0x24, 0x0f, 3, 0, 0, 0, 0, 0xea, 0x05, 0, 0, 0]);
+        }
+        if subclass == 0x0d {
+            c.extend_from_slice(&[6, 0x24, 0x1a, 0x00, 0x01, 0]);
+        }
+        c.extend_from_slice(&[7, 5, 0x83, 3, 16, 0, 32]); // notifications
+        if index != 0 {
+            // The data interface's setting without endpoints.
+            c.extend_from_slice(&[9, 4, 1, 0, 0, 0x0a, 0, data_protocol, 0]);
+        }
+        let alt = if index == 0 { 0 } else { 1 };
+        c.extend_from_slice(&[9, 4, 1, alt, 2, 0x0a, 0, data_protocol, 0]);
+        c.extend_from_slice(&[7, 5, 0x81, 2, mps, 0, 0]);
+        c.extend_from_slice(&[7, 5, 0x02, 2, mps, 0, 0]);
+        let total = c.len() as u16;
+        c[2..4].copy_from_slice(&total.to_le_bytes());
+        c
     }
 
     fn config(&self) -> Vec<u8> {
         let (protocol, report_len, mps) = match self.what {
             What::Keyboard => (1, 63u16, 8),
             What::Mouse => (2, WHEEL_MOUSE.len() as u16, 4),
+            What::Net(model) => {
+                return Self::net_config(model, (self.setup[0] >> 16) as u16 & 0xff);
+            }
         };
         let mut c = std::vec![9, 2, 0, 0, 1, 1, 0, 0xa0, 50];
         c.extend_from_slice(&[9, 4, 0, 0, 1, 3, 1, protocol, 0]);
@@ -342,14 +494,41 @@ impl FakeDevice {
         let request_type = self.setup[0] as u8;
         let request = (self.setup[0] >> 8) as u8;
         let value = (self.setup[0] >> 16) as u16;
+        let net = matches!(self.what, What::Net(_));
         match (request_type, request, value) {
             (0x80, 6, 0x0100) => {
-                let product = if self.what == What::Keyboard { 0x0001 } else { 0x0002 };
+                let (product, configurations) = match self.what {
+                    What::Keyboard => (0x0001, 1),
+                    What::Mouse => (0x0002, 1),
+                    What::Net(_) => (0x0003, 2),
+                };
                 let mut d = std::vec![18, 1, 0x00, 0x02, 0, 0, 0, 8, 0x34, 0x12];
-                d.extend_from_slice(&[product as u8, 0, 0, 1, 0, 0, 0, 1]);
+                d.extend_from_slice(&[product as u8, 0, 0, 1, 0, 0, 0, configurations]);
                 d
             }
             (0x80, 6, 0x0200) => self.config(),
+            (0x80, 6, 0x0201) if net => self.config(),
+            (0x80, 6, 0x0303) if net => {
+                assert_eq!(self.setup[1] & 0xffff, 0x0409, "the string's language");
+                let mut d = std::vec![2 + 2 * MAC_STRING.len() as u8, 3];
+                for c in MAC_STRING.encode_utf16() {
+                    d.extend_from_slice(&c.to_le_bytes());
+                }
+                d
+            }
+            // GET_NTB_PARAMETERS: 16 KiB blocks in, 2 KiB out, datagrams
+            // out aligned to 4.
+            (0xa1, 0x80, 0) if matches!(self.what, What::Net(cdc::Model::Ncm)) => {
+                let mut d = std::vec![0u8; 28];
+                d[0..2].copy_from_slice(&28u16.to_le_bytes());
+                d[2..4].copy_from_slice(&1u16.to_le_bytes());
+                d[4..8].copy_from_slice(&16384u32.to_le_bytes());
+                d[8..10].copy_from_slice(&4u16.to_le_bytes());
+                d[16..20].copy_from_slice(&2048u32.to_le_bytes());
+                d[20..22].copy_from_slice(&4u16.to_le_bytes());
+                d[26..28].copy_from_slice(&0u16.to_le_bytes());
+                d
+            }
             (0x81, 6, 0x2200) if self.what == What::Mouse => WHEEL_MOUSE.to_vec(),
             r => panic!("{:?}: request {r:x?} not modelled", self.what),
         }
@@ -466,8 +645,11 @@ impl Platform for Fake {
             }
             o if (DB + 4..DB + 4 * 33).contains(&o) => {
                 let slot = ((o - DB) / 4) as u8;
+                let net = matches!(m.device(slot).what, What::Net(_));
                 match value {
                     1 => m.control(&self.phys, slot),
+                    t if net && t == u32::from(NET_OUT_DCI) => m.bulk_out(&self.phys, slot),
+                    t if net => assert_eq!(t, u32::from(NET_IN_DCI), "a doorbell for DCI {t}"),
                     t => assert_eq!(
                         t,
                         u32::from(m.device(slot).dci),
@@ -521,6 +703,50 @@ impl Bus {
 
     fn report(&self, port: u8, data: &[u8]) {
         self.complete(port, data, 1);
+    }
+
+    /// The adapter on `port` completes its oldest bulk IN transfer with
+    /// `data` (or fails it with `cc`).
+    fn receive_cc(&self, port: u8, data: &[u8], cc: u32) {
+        let mut m = self.m.borrow_mut();
+        let d = m.devices.iter_mut().find(|d| d.port == port).unwrap();
+        let (at, trb) = d.bulk_in.next(&self.phys).expect("no bulk IN transfer queued");
+        assert_eq!(trb_type(&trb), TRB_NORMAL);
+        let len = (trb[2] & 0x1ffff) as usize;
+        assert!(data.len() <= len, "a frame longer than the transfer");
+        self.phys.borrow_mut().write(param(&trb), data);
+        let cc = if cc == 1 && data.len() < len { 13 } else { cc };
+        let slot = d.slot;
+        m.event(
+            &self.phys,
+            [
+                at as u32,
+                (at >> 32) as u32,
+                cc << 24 | (len - data.len()) as u32,
+                TRB_TRANSFER_EVENT << 10 | u32::from(NET_IN_DCI) << 16 | u32::from(slot) << 24,
+            ],
+        );
+    }
+
+    fn receive(&self, port: u8, data: &[u8]) {
+        self.receive_cc(port, data, 1);
+    }
+
+    /// The adapter on `port` stops or resumes reading its bulk OUT
+    /// transfers (and reads those queued meanwhile).
+    fn pause_out(&self, port: u8, paused: bool) {
+        let mut m = self.m.borrow_mut();
+        let d = m.devices.iter_mut().find(|d| d.port == port).unwrap();
+        d.out_paused = paused;
+        let slot = d.slot;
+        if !paused {
+            m.bulk_out(&self.phys, slot);
+        }
+    }
+
+    fn device<T>(&self, port: u8, f: impl FnOnce(&FakeDevice) -> T) -> T {
+        let m = self.m.borrow();
+        f(m.devices.iter().find(|d| d.port == port).unwrap())
     }
 }
 
@@ -708,4 +934,224 @@ fn intervals() {
     assert_eq!(interval(SPEED_LOW, 255), 10);
     assert_eq!(interval(SPEED_HIGH, 4), 3);
     assert_eq!(interval(4, 1), 0);
+}
+
+fn net(model: cdc::Model) -> FakeDevice {
+    FakeDevice::new(What::Net(model), 1)
+}
+
+/// A frame of `len` bytes whose bytes count from `seed`.
+fn frame(len: usize, seed: u8) -> Vec<u8> {
+    (0..len).map(|i| seed.wrapping_add(i as u8)).collect()
+}
+
+fn receive(x: &mut Xhci<Fake>) -> Option<Vec<u8>> {
+    let mut buf = [0u8; 2048];
+    x.net_receive(&mut buf).map(|n| buf[..n].to_vec())
+}
+
+/// An NTB16 the way a device may build one: the datagrams first, each
+/// aligned to four, then one NDP16 listing them.
+fn ntb(frames: &[&[u8]]) -> Vec<u8> {
+    let mut b = std::vec![0u8; 12];
+    let mut entries = Vec::new();
+    for f in frames {
+        while !b.len().is_multiple_of(4) {
+            b.push(0);
+        }
+        entries.push((b.len() as u16, f.len() as u16));
+        b.extend_from_slice(f);
+    }
+    while !b.len().is_multiple_of(4) {
+        b.push(0);
+    }
+    let ndp = b.len();
+    // At least one entry and the terminator (NCM 1.0 table 3-3).
+    let ndp_len = 8 + 4 * (entries.len() + 1).max(2);
+    b.extend_from_slice(&cdc::NDP16_SIGNATURE.to_le_bytes());
+    b.extend_from_slice(&(ndp_len as u16).to_le_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes());
+    for (index, len) in entries {
+        b.extend_from_slice(&index.to_le_bytes());
+        b.extend_from_slice(&len.to_le_bytes());
+    }
+    b.resize(ndp + ndp_len, 0);
+    let total = b.len() as u16;
+    b[0..4].copy_from_slice(&cdc::NTH16_SIGNATURE.to_le_bytes());
+    b[4..6].copy_from_slice(&12u16.to_le_bytes());
+    b[8..10].copy_from_slice(&total.to_le_bytes());
+    b[10..12].copy_from_slice(&(ndp as u16).to_le_bytes());
+    b
+}
+
+#[test]
+fn an_ecm_adapter_is_set_up_in_its_cdc_configuration() {
+    let (x, bus) = start(std::vec![net(cdc::Model::Ecm)]);
+    assert_eq!(x.devices().collect::<Vec<_>>(), [(1, "CDC-ECM")]);
+    assert_eq!(x.net_mac(), Some((MAC, cdc::Model::Ecm)));
+    bus.device(1, |d| {
+        // SET_CONFIGURATION 2, SET_INTERFACE 1 of interface 1, the
+        // packet filter (directed, broadcast, multicast).
+        assert_eq!(d.requests, [(0x00, 9, 2), (0x01, 11, 1), (0x21, 0x43, 0x0e)]);
+    });
+    assert_eq!(x.strays(), 0);
+}
+
+#[test]
+fn ecm_frames_are_received_round_the_ring() {
+    let (mut x, bus) = start(std::vec![net(cdc::Model::Ecm)]);
+    assert_eq!(receive(&mut x), None);
+    // One at a time, past the slots: each is queued again once read.
+    for i in 0..3 * NET_SLOTS {
+        let f = frame(60 + i, i as u8);
+        bus.receive(1, &f);
+        assert_eq!(receive(&mut x), Some(f));
+    }
+    // A slot's worth at once: read in order.
+    let frames: Vec<_> = (0..NET_SLOTS).map(|i| frame(1514, 7 * i as u8)).collect();
+    for f in &frames {
+        bus.receive(1, f);
+    }
+    for f in &frames {
+        assert_eq!(receive(&mut x).as_ref(), Some(f));
+    }
+    assert_eq!(receive(&mut x), None);
+    assert_eq!((x.stats.errors, x.strays()), (0, 0));
+}
+
+#[test]
+fn ecm_frames_are_sent_with_a_zero_length_packet_when_whole() {
+    let (mut x, bus) = start(std::vec![net(cdc::Model::Ecm)]);
+    let (a, b) = (frame(60, 1), frame(2 * NET_MPS, 2));
+    assert!(x.net_send(&a));
+    assert!(x.net_send(&b));
+    bus.device(1, |d| {
+        assert_eq!(d.sent, [a.clone(), b.clone()]);
+        assert_eq!(d.out_trbs, [60, 2 * NET_MPS, 0]);
+    });
+    // Too long for a slot: dropped.
+    assert!(!x.net_send(&frame(NET_SLOT + 1, 0)));
+}
+
+#[test]
+fn sends_stop_while_every_slot_is_in_flight() {
+    let (mut x, bus) = start(std::vec![net(cdc::Model::Ecm)]);
+    bus.pause_out(1, true);
+    for i in 0..NET_SLOTS {
+        assert!(x.net_send(&frame(100, i as u8)), "frame {i}");
+    }
+    assert!(!x.net_send(&frame(100, 0xff)));
+    bus.pause_out(1, false);
+    assert!(x.net_send(&frame(100, 0xee)));
+    bus.device(1, |d| {
+        assert_eq!(d.sent.len(), NET_SLOTS + 1);
+        assert_eq!(d.sent[NET_SLOTS], frame(100, 0xee));
+    });
+}
+
+#[test]
+fn an_ncm_adapter_sets_its_block_size() {
+    let (x, bus) = start(std::vec![net(cdc::Model::Ncm)]);
+    assert_eq!(x.devices().collect::<Vec<_>>(), [(1, "CDC-NCM")]);
+    assert_eq!(x.net_mac(), Some((MAC, cdc::Model::Ncm)));
+    bus.device(1, |d| {
+        assert_eq!(d.requests, [(0x00, 9, 2), (0x21, 0x86, 0), (0x01, 11, 1), (0x21, 0x43, 0x0e)]);
+        // SET_NTB_INPUT_SIZE: no larger than a slot.
+        assert_eq!(d.data_out, [(NET_SLOT as u32).to_le_bytes().to_vec()]);
+    });
+}
+
+#[test]
+fn ncm_blocks_are_read_a_datagram_at_a_time() {
+    let (mut x, bus) = start(std::vec![net(cdc::Model::Ncm)]);
+    let (a, b, c) = (frame(60, 1), frame(99, 2), frame(1514, 3));
+    bus.receive(1, &ntb(&[&a, &b]));
+    bus.receive(1, &ntb(&[]));
+    bus.receive(1, &ntb(&[&c]));
+    assert_eq!(receive(&mut x), Some(a));
+    assert_eq!(receive(&mut x), Some(b));
+    // The empty block is passed over.
+    assert_eq!(receive(&mut x), Some(c));
+    assert_eq!(receive(&mut x), None);
+    // Blocks keep coming round the slots.
+    for i in 0..2 * NET_SLOTS {
+        let f = frame(70, i as u8);
+        bus.receive(1, &ntb(&[&f]));
+        assert_eq!(receive(&mut x), Some(f));
+    }
+    assert_eq!(x.stats.errors, 0);
+}
+
+#[test]
+fn a_bad_ncm_block_is_counted_and_passed_over() {
+    let (mut x, bus) = start(std::vec![net(cdc::Model::Ncm)]);
+    let mut bad = ntb(&[&frame(60, 1)]);
+    // A datagram beyond the block's end.
+    let ndp = usize::from(u16::from_le_bytes([bad[10], bad[11]]));
+    bad[ndp + 10..ndp + 12].copy_from_slice(&4000u16.to_le_bytes());
+    bus.receive(1, &bad);
+    let good = frame(80, 9);
+    bus.receive(1, &ntb(&[&good]));
+    assert_eq!(receive(&mut x), Some(good));
+    assert_eq!(x.stats.errors, 1);
+}
+
+#[test]
+fn ncm_frames_are_sent_in_blocks() {
+    let (mut x, bus) = start(std::vec![net(cdc::Model::Ncm)]);
+    let (a, b) = (frame(60, 1), frame(1514, 2));
+    assert!(x.net_send(&a));
+    assert!(x.net_send(&b));
+    bus.device(1, |d| {
+        assert_eq!(d.sent.len(), 2);
+        for (block, want) in d.sent.iter().zip([&a, &b]) {
+            let mut got = Vec::new();
+            assert_eq!(cdc::ntb16_frames(block, |f| got.push(f.to_vec())), Ok(1));
+            assert_eq!(got, core::slice::from_ref(want));
+        }
+        // The sequence numbers count up.
+        assert_eq!(&d.sent[0][6..8], &[0, 0]);
+        assert_eq!(&d.sent[1][6..8], &[1, 0]);
+    });
+}
+
+#[test]
+fn a_failed_bulk_transfer_stops_using_the_adapter() {
+    let (mut x, bus) = start(std::vec![net(cdc::Model::Ecm)]);
+    bus.receive_cc(1, &[], 4);
+    assert_eq!(receive(&mut x), None);
+    assert_eq!(x.stats.errors, 1);
+    assert_eq!(x.net_mac(), None);
+    assert!(!x.net_send(&frame(60, 0)));
+    bus.device(1, |d| assert!(d.sent.is_empty()));
+}
+
+#[test]
+fn a_stalled_packet_filter_leaves_the_default() {
+    let mut d = net(cdc::Model::Ecm);
+    d.filter_stalls = true;
+    let (mut x, bus) = start(std::vec![d]);
+    assert_eq!(x.net_mac(), Some((MAC, cdc::Model::Ecm)));
+    let commands = bus.m.borrow().commands.clone();
+    assert!(commands.ends_with(&[TRB_RESET_ENDPOINT, TRB_SET_TR_DEQUEUE]), "{commands:?}");
+    bus.device(1, |d| assert_eq!(d.requests, [(0x00, 9, 2), (0x01, 11, 1)]));
+    // Endpoint 0 and the bulk endpoints still work.
+    let f = frame(64, 5);
+    bus.receive(1, &f);
+    assert_eq!(receive(&mut x), Some(f));
+}
+
+#[test]
+fn a_keyboard_and_an_adapter_together() {
+    let mut devices = std::vec![FakeDevice::new(What::Keyboard, 1)];
+    devices.push(FakeDevice::new(What::Net(cdc::Model::Ecm), 2));
+    let (mut x, bus) = start(devices);
+    assert_eq!(x.devices().collect::<Vec<_>>(), [(1, "keyboard"), (2, "CDC-ECM")]);
+    bus.receive(2, &frame(60, 1));
+    bus.report(1, &[0, 0, 0x04, 0, 0, 0, 0, 0]);
+    assert_eq!(poll(&mut x), [hid::Event::Key { usage: 0x04, down: true }]);
+    assert_eq!(receive(&mut x), Some(frame(60, 1)));
+    assert!(x.net_send(&frame(60, 2)));
+    bus.device(2, |d| assert_eq!(d.sent, [frame(60, 2)]));
+    assert_eq!(x.strays(), 0);
 }

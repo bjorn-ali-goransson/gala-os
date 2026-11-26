@@ -7649,8 +7649,8 @@ that removal parks harmlessly.
 
 ## Networking
 
-The network stack, bottom up: PCI and virtio devices, the virtio-net
-card and the loopback device, smoltcp (`net::stack`), the kernel's own
+The network stack, bottom up: PCI and virtio devices, the card (a
+virtio-net card or a USB Ethernet adapter) and the loopback device, smoltcp (`net::stack`), the kernel's own
 TCP and UDP socket API (`net::tcp`, `net::udp`), the AFD driver that
 gives Windows programs sockets (`nt::afd`), and gala's ws2_32.dll. IPv4
 only. ROADMAP N1 (TCP/IP and sockets) and N2 (Nginx) are the items.
@@ -7690,6 +7690,14 @@ only. ROADMAP N1 (TCP/IP and sockets) and N2 (Nginx) are the items.
   `num_buffers`; no offloads); features MAC (and VERSION_1). It is a smoltcp `Device`; a received frame is copied out
   and its slot reposted at once, a sent frame is copied into a free
   transmit slot (counted as dropped when none is free; TCP retransmits).
+- `net::card`: the card the stack sends on, one smoltcp `Device` over
+  either a virtio-net card or the USB CDC-ECM/NCM adapter `usb` set up
+  ("USB"); `net::init` takes a virtio-net card first, else the adapter
+  (`net: usb CDC-ECM|CDC-NCM adapter, mac ...`). The frame and byte
+  counters (`card::RX_FRAMES` etc.) are the card's, whichever it is.
+  The adapter's frames go through the controller's lock, taken inside
+  the stack's (STACK before USB, never the reverse). Either card has
+  the same address and interface (index 2, "Network interfaces").
 - `net::loopback`: a smoltcp `Device` (medium IP, MTU 16 KiB) whose
   transmitted packets come back as received ones, from a fixed ring of
   buffers. 127.0.0.1/8 lives on its own interface: smoltcp has no
@@ -8084,7 +8092,7 @@ a caller with room for fewer bytes gets STATUS_INFO_LENGTH_MISMATCH.
 | Index | Interface | Address | NetLuidIndex |
 |---|---|---|---|
 | 1 | IF_TYPE_SOFTWARE_LOOPBACK, always | 127.0.0.1/8 | 0 (as Windows numbers it) |
-| 2 | Ethernet, the virtio-net card if present, its MAC | 10.0.2.15/24 | 32768 |
+| 2 | Ethernet, the card if present (virtio-net or the USB adapter), its MAC | 10.0.2.15/24 | 32768 |
 
 gala's iphlpapi (`user/iphlpapi`; `iphlpapi_test`) builds the documented
 netioapi.h tables from them: GetIfTable2(Ex), GetIfEntry2 (MIB_IF_ROW2:
@@ -8289,9 +8297,10 @@ expects.
 ## USB
 
 gala's own xHCI driver (`usb::xhci`, from the xHCI 1.2 specification
-and USB 2.0 chapter 9) and HID (`usb::hid`, HID 1.11 and its usage
-tables), for USB keyboards and mice where a machine has no PS/2 ones
-(ROADMAP USB, HW).
+and USB 2.0 chapter 9), HID (`usb::hid`, HID 1.11 and its usage
+tables), for USB keyboards and mice where a machine has no PS/2 ones,
+and a USB Ethernet adapter (`usb::cdc`, CDC 1.2, ECM 1.2, NCM 1.0), a
+real machine's wired network without a vendor driver (ROADMAP USB, HW).
 
 - **Controller** (`usb::init`): the first PCI function of class
   0c/03/30. The capability registers give the window's length (the
@@ -8308,8 +8317,10 @@ tables), for USB keyboards and mice where a machine has no PS/2 ones
   hubs, no hotplug), at most `MAX_DEVICES` (8). Each port is
   reset, given a slot (Enable Slot, Address Device with the port's
   default max packet size), read (device, then configuration
-  descriptor), configured (Set Configuration), and its first HID
-  interface with an interrupt IN endpoint taken: a keyboard (protocol
+  descriptor; every configuration it has, in order), configured, and
+  either its first HID interface with an interrupt IN endpoint taken
+  (Set Configuration) or, where no configuration has one, its first
+  CDC Ethernet function (below): a keyboard (protocol
   1) is put in the boot protocol, a mouse is read in the report
   protocol through its report descriptor (`hid::MouseLayout`: buttons,
   X, Y, wheel, the report ID; the boot layout where the descriptor
@@ -8323,8 +8334,35 @@ tables), for USB keyboards and mice where a machine has no PS/2 ones
   mouse report gives `hid::Event::Pointer`. `usb::poll` takes a few
   reports at a time under the controller's lock and hands their events
   on with the lock released (the desktop may start a program).
+- **Ethernet adapter** (`usb::cdc`, `Hc::configure_net`): a
+  configuration with a communications interface of subclass ECM (06) or
+  NCM (0d), its union's data interface, the Ethernet functional
+  descriptor (the MAC's string, wMaxSegmentSize) and the data
+  interface's alternate setting with a bulk IN and a bulk OUT endpoint
+  (an adapter's first configuration is often RNDIS: the next is read).
+  Setup: Configure Endpoint for both bulk endpoints (one ring each),
+  SET_CONFIGURATION, the MAC string (twelve hex digits), for NCM
+  GET_NTB_PARAMETERS and SET_NTB_INPUT_SIZE (blocks in no larger than a
+  slot; a datagram alignment gala's blocks do not meet is logged),
+  SET_INTERFACE to that setting, SET_ETHERNET_PACKET_FILTER (directed,
+  broadcast, multicast; a device that stalls it keeps its default,
+  logged, and endpoint 0 is reset: Reset Endpoint, Set TR Dequeue
+  Pointer). Logged as `usb: CDC-ECM|CDC-NCM on port N, mac ..., bulk in
+  A/MPS out A/MPS`. Frames: 8 receive and 8 transmit slots of 2 KiB;
+  every receive slot is queued; a send takes the next free transmit slot
+  (none free: not taken, counted by the stack as dropped). ECM: one
+  frame per transfer, a frame that is a whole number of packets
+  followed by a zero-length packet. NCM: one frame per NTB16 out
+  (`ntb16_build`: header, frame at 12, NDP); a block in is walked with
+  every index and length checked against it (`ntb16_frames`), a bad
+  one counted in `usb::stats` errors and passed over (logged). A failed
+  bulk transfer (any completion code but success or short packet)
+  stops using the adapter (logged with the code); the stack's card is
+  then silent.
 - **Limits**: one controller; root ports only; the first HID interface
-  of a device; the default port speed IDs; control transfers of at most
+  of a device; one Ethernet adapter, used only when there is no
+  virtio-net card, set up at boot (no unplug or replug), no interrupt
+  endpoint (the link is taken as up), one frame per NCM block out; the default port speed IDs; control transfers of at most
   `DATA_LEN` (2 KiB), in or none; no interrupts. Before the reset the
   USB Legacy Support capability, where the firmware has one, is asked
   for the controller (a second's wait; a firmware that does not let go
@@ -8336,12 +8374,19 @@ tables), for USB keyboards and mice where a machine has no PS/2 ones
 - **Tests**: host tests drive the driver against a model of a
   controller (`usb/xhci/tests.rs`: enumeration, reports, rings that
   wrap, a failed transfer, a device that stalls, no devices, a firmware
-  that hands the controller over and one that holds on) and HID's
-  parsing (`usb/hid.rs`);
+  that hands the controller over and one that holds on; an ECM and an
+  NCM adapter: set up in their CDC configuration, frames each way round
+  the rings, the zero-length packet, full slots, bad blocks, a failed
+  transfer, a stalled filter, an adapter beside a keyboard), HID's
+  parsing (`usb/hid.rs`) and CDC's (`usb/cdc/tests.rs`: descriptors,
+  the MAC string, NTB16 blocks good and bad);
   the boot scenario `usb_input` runs `usbinput_test` on q35 with
   `qemu-xhci`, `usb-kbd` and `usb-mouse` and no PS/2 controller
   (`i8042=off`), typing and clicking through QEMU's monitor, paced by
-  the reports the guest read (WORKFLOW "Screen checks").
+  the reports the guest read (WORKFLOW "Screen checks"); `usb_net` boots
+  with `qemu-xhci` and QEMU's `usb-net` (a CDC-ECM function in its
+  second configuration) on user networking and no virtio-net card, and
+  runs `net_echo` against xtask's client.
 
 ## Disk
 
