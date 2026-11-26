@@ -1179,6 +1179,48 @@ static IActivationFilterVtbl FILTER_VTBL = {f_qi, f_addref, f_release, f_handle}
 static IActivationFilter the_filter = {&FILTER_VTBL};
 static IActivationFilter another_filter = {&FILTER_VTBL};
 
+/* ---- The OLE clipboard, as far as a system that owns none can be asked
+   about it: OleIsCurrentClipboard (ROADMAP OF). Word's OART.DLL
+   delay-loads this one, so its absence is not a ledger line and a
+   recorded gap. It is 0xc06d007f and the process gone, which is where
+   WINWORD.EXE ended 31.5 s into office_word.
+
+   Measured on Windows 11: S_FALSE whatever the pointer and whatever the
+   initialisation state, and the pointer is never read -- (IDataObject *)1
+   and 0xdeadbeef are answered, not faulted on. So the function compares
+   an address against whatever this process last put on the clipboard and
+   does nothing else, and with nothing there every address fails the
+   comparison. The documented OLE_E_NOTRUNNING never appears, not even
+   with no apartment at all: a process that never initialised OLE owns no
+   clipboard object, and S_FALSE says exactly that.
+
+   The three functions around it (OleGetClipboard with somewhere to put
+   the object, OleSetClipboard with one, OleFlushClipboard) open the
+   clipboard, which the window station this was measured on refuses --
+   OpenClipboard(NULL) fails with ERROR_ACCESS_DENIED however often it is
+   retried -- so what they answered there is the station's answer and not
+   the contract, and they stay unimplemented until they can be measured
+   from a desktop. Two of their edges did survive it, because the
+   argument check precedes the clipboard: OleGetClipboard(NULL) is
+   E_INVALIDARG in every state, and OleSetClipboard(NULL) is
+   CO_E_NOTINITIALIZED without an apartment. Neither is checked here,
+   because both functions still end the process, which is the honest
+   answer while the rest of them is unknown. */
+static void not_the_clipboard(void) {
+    CHECK(OleIsCurrentClipboard(NULL) == S_FALSE);
+    CHECK(OleIsCurrentClipboard((IDataObject *)(UINT_PTR)1) == S_FALSE);
+    CHECK(OleIsCurrentClipboard((IDataObject *)(UINT_PTR)0xdeadbeef) == S_FALSE);
+}
+
+/* The same answer with OLE up and after it has gone again. */
+static void clipboard_owner(void) {
+    not_the_clipboard();
+    CHECK(OleInitialize(NULL) == S_OK);
+    not_the_clipboard();
+    OleUninitialize();
+    not_the_clipboard();
+}
+
 int main(void) {
     /* CoRegisterActivationFilter, before any apartment exists: the filter
        belongs to the process, so it needs no CoInitializeEx, and it
@@ -1203,7 +1245,9 @@ int main(void) {
         CHECK(combase != NULL && mine != NULL);
         CHECK(GetProcAddress(combase, "CoRegisterActivationFilter") == mine);
     }
+    clipboard_owner();
     CHECK(SUCCEEDED(CoInitializeEx(NULL, COINIT_MULTITHREADED)));
+    not_the_clipboard();
     PROPVARIANT pv;
 
     /* PropVariantClear: values that own nothing, and invalid types. */
@@ -1585,6 +1629,7 @@ int main(void) {
     time_and_numbers();
 
     CoUninitialize();
+    not_the_clipboard();
     CHECK(CoAddRefServerProcess() == 1 && CoAddRefServerProcess() == 2);
     CHECK(CoReleaseServerProcess() == 1 && CoReleaseServerProcess() == 0);
     CHECK(CoSuspendClassObjects() == S_OK && CoResumeClassObjects() == S_OK);

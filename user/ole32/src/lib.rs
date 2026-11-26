@@ -657,6 +657,22 @@ pub extern "system" fn OleUninitialize() {
     CoUninitialize();
 }
 
+/// OleIsCurrentClipboard(data): whether that object is the one this
+/// process put on the OLE clipboard. None ever is -- gala has no OLE
+/// clipboard -- so the answer is S_FALSE, which is what Windows answers
+/// for any object that is not the current one: measured in every
+/// initialisation state, including none at all, where the documented
+/// OLE_E_NOTRUNNING never came. The pointer is not read, as on Windows,
+/// where `(IDataObject *)1` is answered rather than faulted on.
+///
+/// Word's OART.DLL delay-loads this one, so an absent one is not a
+/// recorded gap but an unhandled 0xc06d007f and the process gone.
+#[unsafe(no_mangle)]
+pub extern "system" fn OleIsCurrentClipboard(_data: *mut c_void) -> HResult {
+    reached(b"ole32.dll!OleIsCurrentClipboard(nothing is on the clipboard)", 0);
+    S_FALSE
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn CoUninitialize() {
     let Some(state) = thread_state() else { return };

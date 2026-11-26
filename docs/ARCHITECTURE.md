@@ -5922,6 +5922,25 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   and RoGetAgileReference are built on it. CoRegisterMessageFilter keeps
   an STA's filter (CO_E_NOT_SUPPORTED elsewhere); with no calls between
   apartments it is never called.
+- **The OLE clipboard**: gala has a window station's clipboard ("The
+  clipboard") but no OLE one -- no process has handed ole32 an
+  IDataObject to publish -- so OleIsCurrentClipboard answers S_FALSE,
+  which is what Windows answers about any object that is not the current
+  one. Measured in every initialisation state, including none at all,
+  where the documented OLE_E_NOTRUNNING never came; the pointer is not
+  read, as on Windows, where `(IDataObject *)1` is answered rather than
+  faulted on (`ole32_test`). It matters that this one is an export and
+  not a stub: Word's OART.DLL delay-loads it, and a delay load that
+  resolves to nothing is not a recorded gap but an unhandled 0xc06d007f.
+  OleGetClipboard, OleSetClipboard and OleFlushClipboard open the
+  clipboard and stay unimplemented until they can be measured from a
+  desktop -- the window station the host probes run on refuses it
+  (OpenClipboard fails with ERROR_ACCESS_DENIED however often it is
+  retried), so what they answer there is the station's answer and not
+  the contract. Two edges did survive that, because the argument check
+  precedes the clipboard: OleGetClipboard(NULL) is E_INVALIDARG in every
+  state and OleSetClipboard(NULL) CO_E_NOTINITIALIZED without an
+  apartment.
 - **Windows Runtime** (`winrt.rs`, `roerror.rs`; `api-ms-win-core-winrt-*`
   and combase.dll's forwarders). HSTRINGs: the header is laid out as
   Windows lays it out (flags, length, two unused words, the text
