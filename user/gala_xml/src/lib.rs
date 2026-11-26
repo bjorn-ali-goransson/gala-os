@@ -974,7 +974,21 @@ impl Scan {
             let from = p.pos;
             p.skip_space();
             if p.pos > from {
-                return Ok(Event::Text(p.text[from..p.pos].into()));
+                // That node comes before what follows it only if what
+                // follows is markup or the end of the document. Where
+                // anything else follows -- text, or the NULs a buffer
+                // read to its capacity ends in -- the white space is
+                // not a node at all: the run is consumed and this Read
+                // refuses below, at the first character that is not
+                // white space, which is where Windows' reader puts the
+                // error too. Measured after the root (`xmllite_test`'s
+                // bad documents); before it, where a document that
+                // opens with white space is a matter for the encoding
+                // the stream is sniffed for, the white space is handed
+                // over as it always was.
+                if !(self.root_done && p.pos < p.s.len() && !p.starts("<")) {
+                    return Ok(Event::Text(p.text[from..p.pos].into()));
+                }
             }
             if p.starts("<!--") {
                 return Ok(Event::Comment(p.comment()?));

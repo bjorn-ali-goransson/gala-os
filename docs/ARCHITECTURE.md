@@ -12225,7 +12225,16 @@ the character both from 1, which is how XmlLite counts and, asked
 before the next event, where the node about to be read starts. After a
 start tag `empty_element` says whether the element was written empty,
 which XmlLite's reader reports as IsEmptyElement and hands out no end
-tag for. Every refusal carries what the reader was looking for
+tag for. White space outside the root element is an event of its own
+(`Event::Text`, XmlLite's Whitespace node) only where markup or the end
+of the document follows it; where anything else does -- text, or the
+NULs a buffer read to its capacity ends in -- the run is no node at all:
+it is consumed and that same call refuses, at the first character that
+is not white space, which is where XmlLite puts the error too (measured
+after the root element; before it, where a document opening in white
+space is a matter for the encoding its stream is sniffed for, the white
+space is handed over either way). Every refusal carries what the reader
+was looking for
 (`Reason`) beside its message, so a DLL answers in its own codes
 instead of reading gala's words: msxml6's three XML_E_ codes
 (`parse_into`) and XmlLite's 24 XmlError codes (`user/xmllite`'s
