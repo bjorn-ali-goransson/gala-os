@@ -494,7 +494,7 @@ xtask that change how a scenario boots:
 | `NET_SCENARIOS` | a network card and a host-side client ("Network tests") |
 | `HOST_PAGE_SCENARIOS` | a network card whose 10.0.2.100:80 is a page served from the host (`xtask serve-page`; "Network tests") |
 | `CARD_SCENARIOS` | a network card and nothing connecting to it (the driver's set-up alone: `arm_boot`) |
-| `DISK_SCENARIOS` | a virtio-blk disk, sparse, with the most it may take on the host ("Disk tests") |
+| `DISK_SCENARIOS` | a disk, sparse, with the most it may take on the host; on virtio-blk unless `DISK_CONTROLLERS` names AHCI or NVMe ("Disk tests") |
 | `GPU_SCENARIOS` | a virtio-gpu screen ("GPU tests") |
 | `NO_I8042_SCENARIOS` | `-machine q35,i8042=off`: no PS/2 controller at all, as on a machine whose keyboard and mouse are USB alone (`no_i8042`) |
 | `SCREEN_SCENARIOS` | pixel checks through the QEMU monitor ("Screenshots") |
@@ -778,8 +778,13 @@ what it may take on the host, what xtask writes into the fresh raw
 image, what the image must hold afterwards).
 
 - The image is `target/.../<scenario>.disk.img` next to the ISO,
-  attached as a virtio-blk device; such scenarios boot alone and
-  not in gala-um.
+  attached as a virtio-blk device, or on the controller
+  `DISK_CONTROLLERS` names for the scenario (AHCI: a second `ahci`
+  controller with an `ide-hd`, since q35's own has the CD; NVMe:
+  `nvme,serial=gala0`); such scenarios boot alone and not in gala-um.
+  A driver change runs the scenarios of each controller
+  (`disk_test,disk_test_ahci,disk_test_nvme`, their `disk_reset*`, and
+  `persist_test,persist_nvme`).
 - Raw disk access needs an administrator, so their programs run
   `as=system`.
 - `earlier_boots` boots the same image first (each with the lines its
@@ -4363,7 +4368,11 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   black-box: a move is REL_X, REL_Y and SYN whatever its size, a wheel
   notch three more, a button change one event per button changed and a
   SYN, a key four: down, SYN, up, SYN); the same host test refuses a
-  twin's command it does not know. A twin is screen-checked as its x64
+  twin's command it does not know. USB keyboards and mice (`usb_input`)
+  are counted in HID reports (`input: usb reports read at <address>`;
+  `usb_reports`, measured black-box: a key is a report per keycode QEMU
+  queues, as `ps2_bytes`' bytes, a move a report per 127 on the longer
+  axis, a wheel notch two more, a change of the buttons one). A twin is screen-checked as its x64
   scenario (`screen_check` looks through `twin_base`). Under the
   `events=window` mask, each button change the desktop takes is an
   event `pointer` (where, and what got it: `Start`, `LinuxEntry(0)`,
@@ -5852,7 +5861,7 @@ ARCHITECTURE "Waits".
 | Linux personality (exec, system calls, mmap/brk, ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
 | Linux ABI data (signal frames, sigsets, termios, struct layouts) | `kernel/lx_abi/` |
 | Ramfs, boot-module tar trees | `kernel/src/fs/` |
-| Disk (virtio-blk) | `kernel/src/disk/` |
+| Disk (virtio-blk, NVMe, AHCI; `hw.rs` the drivers' platform and host fakes) | `kernel/src/disk/` |
 | Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |
 | Kernel handover record | `kernel/src/handover/` |
 | gala-um's platform | `kernel/src/hosted/`, `um/` |

@@ -9,8 +9,11 @@
 //! The modules here are shared by the architectures: types in
 //! architecture-neutral terms (`trap`) and drivers that need `unsafe` but
 //! no particular processor (`pci` over the architecture's `pci_config`,
-//! `virtio`).
+//! `virtio`, and `dma` and `mmio`, which give the drivers outside `arch`
+//! device memory and registers without `unsafe` of their own).
 
+pub mod dma;
+pub mod mmio;
 pub mod pci;
 pub mod trap;
 pub mod user_space;

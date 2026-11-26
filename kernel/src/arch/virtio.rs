@@ -12,8 +12,8 @@
 //! (`net::virtio_net`) use the safe API: post a slot, notify, pop used.
 //! No interrupts: drivers poll.
 
+use super::dma::DmaRegion;
 use super::pci::Function;
-use crate::mm::frame::Frame;
 use core::sync::atomic::{Ordering, fence};
 
 const STATUS_ACKNOWLEDGE: u8 = 1;
@@ -28,72 +28,6 @@ const PAGE: usize = 4096;
 
 /// Queues per device (enough for a network card: receive and transmit).
 pub const MAX_QUEUES: usize = 2;
-
-/// Physically contiguous, zeroed, HHDM-mapped memory the device may access.
-struct DmaRegion {
-    start: Frame,
-    pages: u64,
-}
-
-impl DmaRegion {
-    fn new(bytes: usize) -> Option<Self> {
-        let pages = bytes.div_ceil(PAGE) as u64;
-        let start = crate::mm::allocate_frames(pages, 1, crate::mm::Use::Device)?;
-        let region = Self { start, pages };
-        // SAFETY: freshly allocated frames, HHDM-mapped, owned by `region`.
-        unsafe { region.ptr(0).write_bytes(0, region.len()) };
-        Some(region)
-    }
-
-    fn phys(&self) -> u64 {
-        self.start.start()
-    }
-
-    fn len(&self) -> usize {
-        self.pages as usize * PAGE
-    }
-
-    fn ptr(&self, offset: usize) -> *mut u8 {
-        assert!(offset <= self.len(), "DMA offset out of range");
-        core::ptr::with_exposed_provenance_mut(
-            (crate::mm::hhdm_offset() + self.phys()) as usize + offset,
-        )
-    }
-
-    fn read<T: Copy>(&self, offset: usize) -> T {
-        assert!(offset + size_of::<T>() <= self.len() && offset.is_multiple_of(align_of::<T>()));
-        // SAFETY: in bounds and aligned (checked); the region is mapped and
-        // owned; volatile because the device writes it concurrently.
-        unsafe { self.ptr(offset).cast::<T>().read_volatile() }
-    }
-
-    fn write<T: Copy>(&mut self, offset: usize, value: T) {
-        assert!(offset + size_of::<T>() <= self.len() && offset.is_multiple_of(align_of::<T>()));
-        // SAFETY: as in `read`.
-        unsafe { self.ptr(offset).cast::<T>().write_volatile(value) }
-    }
-
-    fn copy_out(&self, offset: usize, out: &mut [u8]) {
-        assert!(offset + out.len() <= self.len());
-        // SAFETY: in bounds (checked); the device does not write a slot
-        // that is not posted (callers check), so the bytes are stable.
-        unsafe { core::ptr::copy_nonoverlapping(self.ptr(offset), out.as_mut_ptr(), out.len()) };
-    }
-
-    fn copy_in(&mut self, offset: usize, data: &[u8]) {
-        assert!(offset + data.len() <= self.len());
-        // SAFETY: as in `copy_out`.
-        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr(offset), data.len()) };
-    }
-}
-
-impl Drop for DmaRegion {
-    fn drop(&mut self) {
-        for i in 0..self.pages {
-            let _ = crate::mm::free_frame(Frame::from_number(self.start.number() + i));
-        }
-    }
-}
 
 /// A split virtqueue whose descriptors each point at a fixed buffer slot:
 /// slot `i` is descriptor `i`, or, in a chained queue, descriptors `2i`

@@ -244,12 +244,12 @@ export const ar: Record<string, string> = {
     "مكدسات النواة وتبديل السياق والمُجدول، على كل معالج، مع الأولويات والتقارب كما تضبطها برامج Windows.",
   "The CPU's counter is calibrated against a reference timer and checked against the real-time clock, so the whole system agrees on the time.":
     "يُعايَر عدّاد المعالج مقابل مؤقت مرجعي ويُتحقّق منه مقابل ساعة الوقت الحقيقي، فيتّفق النظام كله على الوقت.",
-  "C: as a case-insensitive file system with Windows' share modes, kept on a virtio disk as a log that is replayed at the next boot, written back lazily.":
-    "C: نظام ملفات غير حسّاس لحالة الأحرف مع أنماط المشاركة في Windows، محفوظ على قرص virtio كسجل يُعاد تنفيذه عند الإقلاع التالي، ويُكتب بشكل مؤجّل.",
+  "C: as a case-insensitive file system with Windows' share modes, kept on a virtio, NVMe or AHCI disk as a log that is replayed at the next boot, written back lazily.":
+    "C: نظام ملفات غير حسّاس لحالة الأحرف مع أنماط المشاركة في Windows، محفوظ على قرص virtio أو NVMe أو AHCI كسجل يُعاد تنفيذه عند الإقلاع التالي، ويُكتب بشكل مؤجّل.",
   "A virtio network card and a TCP/IP stack (smoltcp), with loopback. TCP and UDP, IPv4 and the IPv6 loopback.":
     "بطاقة شبكة virtio ومكدس TCP/IP ‏(smoltcp)، مع الحلقة الراجعة. TCP وUDP، وIPv4 والحلقة الراجعة في IPv6.",
-  "The bootloader's framebuffer or a virtio-gpu, a PS/2 keyboard and mouse.":
-    "مخزن إطارات مُحمّل الإقلاع أو virtio-gpu، ولوحة مفاتيح وفأرة PS/2.",
+  "The bootloader's framebuffer or a virtio-gpu, a PS/2 or USB keyboard and mouse.":
+    "مخزن إطارات مُحمّل الإقلاع أو virtio-gpu، ولوحة مفاتيح وفأرة PS/2 أو USB.",
   "The running kernel hands the machine to a new kernel image without a reboot, a newer build included, and the programs keep running: blocked threads are reissued and open TCP and UDP connections survive.":
     "تسلّم النواة العاملة الجهاز إلى صورة نواة جديدة دون إعادة تشغيل، حتى لو كانت إصدارًا أحدث، وتستمر البرامج في العمل: تُعاد الطلبات المعلّقة للخيوط المحجوبة وتبقى اتصالات TCP وUDP المفتوحة.",
   "Consoles, jobs, pipe and completion-port requests in flight, the desktop and its windows, IPv6 and raw sockets. While a program uses one of these, a handover refuses and says why.":
@@ -486,8 +486,8 @@ export const ar: Record<string, string> = {
     "binder وبيئة تشغيل Android والرسوميات البرمجية، بدءًا بصور x86_64",
   "every system action described once, so AI clients can use it as a tool and the start menu can take requests in plain language":
     "كل إجراء في النظام موصوف مرة واحدة، فيستخدمه عملاء الذكاء الاصطناعي أداةً، وتتلقى قائمة ابدأ الطلبات بلغة عادية",
-  "virtio-sound with WASAPI on top; xHCI with keyboards, mice and storage":
-    "virtio-sound وفوقه WASAPI؛ وxHCI مع لوحات المفاتيح والفئران والتخزين",
+  "virtio-sound with WASAPI on top; USB storage, hubs and hot plug (USB keyboards and mice already work)":
+    "virtio-sound وفوقه WASAPI؛ وتخزين USB والموزّعات والتوصيل أثناء التشغيل (لوحات مفاتيح USB وفئرانها تعمل بالفعل)",
   "boot the USB image to the desktop and install gala onto the machine's disk, which then boots it by itself":
     "إقلاع صورة USB حتى سطح المكتب وتثبيت gala على قرص الجهاز، الذي يُقلعه بعدها بنفسه",
   "disk, USB, network and power drivers, so a laptop runs gala and takes every update by itself":
@@ -708,8 +708,8 @@ export const ar: Record<string, string> = {
     "قيد العمل",
   "The machine":
     "الآلة",
-  "A PC or a virtual machine: UEFI or BIOS · virtio disk, network and display · PS/2":
-    "حاسوب شخصي أو آلة افتراضية: UEFI أو BIOS · قرص وشبكة وعرض عبر virtio · PS/2",
+  "A PC or a virtual machine: UEFI or BIOS · virtio, NVMe or AHCI disk · virtio network and display · PS/2 or USB input":
+    "حاسوب شخصي أو آلة افتراضية: UEFI أو BIOS · قرص virtio أو NVMe أو AHCI · شبكة وعرض عبر virtio · إدخال PS/2 أو USB",
   "Windows programs are on the left and Linux programs on the right. Both go down to the same core. Everything below the boundary is gala's own design.":
     "برامج Windows على اليمين وبرامج Linux على اليسار. كلاهما ينزل إلى اللبّ نفسه. وكل ما تحت الحد من تصميم gala الخاص.",
   "user mode":
@@ -800,8 +800,8 @@ export const ar: Record<string, string> = {
     "شاشة إقلاع gala، ثم سجل أحداثها يتمرّر أثناء بدء التشغيل، ثم سطح مكتبها مع شريط المهام وقائمة ابدأ. للخروج، اضغط مطولًا على زر التشغيل حتى ينطفئ الحاسوب وأخرج الذاكرة: عندها يبدأ الحاسوب نظامه المعتاد.",
   "It is tested in virtual machines, booted from a USB stick under BIOS and UEFI, but not yet on physical PCs: expect some not to start it. What the screen shows when one stops is worth reporting.":
     "إنها مُختبَرة في آلات افتراضية، بإقلاع من ذاكرة USB عبر BIOS وUEFI، لكن ليس بعدُ على حواسيب فعلية: توقّع ألّا يشغّلها بعضها. وما تعرضه الشاشة حين يتوقف أحدها يستحق الإبلاغ عنه.",
-  "The keyboard and mouse work where they reach gala as PS/2 devices: a laptop's built-in keyboard often does, and many PCs present USB ones that way while their firmware's USB legacy support is on. gala's own USB driver is planned.":
-    "تعمل لوحة المفاتيح والفأرة حين تصلان إلى gala كأجهزة PS/2: وهذا حال لوحة المفاتيح المدمجة في الحواسيب المحمولة غالبًا، وتقدّم حواسيب كثيرة أجهزة USB بهذه الطريقة ما دام دعم USB القديم في برنامجها الثابت مفعّلًا. أما مُشغّل USB الخاص بـ gala فمُخطّط.",
+  "The keyboard and mouse work as PS/2 devices, or as USB ones plugged in before gala starts (gala's own USB driver reads them, tested in virtual machines; no USB hubs yet, so a keyboard behind a hub or a dock is not seen unless the firmware presents it as PS/2).":
+    "تعمل لوحة المفاتيح والفأرة كأجهزة PS/2، أو كأجهزة USB موصولة قبل بدء gala (يقرؤها مُشغّل USB الخاص بـ gala، وقد اختُبر في آلات افتراضية؛ ولا موزّعات USB بعد، فلوحة مفاتيح خلف موزّع أو منصة توصيل لا تُرى ما لم يقدّمها البرنامج الثابت كجهاز PS/2).",
   "There is no network on a physical PC yet, and no sound.":
     "لا شبكة على الحاسوب الفعلي بعد، ولا صوت.",
   "Run it from a USB stick":

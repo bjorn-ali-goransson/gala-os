@@ -3061,6 +3061,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "usbinput_test"
+version = "0.1.0"
+
+[[package]]
 name = "user32"
 version = "0.1.0"
 dependencies = [

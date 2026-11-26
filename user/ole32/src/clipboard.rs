@@ -30,7 +30,7 @@
 use core::ffi::c_void;
 
 use super::{
-    CO_E_NOTINITIALIZED, E_POINTER, HResult, S_FALSE, S_OK, missing, put, reached, thread_state,
+    CO_E_NOTINITIALIZED, E_INVALIDARG, HResult, S_FALSE, S_OK, missing, put, reached, thread_state,
 };
 
 const E_FAIL: HResult = 0x8000_4005u32 as i32;
@@ -96,11 +96,13 @@ pub extern "system" fn OleSetClipboard(data: *mut c_void) -> HResult {
 /// OleGetClipboard(ppDataObj): a data object for what is on the
 /// clipboard, Win32 formats wrapped included. gala has no such wrapper
 /// yet, so there is nothing to hand back; the gate is not consulted
-/// (measured).
+/// (measured). A NULL ppDataObj is E_INVALIDARG in every state, the
+/// argument checked before the clipboard is reached, which is what made
+/// that one measurable from a window station that refuses the clipboard.
 #[unsafe(no_mangle)]
 pub extern "system" fn OleGetClipboard(out: *mut *mut c_void) -> HResult {
     if out.is_null() {
-        return E_POINTER;
+        return E_INVALIDARG;
     }
     put(out, core::ptr::null_mut());
     missing(b"ole32.dll!OleGetClipboard(no data object over the clipboard)", 0);
