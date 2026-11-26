@@ -13,7 +13,7 @@
 //! - a NULL output pointer fails;
 //! - the policy getters answer SL_E_RIGHT_NOT_GRANTED while no right has
 //!   been consumed on the handle, whatever the value name, and
-//!   E_INVALIDARG for what is not a handle or a NULL required output
+//!   E_INVALIDARG for a NULL handle or a NULL required output
 //!   (measured on Windows 11 24H2, build 26100; the data type of
 //!   SLGetPolicyInformation is optional, and the two differ over the
 //!   value name: the DWORD form refuses a NULL one, its sibling answers
@@ -37,6 +37,30 @@
 //!   this test is not one), E_INVALIDARG for a NULL handle or a NULL
 //!   pointer, the pointers first, and RPC_NT_SS_CONTEXT_MISMATCH for a
 //!   handle that is not one, their handles being RPC context handles.
+//!
+//! - and that last answer is every call's: a handle no SLOpen gave,
+//!   never opened or closed, is RPC_NT_SS_CONTEXT_MISMATCH from each
+//!   call that takes one, the arguments looked at first, while a NULL
+//!   handle is E_INVALIDARG (measured on Windows 11 24H2, build
+//!   26100, call by call).
+//!
+//! - offline activation stops at the store: for a SKU that is not
+//!   installed SLGenerateOfflineInstallationId answers
+//!   SL_E_VALUE_NOT_FOUND and leaves its output untouched, while
+//!   SLDepositOfflineConfirmationId answers
+//!   SL_E_PRODUCT_SKU_NOT_INSTALLED for that same SKU, before it reads
+//!   either string; the Ex forms refuse every activation info that is
+//!   not NULL with E_INVALIDARG (measured, this machine belonging to no
+//!   Active Directory). What they answer for a SKU that is installed is
+//!   gala's own (SL_E_PKEY_NOT_INSTALLED, no product key being
+//!   installed), so it is checked in the round trip, which Windows
+//!   skips.
+//!
+//! - a SKU the store does not hold is SL_E_PRODUCT_SKU_NOT_INSTALLED
+//!   (0xC004F015) from SLGetLicensingStatusInformation and
+//!   SLConsumeRight, which both require an application identifier
+//!   (E_INVALIDARG for a NULL one, measured, where a NULL SKU is
+//!   taken).
 //!
 //! The error codes of those failures are printed as `sppc_test: info`
 //! lines (FAILED is checked), to be compared with a Windows run.
@@ -80,6 +104,16 @@ struct LicensingStatus {
     total_grace_days: u32,
     reason: i32,
     validity_expiration: u64,
+}
+
+/// SL_ACTIVATION_INFO_HEADER (slpublic.h): what the Ex forms of the
+/// offline activation calls take, and refuse outside an Active
+/// Directory.
+#[repr(C)]
+struct ActivationInfo {
+    size: u32,
+    /// SL_ACTIVATION_TYPE: 0 default, 1 Active Directory.
+    kind: u32,
 }
 
 #[link(name = "kernel32", kind = "raw-dylib")]
@@ -182,6 +216,34 @@ unsafe extern "system" {
     ) -> i32;
     fn SLRegisterPlugin(h: Handle, plugin: *const u8, out: *mut u8) -> i32;
     fn SLUnregisterPlugin(h: Handle, plugin: *const u8) -> i32;
+    fn SLConsumeRight(
+        h: Handle,
+        app: *const Guid,
+        sku: *const Guid,
+        right: *const u16,
+        reserved: usize,
+    ) -> i32;
+    fn SLUninstallProofOfPurchase(h: Handle, pkey: *const Guid) -> i32;
+    fn SLGenerateOfflineInstallationId(h: Handle, sku: *const Guid, out: *mut *mut u16) -> i32;
+    fn SLGenerateOfflineInstallationIdEx(
+        h: Handle,
+        sku: *const Guid,
+        activation: *const ActivationInfo,
+        out: *mut *mut u16,
+    ) -> i32;
+    fn SLDepositOfflineConfirmationId(
+        h: Handle,
+        sku: *const Guid,
+        installation: *const u16,
+        confirmation: *const u16,
+    ) -> i32;
+    fn SLDepositOfflineConfirmationIdEx(
+        h: Handle,
+        sku: *const Guid,
+        activation: *const ActivationInfo,
+        installation: *const u16,
+        confirmation: *const u16,
+    ) -> i32;
 }
 
 const S_OK: i32 = 0;
@@ -190,6 +252,11 @@ const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
 const SL_E_VALUE_NOT_FOUND: i32 = 0xc004_f012u32 as i32;
 /// SL_E_RIGHT_NOT_GRANTED.
 const SL_E_RIGHT_NOT_GRANTED: i32 = 0xc004_f013u32 as i32;
+/// SL_E_PKEY_NOT_INSTALLED.
+const SL_E_PKEY_NOT_INSTALLED: i32 = 0xc004_f014u32 as i32;
+/// SL_E_PRODUCT_SKU_NOT_INSTALLED (not 0xC004F069, which is
+/// SL_E_MISMATCHED_PRODUCT_SKU).
+const SL_E_PRODUCT_SKU_NOT_INSTALLED: i32 = 0xc004_f015u32 as i32;
 /// SL_E_APPLICATION_POLICIES_MISSING.
 const SL_E_APPLICATION_POLICIES_MISSING: i32 = 0xc004_f072u32 as i32;
 /// SL_E_APPLICATION_POLICIES_NOT_LOADED.
@@ -452,11 +519,11 @@ fn run() -> Result<(), u32> {
     let hr =
         unsafe { SLGetProductSkuInformation(h, &NOBODY, null(), &mut ty, &mut size, &mut value) };
     c.code(b"a SKU's information with a NULL value name", hr, E_INVALIDARG)?;
-    // SAFETY: not a handle; our identifier, name and outputs.
+    // SAFETY: a NULL handle; our identifier, name and outputs.
     let hr = unsafe {
         SLGetProductSkuInformation(0, &NOBODY, name.as_ptr(), &mut ty, &mut size, &mut value)
     };
-    c.code(b"a SKU's information on what is not a handle", hr, E_INVALIDARG)?;
+    c.code(b"a SKU's information on a NULL handle", hr, E_INVALIDARG)?;
     // SAFETY: our handle, name and outputs; a NULL identifier.
     let hr = unsafe {
         SLGetProductSkuInformation(h, null(), name.as_ptr(), &mut ty, &mut size, &mut value)
@@ -469,9 +536,9 @@ fn run() -> Result<(), u32> {
     // SAFETY: our handle, name and output.
     let hr = unsafe { SLGetPolicyInformationDWORD(h, name.as_ptr(), &mut v) };
     c.code(b"a policy no right grants", hr, SL_E_RIGHT_NOT_GRANTED)?;
-    // SAFETY: not a handle; our name and output.
+    // SAFETY: a NULL handle; our name and output.
     let hr = unsafe { SLGetPolicyInformationDWORD(0, name.as_ptr(), &mut v) };
-    c.code(b"SLGetPolicyInformationDWORD of what is not a handle", hr, E_INVALIDARG)?;
+    c.code(b"SLGetPolicyInformationDWORD on a NULL handle", hr, E_INVALIDARG)?;
     // SAFETY: our handle and name; a NULL output.
     let hr = unsafe { SLGetPolicyInformationDWORD(h, name.as_ptr(), null_mut()) };
     c.code(b"SLGetPolicyInformationDWORD with a NULL output", hr, E_INVALIDARG)?;
@@ -488,9 +555,9 @@ fn run() -> Result<(), u32> {
     // SAFETY: our handle and outputs; a NULL name.
     let hr = unsafe { SLGetPolicyInformation(h, null(), &mut ty, &mut size, &mut value) };
     c.code(b"a policy with a NULL value name", hr, E_INVALIDARG)?;
-    // SAFETY: not a handle; our name and outputs.
+    // SAFETY: a NULL handle; our name and outputs.
     let hr = unsafe { SLGetPolicyInformation(0, name.as_ptr(), &mut ty, &mut size, &mut value) };
-    c.code(b"SLGetPolicyInformation of what is not a handle", hr, E_INVALIDARG)?;
+    c.code(b"SLGetPolicyInformation on a NULL handle", hr, E_INVALIDARG)?;
     // SAFETY: our handle and name; NULL required outputs.
     let hr = unsafe { SLGetPolicyInformation(h, name.as_ptr(), &mut ty, null_mut(), null_mut()) };
     c.code(b"SLGetPolicyInformation with NULL outputs", hr, E_INVALIDARG)?;
@@ -538,7 +605,24 @@ fn run() -> Result<(), u32> {
     let hr = unsafe {
         SLGetLicensingStatusInformation(h, &NOBODY, null(), null(), &mut n, &mut null_mut())
     };
-    c.failed(b"status of an application not installed", hr)?;
+    c.code(b"status of an application not installed", hr, SL_E_PRODUCT_SKU_NOT_INSTALLED)?;
+    // An application identifier is required; the SKU is not.
+    // SAFETY: our handle and identifier; a NULL application.
+    let hr = unsafe {
+        SLGetLicensingStatusInformation(h, null(), &NOBODY, null(), &mut n, &mut null_mut())
+    };
+    c.code(b"status of a NULL application", hr, E_INVALIDARG)?;
+    // The right of a SKU that is not installed, which SLConsumeRight
+    // answers the same way, and which also requires an application.
+    // SAFETY: our handle and identifiers; no right named.
+    let hr = unsafe { SLConsumeRight(h, &NOBODY, &NOBODY, null(), 0) };
+    c.code(b"a right of a SKU not installed", hr, SL_E_PRODUCT_SKU_NOT_INSTALLED)?;
+    // SAFETY: our handle and identifier; a NULL application.
+    let hr = unsafe { SLConsumeRight(h, null(), &NOBODY, null(), 0) };
+    c.code(b"a right of a NULL application", hr, E_INVALIDARG)?;
+    // SAFETY: our handle and identifier.
+    let hr = unsafe { SLUninstallProofOfPurchase(h, &NOBODY) };
+    c.failed(b"uninstall a product key not installed", hr)?;
 
     // What is not a license, or not a product key.
     let mut file = NOBODY;
@@ -563,6 +647,140 @@ fn run() -> Result<(), u32> {
     // SAFETY: our handle; a NULL output.
     let hr = unsafe { SLInstallLicense(h, LICENSE.len() as u32, LICENSE.as_ptr(), null_mut()) };
     c.failed(b"SLInstallLicense with a NULL output", hr)?;
+
+    // Offline activation: the Installation ID a telephone or web
+    // activation is done with, and the Confirmation ID it answers.
+    // Nothing is installed under NOBODY, so neither call reaches a
+    // product key, and the two differ over the code for it; no failure
+    // touches the output.
+    let mut marker = 0u16;
+    let sentinel = &raw mut marker;
+    let mut iid_out = sentinel;
+    let iid = wide("123456");
+    let cid = wide("654321");
+    let empty = wide("");
+    let default_info = ActivationInfo { size: 8, kind: 0 };
+    // SAFETY: our handle, identifier and output.
+    let hr = unsafe { SLGenerateOfflineInstallationId(h, &NOBODY, &mut iid_out) };
+    c.code(b"an installation id for a SKU not installed", hr, SL_E_VALUE_NOT_FOUND)?;
+    c.ok(iid_out == sentinel, iid_out as usize as u64)?;
+    // SAFETY: our handle and output; a NULL identifier.
+    let hr = unsafe { SLGenerateOfflineInstallationId(h, null(), &mut iid_out) };
+    c.code(b"an installation id for a NULL SKU", hr, E_INVALIDARG)?;
+    c.ok(iid_out == sentinel, iid_out as usize as u64)?;
+    // SAFETY: our handle and identifier; a NULL output.
+    let hr = unsafe { SLGenerateOfflineInstallationId(h, &NOBODY, null_mut()) };
+    c.code(b"an installation id into a NULL output", hr, E_INVALIDARG)?;
+    // SAFETY: our identifier and output; a NULL handle.
+    let hr = unsafe { SLGenerateOfflineInstallationId(0, &NOBODY, &mut iid_out) };
+    c.code(b"an installation id on a NULL handle", hr, E_INVALIDARG)?;
+    // The Ex form takes no activation info outside an Active Directory.
+    // SAFETY: our handle, identifier and output; no activation info.
+    let hr = unsafe { SLGenerateOfflineInstallationIdEx(h, &NOBODY, null(), &mut iid_out) };
+    c.code(b"an installation id without activation info", hr, SL_E_VALUE_NOT_FOUND)?;
+    c.ok(iid_out == sentinel, iid_out as usize as u64)?;
+    // SAFETY: our handle, identifier, activation info and output.
+    let hr = unsafe { SLGenerateOfflineInstallationIdEx(h, &NOBODY, &default_info, &mut iid_out) };
+    c.code(b"an installation id with activation info", hr, E_INVALIDARG)?;
+    c.ok(iid_out == sentinel, iid_out as usize as u64)?;
+    // The deposit answers the other code for the same SKU, before it
+    // reads either string.
+    // SAFETY: our handle, identifier and strings.
+    let hr = unsafe { SLDepositOfflineConfirmationId(h, &NOBODY, iid.as_ptr(), cid.as_ptr()) };
+    c.code(b"a confirmation id for a SKU not installed", hr, SL_E_PRODUCT_SKU_NOT_INSTALLED)?;
+    // SAFETY: our handle and identifier; two empty strings.
+    let hr = unsafe { SLDepositOfflineConfirmationId(h, &NOBODY, empty.as_ptr(), empty.as_ptr()) };
+    c.code(b"a confirmation id of empty strings", hr, SL_E_PRODUCT_SKU_NOT_INSTALLED)?;
+    // SAFETY: our handle and strings; a NULL identifier.
+    let hr = unsafe { SLDepositOfflineConfirmationId(h, null(), iid.as_ptr(), cid.as_ptr()) };
+    c.code(b"a confirmation id for a NULL SKU", hr, E_INVALIDARG)?;
+    // SAFETY: our handle, identifier and string; a NULL installation id.
+    let hr = unsafe { SLDepositOfflineConfirmationId(h, &NOBODY, null(), cid.as_ptr()) };
+    c.code(b"a confirmation id of a NULL installation id", hr, E_INVALIDARG)?;
+    // SAFETY: our handle, identifier and string; a NULL confirmation id.
+    let hr = unsafe { SLDepositOfflineConfirmationId(h, &NOBODY, iid.as_ptr(), null()) };
+    c.code(b"a NULL confirmation id", hr, E_INVALIDARG)?;
+    // SAFETY: our identifier and strings; a NULL handle.
+    let hr = unsafe { SLDepositOfflineConfirmationId(0, &NOBODY, iid.as_ptr(), cid.as_ptr()) };
+    c.code(b"a confirmation id on a NULL handle", hr, E_INVALIDARG)?;
+    // SAFETY: our handle, identifier and strings; no activation info.
+    let hr =
+        unsafe { SLDepositOfflineConfirmationIdEx(h, &NOBODY, null(), iid.as_ptr(), cid.as_ptr()) };
+    c.code(b"a confirmation id without activation info", hr, SL_E_PRODUCT_SKU_NOT_INSTALLED)?;
+    // SAFETY: our handle, identifier, activation info and strings.
+    let hr = unsafe {
+        SLDepositOfflineConfirmationIdEx(h, &NOBODY, &default_info, iid.as_ptr(), cid.as_ptr())
+    };
+    c.code(b"a confirmation id with activation info", hr, E_INVALIDARG)?;
+
+    // A handle no SLOpen gave: every call that takes one answers
+    // RPC_NT_SS_CONTEXT_MISMATCH once its arguments are good, the
+    // handles of Windows' own sppc.dll being RPC context handles. One
+    // that is not a multiple of eight is never read.
+    const STALE: Handle = 1;
+    let vname = wide("Name");
+    // SAFETY: not a handle.
+    let hr = unsafe { SLClose(STALE) };
+    c.code(b"close what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our blob and output.
+    let hr = unsafe { SLInstallLicense(STALE, LICENSE.len() as u32, LICENSE.as_ptr(), &mut file) };
+    c.code(b"install a license on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our identifier.
+    let hr = unsafe { SLUninstallLicense(STALE, &NOBODY) };
+    c.code(b"uninstall a license on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    let (hr, _) = ids(STALE, SL_ID_APPLICATION, &NOBODY, SL_ID_PRODUCT_SKU, &mut out);
+    c.code(b"a SLID list on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our identifier, name and outputs.
+    let hr = unsafe {
+        SLGetLicenseInformation(STALE, &NOBODY, vname.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.code(b"a license's information on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: as above.
+    let hr = unsafe {
+        SLGetProductSkuInformation(STALE, &NOBODY, vname.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.code(b"a SKU's information on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our identifier and outputs.
+    let hr = unsafe {
+        SLGetLicensingStatusInformation(STALE, &NOBODY, null(), null(), &mut n, &mut null_mut())
+    };
+    c.code(b"a status on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our identifiers.
+    let hr = unsafe { SLConsumeRight(STALE, &NOBODY, &NOBODY, null(), 0) };
+    c.code(b"a right on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our name and outputs.
+    let hr =
+        unsafe { SLGetPolicyInformation(STALE, vname.as_ptr(), &mut ty, &mut size, &mut value) };
+    c.code(b"a policy on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our name and output.
+    let hr = unsafe { SLGetPolicyInformationDWORD(STALE, vname.as_ptr(), &mut v) };
+    c.code(b"a DWORD policy on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our strings and output.
+    let hr = unsafe {
+        SLInstallProofOfPurchase(STALE, alg.as_ptr(), key.as_ptr(), 0, null(), &mut pkey)
+    };
+    c.code(b"install a product key on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our strings and output.
+    let hr = unsafe { SLGetPKeyId(STALE, alg.as_ptr(), key.as_ptr(), 0, null(), &mut pkey) };
+    c.code(b"a product key's identifier on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our identifier.
+    let hr = unsafe { SLUninstallProofOfPurchase(STALE, &NOBODY) };
+    c.code(b"uninstall a product key on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our identifier and outputs.
+    let hr = unsafe { SLGetInstalledProductKeyIds(STALE, &NOBODY, &mut n, &mut list) };
+    c.code(b"the product keys on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our identifier, name and outputs.
+    let hr = unsafe {
+        SLGetPKeyInformation(STALE, &NOBODY, vname.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.code(b"a product key's information on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // SAFETY: not a handle; our identifier and output.
+    let hr = unsafe { SLGenerateOfflineInstallationId(STALE, &NOBODY, &mut iid_out) };
+    c.code(b"an installation id on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    c.ok(iid_out == sentinel, iid_out as usize as u64)?;
+    // SAFETY: not a handle; our identifier and strings.
+    let hr = unsafe { SLDepositOfflineConfirmationId(STALE, &NOBODY, iid.as_ptr(), cid.as_ptr()) };
+    c.code(b"a confirmation id on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
 
     // The plugin registration Office's licensing asks for, which no
     // public header declares (sppc's SLRegisterPlugin records what was
@@ -717,6 +935,32 @@ fn round_trip(c: &mut Checks, h: Handle) -> Result<(), u32> {
     info(b"reason of an unlicensed SKU", reason);
     // SAFETY: allocated by the function with LocalAlloc.
     unsafe { LocalFree(status.cast()) };
+
+    // The SKU is installed, so offline activation gets past the store
+    // and stops at the product key store, which is empty: the reason
+    // the status gives, and what SLGetPKeyId and
+    // SLGetInstalledProductKeyIds answer. This is gala's answer, not a
+    // measured one -- asking Windows about an installed SKU would make
+    // an Installation ID out of this machine's product key -- and it
+    // runs only where the license was taken, as the rest of this round
+    // trip does.
+    let mut marker = 0u16;
+    let sentinel = &raw mut marker;
+    let mut iid_out = sentinel;
+    // SAFETY: our handle, identifier and output.
+    let hr = unsafe { SLGenerateOfflineInstallationId(h, &SKU, &mut iid_out) };
+    c.code(b"an installation id for an installed SKU", hr, SL_E_PKEY_NOT_INSTALLED)?;
+    c.ok(iid_out == sentinel, iid_out as usize as u64)?;
+    let iid = wide("123456");
+    let cid = wide("654321");
+    // SAFETY: our handle, identifier and strings.
+    let hr = unsafe { SLDepositOfflineConfirmationId(h, &SKU, iid.as_ptr(), cid.as_ptr()) };
+    c.code(b"a confirmation id for an installed SKU", hr, SL_E_PKEY_NOT_INSTALLED)?;
+    // The right its license grants nobody, no product key being
+    // installed.
+    // SAFETY: our handle and identifiers; no right named.
+    let hr = unsafe { SLConsumeRight(h, &APP, &SKU, null(), 0) };
+    c.code(b"a right of an installed SKU", hr, SL_E_RIGHT_NOT_GRANTED)?;
 
     // Another handle sees the store.
     let mut other: Handle = 0;
