@@ -5725,6 +5725,27 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   registration keeps the object alive until it has (a revoke meanwhile
   puts the registration out of reach and leaves its reference for the
   borrow to give back).
+- **The class COM serves out of itself** (`class.rs`):
+  CLSID_GlobalOptions has no registry identity at all -- ProgIDFromCLSID
+  and OleRegGetUserType are both REGDB_E_CLASSNOTREG on Windows too --
+  and COM answers for it out of itself, which is why a class store that
+  only knows the registry can never find it; Word's `IfrInitOle` boot
+  task creates it before it opens a document. Measured (`com_test`) and
+  answered here: the in-process contexts answer and CLSCTX_LOCAL_SERVER
+  on its own is REGDB_E_CLASSNOTREG, there being no server; the class
+  object is an IClassFactory and an IUnknown and nothing else, and its
+  instances are IGlobalOptions and IUnknown and nothing else; every
+  CreateInstance is its own object over state that belongs to the
+  process, so an object made after a Set reads what was set; the
+  properties are 1..=8 and a number outside that range is E_INVALIDARG,
+  as are a value outside a property's enumeration and a Query with
+  nowhere to put the answer; COMGLB_APPID is not readable at all
+  (E_FAIL). The defaults are the ones Windows answers rather than the
+  ones it documents: PRIVATE_POOL for the RPC thread pool and HYBRID for
+  the unmarshaling policy, 0 for the rest. A value is kept and read back
+  and nothing acts on it, which the row `ole32.dll!IGlobalOptions::Set
+  (kept, no effect)` says: gala has no exception handling to turn off,
+  no RPC thread pool and no unmarshaling to police.
 - **Objects in streams and storages** (`persist.rs`): a persisted
   object is its
   class id and then whatever the object writes. WriteClassStm writes

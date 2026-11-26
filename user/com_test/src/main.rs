@@ -19,6 +19,10 @@
 //!   CoCreateGuid (random version-4 GUIDs), CoGetClassObject
 //!   (REGDB_E_CLASSNOTREG), CLSIDFromProgID (CO_E_CLASSSTRING),
 //!   ProgIDFromCLSID (REGDB_E_CLASSNOTREG, the output null),
+//!   CLSID_GlobalOptions (the class COM serves out of itself with no
+//!   registry key: in-process contexts only, an IClassFactory whose
+//!   instances are IGlobalOptions over per-process state),
+//!   ProgIDFromCLSID (REGDB_E_CLASSNOTREG, the output null),
 //!   CreateStreamOnHGlobal (an IStream: write, seek, read, stat),
 //!   CoCreateFreeThreadedMarshaler (IMarshal), CoWaitForMultipleHandles
 //!   (RPC_S_CALLPENDING on timeout).
@@ -161,6 +165,13 @@ unsafe extern "system" {
         clsid: *const Guid,
         context: u32,
         info: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> HResult;
+    fn CoCreateInstance(
+        clsid: *const Guid,
+        outer: *mut c_void,
+        context: u32,
         iid: *const Guid,
         out: *mut *mut c_void,
     ) -> HResult;
@@ -356,6 +367,14 @@ const NOBODY: Guid = *b"gala-no-such-cls";
 /// Two CLSIDs of this test's own, for the running objects.
 const CLSID_RUNNING: Guid = *b"gala-running-obj";
 const CLSID_OTHER: Guid = *b"gala-other-objct";
+
+/// CLSID_GlobalOptions: a class COM serves out of itself, with no
+/// registry key of any kind. `cguid.h` declares `CLSID_GlobalOptions`
+/// and `uuid.lib` carries the value; `objidlbase.h` declares
+/// `IGlobalOptions` as `MIDL_INTERFACE("0000015B-0000-0000-C000-...")`.
+const CLSID_GLOBALOPTIONS: Guid = ole_iid(0x34b);
+const IID_IGLOBALOPTIONS: Guid = ole_iid(0x15b);
+const IID_ICLASSFACTORY: Guid = ole_iid(1);
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -711,6 +730,191 @@ fn memory_guids_classes(c: &mut Checks) -> Result<(), u32> {
         c.eq(index.into(), 1)?;
         CloseHandle(e);
         CloseHandle(set);
+    }
+    Ok(())
+}
+
+/// Entry 3 of IGlobalOptions: Set(property, value).
+fn global_set(obj: *mut c_void, property: u32, value: usize) -> HResult {
+    // SAFETY: an IGlobalOptions of ours.
+    unsafe { call!(obj, 3, fn(u32, usize) -> HResult, property, value) }
+}
+
+/// Entry 4 of IGlobalOptions: Query(property, out).
+fn global_query(obj: *mut c_void, property: u32, value: *mut usize) -> HResult {
+    // SAFETY: an IGlobalOptions of ours, and the caller's output.
+    unsafe { call!(obj, 4, fn(u32, *mut usize) -> HResult, property, value) }
+}
+
+/// CLSID_GlobalOptions, the class Word's OLE startup creates before it
+/// opens a document: COM answers for it out of itself, with no registry
+/// key, so a class store that only knows the registry can never find it.
+///
+/// What Windows does: in-process contexts answer and an out-of-process
+/// one is REGDB_E_CLASSNOTREG; the class object is an IClassFactory and
+/// nothing else; every CreateInstance is a different object, over state
+/// that belongs to the process (a fresh object sees what an earlier one
+/// set); the properties are 1..=8, a number outside that range and a
+/// value outside a property's range are both E_INVALIDARG, COMGLB_APPID
+/// is not readable at all, and a Query with nowhere to put the answer is
+/// E_INVALIDARG. Property 7 (RESERVED2) reads back a value that differs
+/// from machine to machine, so nothing here asks for it.
+fn global_options(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: ole32 calls with buffers of ours (inside the MTA).
+    unsafe {
+        // No registry identity at all, so no ProgID.
+        let mut text = 7 as *mut u16;
+        c.eq(hr(ProgIDFromCLSID(&CLSID_GLOBALOPTIONS, &mut text)), 0x8004_0154)?;
+        c.ok(text.is_null(), text as u64)?;
+
+        // INPROC_SERVER, INPROC_HANDLER and CLSCTX_ALL all answer.
+        for context in [1u32, 2, 23] {
+            let mut obj = 7 as *mut c_void;
+            let r = CoGetClassObject(
+                &CLSID_GLOBALOPTIONS,
+                context,
+                core::ptr::null_mut(),
+                &IID_ICLASSFACTORY,
+                &mut obj,
+            );
+            c.eq(hr(r), S_OK)?;
+            c.ok(!obj.is_null(), context.into())?;
+            release(obj);
+        }
+        // LOCAL_SERVER on its own does not: there is no server.
+        let mut obj = 7 as *mut c_void;
+        let r = CoGetClassObject(
+            &CLSID_GLOBALOPTIONS,
+            4,
+            core::ptr::null_mut(),
+            &IID_ICLASSFACTORY,
+            &mut obj,
+        );
+        c.eq(hr(r), 0x8004_0154)?; // REGDB_E_CLASSNOTREG
+        c.ok(obj.is_null(), obj as u64)?;
+
+        // IUnknown gets the same class object.
+        let mut unk = 7 as *mut c_void;
+        let r = CoGetClassObject(
+            &CLSID_GLOBALOPTIONS,
+            1,
+            core::ptr::null_mut(),
+            &IID_IUNKNOWN,
+            &mut unk,
+        );
+        c.eq(hr(r), S_OK)?;
+        c.ok(!unk.is_null(), unk as u64)?;
+        release(unk);
+
+        let mut cf = 7 as *mut c_void;
+        let r = CoGetClassObject(
+            &CLSID_GLOBALOPTIONS,
+            1,
+            core::ptr::null_mut(),
+            &IID_ICLASSFACTORY,
+            &mut cf,
+        );
+        c.eq(hr(r), S_OK)?;
+
+        // The class object is a factory and an IUnknown, and nothing else.
+        let mut other = 7 as *mut c_void;
+        c.eq(hr(query(cf, &IID_IUNKNOWN, &mut other)), S_OK)?;
+        release(other);
+        let mut other = 7 as *mut c_void;
+        c.eq(hr(query(cf, &IID_ICLASSFACTORY, &mut other)), S_OK)?;
+        release(other);
+        let mut other = 7 as *mut c_void;
+        c.eq(hr(query(cf, &IID_IMARSHAL, &mut other)), 0x8000_4002)?; // E_NOINTERFACE
+        c.ok(other.is_null(), other as u64)?;
+
+        // IClassFactory::CreateInstance (entry 3), and the call Word makes.
+        let mut g = 7 as *mut c_void;
+        let r = call!(
+            cf,
+            3,
+            fn(*mut c_void, *const Guid, *mut *mut c_void) -> HResult,
+            core::ptr::null_mut(),
+            &IID_IGLOBALOPTIONS,
+            &mut g
+        );
+        c.eq(hr(r), S_OK)?;
+        c.ok(!g.is_null(), g as u64)?;
+
+        let mut g2 = 7 as *mut c_void;
+        let r = CoCreateInstance(
+            &CLSID_GLOBALOPTIONS,
+            core::ptr::null_mut(),
+            1,
+            &IID_IGLOBALOPTIONS,
+            &mut g2,
+        );
+        c.eq(hr(r), S_OK)?;
+        // Not a singleton: every create is its own object.
+        c.ok(!g2.is_null() && g2 != g, g2 as u64)?;
+
+        // The object is an IGlobalOptions and an IUnknown; it does not
+        // marshal.
+        let mut other = 7 as *mut c_void;
+        c.eq(hr(query(g, &IID_IUNKNOWN, &mut other)), S_OK)?;
+        release(other);
+        let mut other = 7 as *mut c_void;
+        c.eq(hr(query(g, &IID_IGLOBALOPTIONS, &mut other)), S_OK)?;
+        release(other);
+        let mut other = 7 as *mut c_void;
+        c.eq(hr(query(g, &IID_IMARSHAL, &mut other)), 0x8000_4002)?; // E_NOINTERFACE
+        c.ok(other.is_null(), other as u64)?;
+
+        // The defaults, read before anything is set. The SDK documents 0
+        // for all of them; this build answers PRIVATE_POOL for the thread
+        // pool and HYBRID for the unmarshaling policy.
+        for (property, want) in [(1u32, 0u64), (3, 1), (4, 0), (5, 2), (6, 0), (8, 0)] {
+            let mut v = 7usize;
+            c.eq(hr(global_query(g, property, &mut v)), S_OK)?;
+            c.eq(v as u64, want)?;
+        }
+        let mut v = 7usize;
+        c.eq(hr(global_query(g, 2, &mut v)), 0x8000_4005)?; // E_FAIL: COMGLB_APPID
+        for property in [0u32, 9, 10] {
+            let mut v = 7usize;
+            c.eq(hr(global_query(g, property, &mut v)), E_INVALIDARG)?;
+        }
+        c.eq(hr(global_query(g, 1, core::ptr::null_mut())), E_INVALIDARG)?;
+
+        // What Office sets. The value is checked as well as the property.
+        c.eq(hr(global_set(g, 1, 2)), S_OK)?; // DONOT_HANDLE_ANY
+        c.eq(hr(global_set(g, 3, 1)), S_OK)?; // PRIVATE_POOL
+        c.eq(hr(global_set(g, 5, 1)), S_OK)?; // STRONG
+        c.eq(hr(global_set(g, 0, 0)), E_INVALIDARG)?;
+        c.eq(hr(global_set(g, 9, 0)), E_INVALIDARG)?;
+        c.eq(hr(global_set(g, 1, 99)), E_INVALIDARG)?;
+
+        // The three Sets took, and the refused one left the property alone.
+        for (property, want) in [(1u32, 2u64), (3, 1), (5, 1)] {
+            let mut v = 7usize;
+            c.eq(hr(global_query(g, property, &mut v)), S_OK)?;
+            c.eq(v as u64, want)?;
+        }
+
+        // The state is the process's, not the object's.
+        let mut g3 = 7 as *mut c_void;
+        let r = CoCreateInstance(
+            &CLSID_GLOBALOPTIONS,
+            core::ptr::null_mut(),
+            1,
+            &IID_IGLOBALOPTIONS,
+            &mut g3,
+        );
+        c.eq(hr(r), S_OK)?;
+        for (property, want) in [(1u32, 2u64), (3, 1), (5, 1)] {
+            let mut v = 7usize;
+            c.eq(hr(global_query(g3, property, &mut v)), S_OK)?;
+            c.eq(v as u64, want)?;
+        }
+
+        release(g3);
+        release(g2);
+        release(g);
+        release(cf);
     }
     Ok(())
 }
@@ -1222,6 +1426,7 @@ fn run() -> Result<(), u32> {
     task_allocator(&mut c)?;
     apartments(&mut c)?;
     memory_guids_classes(&mut c)?;
+    global_options(&mut c)?;
     automation(&mut c)?;
     conversions(&mut c)?;
     // After apartments(), which leaves this thread in the MTA.
