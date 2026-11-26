@@ -10649,6 +10649,45 @@ then riched20.dll).
   ANSI_CHARSET.) EnumFontsW is EnumFontFamiliesExW with DEFAULT_CHARSET
   (ENUMLOGFONTEXW and NEWTEXTMETRICEXW start with what FONTENUMPROCW
   takes).
+  GetOutlineTextMetricsW and GetOutlineTextMetricsA answer the metrics a
+  program needs beyond TEXTMETRIC: the design box, the typographic and
+  Macintosh ascents, the sub- and superscript boxes, the rules, the
+  PANOSE numbers and the four names. The whole answer is the 232-byte
+  struct (the same size in both forms) followed by the family, face,
+  style and full names, and the `otmp*Name` fields are **byte offsets
+  from the start of the struct**, not pointers, whatever their PSTR
+  declaration says -- which is what lets a program copy the answer about.
+  With no buffer the answer is that size; a buffer shorter than the
+  struct is filled as far as it goes and that much is the answer, its
+  `otmSize` still the whole; a buffer with room for the struct but not
+  for the names is refused outright and nothing is written; a buffer with
+  room to spare is cleared past the answer. All measured
+  (`gdi32_test`). Every field but two is a field of the realized file's
+  head, hhea, OS/2 or post table scaled to the em (`font::outline`) and
+  rounded to the nearest pixel, and the two are GDI's own fakes:
+  `otmsCapEmHeight` is half the em and `otmsXHeight` a quarter of it
+  whatever the face says (Arial's OS/2 carries a cap height of 1467 units
+  -- 11 pixels at an em of 16 -- and GDI answers 8). `otmfsSelection`
+  carries the realized style, with a slant gala synthesized in it the way
+  Windows reports one it simulated: bit 0 set, the regular bit giving way
+  to it, and nothing elsewhere -- an Impact italic, which has no italic
+  face, answers an italic angle of 0 and the upright slope. Where the
+  family enumerates italics of its own the face a program selected does
+  exist as far as every other call is concerned, so the slant is named in
+  the face and style names too ("Arial Bold Italic") and the angle is
+  gala's own quarter-height shear, -140 tenths of a degree with a slope
+  of 4 up to 1 along, not a design angle of a file gala does not have.
+  The bitmap fixed-pitch families answer the shape a raster face answers
+  on Windows (measured on MS Sans Serif and Small Fonts): the fields the
+  bitmaps have, an em square that is the strike's em in pixels rather
+  than a design grid, PANOSE's first four numbers, and no style or full
+  name at all. Every answer leaves a "reached" row with the family and
+  the size of the answer
+  (`gdi32.dll!GetOutlineTextMetricsW(<family>)`), so a program building a
+  font list is on the stream whether or not it then says anything itself
+  -- Word's print boot task (`IfrInitPrint`) reads these for the
+  emergency DC's font, and a refusal there was the whole of what it
+  reported.
 - **Older calls** (`older.rs`, Delphi's VCL): GetTextExtentPointW is
   GetTextExtentPoint32W, CreatePenIndirect CreatePen, UnrealizeObject
   TRUE for brushes and palettes (nothing realized to reset),
@@ -10662,7 +10701,7 @@ then riched20.dll).
   (BeginPath .. WidenPath, PolyBezierTo; drawing is direct), enhanced
   metafiles (NULL/FALSE/0), printing (no DC is a printer DC: SP_ERROR),
   OpenGL pixel formats (no ICD: 0/FALSE), GetICMProfileW,
-  GetOutlineTextMetricsW, EnumFontFamiliesExA, ExtEscape (0, the escape
+  EnumFontFamiliesExA, ExtEscape (0, the escape
   not implemented), GdiComment, and the kernel-mode display thunks
   DXVK imports (19 `D3DKMT*` functions: STATUS_NOT_SUPPORTED, recorded;
   DXVK calls them only for resources shared between devices).

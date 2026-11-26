@@ -132,6 +132,17 @@
  *   enumerates under that name. A weight between a family's faces
  *   realizes as the nearer one (350 as 400, 600 as 700). NUMFONTS is
  *   0: a display has no device fonts.
+ * - GetOutlineTextMetrics: the whole answer is the struct followed by
+ *   the family, face, style and full names, and the otmp*Name fields are
+ *   byte offsets from the start of the struct, not pointers; with no
+ *   buffer it answers that size. A buffer shorter than the struct is
+ *   filled as far as it goes and that is the answer; one with room for
+ *   the struct but not for the names is refused and nothing is written.
+ *   otmTextMetrics is GetTextMetricsW's answer byte for byte,
+ *   otmsCapEmHeight and otmsXHeight are half the em and a quarter of it
+ *   whatever the face, otmfsSelection carries the realized style (0x40
+ *   regular, 0x20 bold, 0x01 italic) and the style name is composed into
+ *   the face name ("Arial Bold Italic").
  * - Older calls Delphi's VCL makes: GetTextExtentPointW measures as
  *   GetTextExtentPoint32W; CreatePenIndirect makes a pen (OBJ_PEN);
  *   UnrealizeObject is TRUE for a brush; RectVisible: TRUE for a
@@ -1332,6 +1343,151 @@ static void font_families(void) {
     DeleteDC(dc);
 }
 
+/* The answer is the struct followed by the four names, so a static
+ * buffer with a sentinel in it shows how much was written. */
+static unsigned char otm_buf[1024];
+
+static void otm_fill(void) {
+    memset(otm_buf, 0xcd, sizeof otm_buf);
+}
+
+static UINT otm_touched(void) {
+    UINT n = 0;
+    for (UINT i = 0; i < sizeof otm_buf; i++)
+        if (otm_buf[i] != 0xcd)
+            n = i + 1;
+    return n;
+}
+
+static HFONT otm_select(HDC dc, const WCHAR *face, LONG height, LONG weight, BYTE italic, HGDIOBJ *old) {
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof lf);
+    lf.lfHeight = height;
+    lf.lfWeight = weight;
+    lf.lfItalic = italic;
+    lf.lfCharSet = ANSI_CHARSET;
+    lstrcpynW(lf.lfFaceName, face, LF_FACESIZE);
+    HFONT font = CreateFontIndirectW(&lf);
+    CHECK(font != NULL);
+    *old = SelectObject(dc, font);
+    return font;
+}
+
+/* What a program reading OUTLINETEXTMETRIC gets. Word's print boot task
+ * (IfrInitPrint) reads it for the emergency DC's font while it builds its
+ * font list, and a zero there is the whole of what it reports. */
+static void outline_metrics(void) {
+    HDC dc = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    CHECK(dc != NULL);
+    HGDIOBJ old;
+    HFONT font = otm_select(dc, L"Arial", -16, FW_NORMAL, 0, &old);
+    OUTLINETEXTMETRICW *o = (OUTLINETEXTMETRICW *)otm_buf;
+
+    /* With no buffer: the size of the whole answer, struct and names. */
+    UINT need = GetOutlineTextMetricsW(dc, 0, NULL);
+    CHECK(need > sizeof(OUTLINETEXTMETRICW) && need < sizeof otm_buf);
+    otm_fill();
+    CHECK(GetOutlineTextMetricsW(dc, need, o) == need);
+    CHECK(o->otmSize == need && otm_touched() == need);
+    CHECK(o->otmFiller == 0);
+
+    TEXTMETRICW tm;
+    CHECK(GetTextMetricsW(dc, &tm) && memcmp(&o->otmTextMetrics, &tm, sizeof tm) == 0);
+
+    /* The otmp*Name fields are byte offsets from the start of the struct,
+     * not pointers: the names follow it, family face style full. */
+    size_t family = (size_t)o->otmpFamilyName, face = (size_t)o->otmpFaceName;
+    size_t style = (size_t)o->otmpStyleName, full = (size_t)o->otmpFullName;
+    CHECK(family == sizeof(OUTLINETEXTMETRICW));
+    CHECK(family < face && face < style && style < full && full < need);
+    CHECK(lstrcmpW((WCHAR *)(otm_buf + family), L"Arial") == 0);
+    CHECK(lstrcmpW((WCHAR *)(otm_buf + face), L"Arial") == 0);
+    CHECK(lstrcmpW((WCHAR *)(otm_buf + style), L"Regular") == 0);
+    CHECK(*(WCHAR *)(otm_buf + full) != 0); /* the vendor's own full name */
+
+    /* Half the em and a quarter of it, whatever the face: Arial, Segoe UI
+     * and Courier New all answer so, at every size from 8 to 64. */
+    LONG em = tm.tmHeight - tm.tmInternalLeading;
+    CHECK(o->otmsCapEmHeight == (UINT)((em + 1) / 2));
+    CHECK(o->otmsXHeight == (UINT)((em + 2) / 4));
+
+    CHECK(o->otmEMSquare == 2048); /* Arial's em, and Selawik's */
+    CHECK(o->otmfsSelection == 0x40 && o->otmItalicAngle == 0); /* regular, upright */
+    CHECK(o->otmAscent > 0 && o->otmDescent < 0 && o->otmLineGap >= 0);
+    CHECK(o->otmMacAscent > o->otmAscent && o->otmMacDescent < 0);
+    CHECK(o->otmrcFontBox.left <= 0 && o->otmrcFontBox.right > 0);
+    CHECK(o->otmrcFontBox.top > 0 && o->otmrcFontBox.bottom < 0);
+    CHECK(o->otmusMinimumPPEM > 0);
+    CHECK(o->otmptSubscriptSize.x > 0 && o->otmptSubscriptSize.y > 0);
+    CHECK(o->otmptSuperscriptSize.x == o->otmptSubscriptSize.x);
+    CHECK(o->otmptSuperscriptOffset.y > o->otmptSubscriptOffset.y);
+    CHECK(o->otmsStrikeoutSize >= 0 && o->otmsStrikeoutPosition > 0);
+    CHECK(o->otmsUnderscoreSize >= 0 && o->otmsUnderscorePosition < 0);
+
+    /* A buffer shorter than the struct is filled as far as it goes and
+     * that much is the answer; one with room for the struct but not for
+     * the names is refused outright, and nothing is written. */
+    otm_fill();
+    CHECK(GetOutlineTextMetricsW(dc, 1, o) == 1 && otm_touched() == 1);
+    otm_fill();
+    CHECK(GetOutlineTextMetricsW(dc, sizeof(OUTLINETEXTMETRICW) - 1, o) == sizeof(OUTLINETEXTMETRICW) - 1);
+    CHECK(otm_touched() == sizeof(OUTLINETEXTMETRICW) - 1 && o->otmSize == need);
+    otm_fill();
+    CHECK(GetOutlineTextMetricsW(dc, sizeof(OUTLINETEXTMETRICW), o) == sizeof(OUTLINETEXTMETRICW));
+    CHECK(otm_touched() == sizeof(OUTLINETEXTMETRICW));
+    otm_fill();
+    CHECK(GetOutlineTextMetricsW(dc, need - 1, o) == 0 && otm_touched() == 0);
+    otm_fill();
+    /* A buffer bigger than the answer is cleared to its end, and the
+     * answer is still the size of the answer. */
+    CHECK(GetOutlineTextMetricsW(dc, sizeof otm_buf, o) == need);
+    CHECK(otm_touched() == sizeof otm_buf && otm_buf[need] == 0 && otm_buf[sizeof otm_buf - 1] == 0);
+    CHECK(GetOutlineTextMetricsW(NULL, 0, NULL) == 0);
+
+    /* The style the face realized at, composed into the names. */
+    SelectObject(dc, old);
+    DeleteObject(font);
+    font = otm_select(dc, L"Arial", -16, FW_BOLD, 1, &old);
+    need = GetOutlineTextMetricsW(dc, 0, NULL);
+    otm_fill();
+    CHECK(GetOutlineTextMetricsW(dc, need, o) == need);
+    CHECK(o->otmfsSelection == 0x21 && o->otmItalicAngle < 0);
+    CHECK(o->otmTextMetrics.tmWeight == FW_BOLD && o->otmTextMetrics.tmItalic != 0);
+    CHECK(lstrcmpW((WCHAR *)(otm_buf + (size_t)o->otmpFamilyName), L"Arial") == 0);
+    CHECK(lstrcmpW((WCHAR *)(otm_buf + (size_t)o->otmpStyleName), L"Bold Italic") == 0);
+    CHECK(lstrcmpW((WCHAR *)(otm_buf + (size_t)o->otmpFaceName), L"Arial Bold Italic") == 0);
+
+    /* A fixed-pitch family answers as well (gala draws those from bitmaps,
+     * so only the shape of the answer is the same). */
+    SelectObject(dc, old);
+    DeleteObject(font);
+    font = otm_select(dc, L"Lucida Console", -16, FW_NORMAL, 0, &old);
+    need = GetOutlineTextMetricsW(dc, 0, NULL);
+    CHECK(need > sizeof(OUTLINETEXTMETRICW));
+    otm_fill();
+    CHECK(GetOutlineTextMetricsW(dc, need, o) == need);
+    CHECK(lstrcmpW((WCHAR *)(otm_buf + (size_t)o->otmpFamilyName), L"Lucida Console") == 0);
+    CHECK((o->otmTextMetrics.tmPitchAndFamily & TMPF_FIXED_PITCH) == 0);
+
+    /* The ANSI form is the same answer with the names narrowed. */
+    UINT needa = GetOutlineTextMetricsA(dc, 0, NULL);
+    CHECK(needa > sizeof(OUTLINETEXTMETRICA) && needa < need);
+    otm_fill();
+    OUTLINETEXTMETRICA *oa = (OUTLINETEXTMETRICA *)otm_buf;
+    CHECK(GetOutlineTextMetricsA(dc, needa, oa) == needa && oa->otmSize == needa);
+    CHECK((size_t)oa->otmpFamilyName == sizeof(OUTLINETEXTMETRICA));
+    CHECK(strcmp((char *)(otm_buf + (size_t)oa->otmpFamilyName), "Lucida Console") == 0);
+    TEXTMETRICA tma;
+    /* Byte for byte as far as the last field: the byte of padding after
+     * tmCharSet is not part of either answer, and the two differ there. */
+    CHECK(GetTextMetricsA(dc, &tma));
+    CHECK(memcmp(&oa->otmTextMetrics, &tma, offsetof(TEXTMETRICA, tmCharSet) + 1) == 0);
+
+    SelectObject(dc, old);
+    DeleteObject(font);
+    DeleteDC(dc);
+}
+
 int main(void) {
     CHECK(MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(9, 96, 72) == 12);
     CHECK(MulDiv(1, 1, 0) == -1 && MulDiv(0x7fffffff, 2, 1) == -1 && MulDiv(7, 1, 2) == 4);
@@ -1353,6 +1509,7 @@ int main(void) {
     dc_state();
     null_brush();
     font_families();
+    outline_metrics();
     printf("gdi32_test: ok\n");
     return 0;
 }
