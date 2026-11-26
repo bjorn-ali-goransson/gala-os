@@ -11895,9 +11895,14 @@ stations and desktops a program creates are refused until stage 3).
 ### Other DLLs
 
 - msi (`user/msi`, x64 and x86; `msi_test`, `wow64_msi_test`): Windows
-  Installer's queries as Windows answers them for products and
-  components it has not installed, which on gala is all of them (no
-  installer database, no installer service): MsiQueryProductStateW,
+  Installer's queries. gala has no installer database of its own and no
+  installer service, so nothing here installs anything and no product
+  is known. A component an installer registered before is another
+  matter: that registration lives in the registry, and gala reads it
+  back out of there ("Registered components" below), which is how Word
+  finds its own resource files. Everything else is answered as Windows
+  answers it for a product or component it has not installed:
+  MsiQueryProductStateW,
   MsiGetComponentPathW and MsiLocateComponentW INSTALLSTATE_UNKNOWN,
   MsiEnumProductsW none, MsiConfigureProductExW ERROR_UNKNOWN_PRODUCT,
   MsiProvideQualifiedComponentExW, MsiProvideQualifiedComponentW,
@@ -11950,6 +11955,51 @@ stations and desktops a program creates are refused until stage 3).
   reason an open can fail, ERROR_INSTALL_PACKAGE_INVALID for a file that
   is no package. The other installing functions stay absent until a run
   shows one imported.
+
+  **Registered components** (`user/msi/src/components.rs`): what an
+  installer registered is a key of its own under
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components`,
+  named for the component's squished GUID, holding a value per product
+  that registered it, named for the product's squished GUID, whose data
+  is the component's key path -- the file the component installed, or a
+  `02:\Software\...` registry key path. (Squished is MSI's packed form
+  of a GUID: each of the first three groups reversed, then each
+  remaining pair of digits swapped, the spelling's case kept. The
+  permutation is its own inverse, so one function packs and unpacks.)
+  msi.dll reads that key: MsiGetProductCodeW, MsiGetProductCodeA and
+  MsiEnumClientsW name the products that registered a component, one per
+  index, in the order the key lists them (which Windows does not lay
+  down); MsiGetComponentPathW, MsiGetComponentPathA and
+  MsiLocateComponentW answer where it is, INSTALLSTATE_LOCAL, with
+  INSTALLSTATE_MOREDATA and the length needed where the buffer is too
+  small and the length alone where there is none, as Windows does. A
+  product code comes back exactly as it is stored, case and all, and a
+  component or product code is looked up without regard to case, as
+  Windows looks it up. The `?` some registrations mark a path with is
+  stripped, Windows stripping it too; a registry key path comes back
+  verbatim. The reading is in the 64-bit view whatever the process:
+  WOW64 redirects that Installer key and a 32-bit process's redirected
+  view holds no registrations at all, and yet Windows' own 32-bit
+  msi.dll answers a 32-bit caller out of the machine's -- measured,
+  which is what `wow64_msi_test` holds to. The fixtures are a regseed
+  (`user/msi_test/components.regseed`), so the checks run against
+  gala's own registry and are skipped on Windows.
+
+  **Limits of that reading**, each named where it bites: only the
+  per-machine registrations are read, not the per-user
+  `HKCU\Software\Microsoft\Installer\Components`, and which of the
+  two wins where both carry a component is not measured. Whether the
+  registered file is still there is not asked, so a registration whose
+  file is gone answers INSTALLSTATE_LOCAL where Windows would answer
+  INSTALLSTATE_ABSENT -- the absent answer could not be measured
+  read-only, every one of the 27886 plain file registrations on the
+  machine measured naming a file that is there. A registration longer
+  than 512 characters is not handed back but recorded
+  (`msi.dll!MsiGetComponentPathW: a registration too long to read`,
+  kind unsupported, the length as detail), rather than answered as
+  nothing installed. The ANSI forms narrow a path's units to bytes,
+  anything outside ASCII `?`, where Windows converts by the process's
+  code page.
 
   A database on disk is another matter, since reading one asks nothing
   of an installer: `user/msi/src/db.rs` is the API over galapkg's MSI

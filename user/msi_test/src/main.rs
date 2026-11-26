@@ -92,6 +92,40 @@
 //!   component not installed, ERROR_INVALID_PARAMETER without one;
 //! - MsiGetComponentPathA answers as the W form does.
 //!
+//! Four components registered the way Windows Installer registers one
+//! (`components.regseed`, laid down for `msi_test` and
+//! `wow64_msi_test`) are what `registered` reads back. A component's key
+//! is named for the packed ("squished") GUID of the component and holds
+//! one value per product that installed it, named for the product's
+//! squished GUID, whose data is the component's key path. The
+//! expectations are real Windows' own, measured against its
+//! registration of Office and of the 28079 components of this machine's
+//! other products:
+//! - MsiGetProductCodeW and MsiEnumClientsW hand a product code back in
+//!   the spelling it was registered with, not an upper-cased one, while
+//!   the codes a program asks about are matched without regard to case;
+//! - MsiEnumClientsW gives each client product once, from index 0, and
+//!   ERROR_NO_MORE_ITEMS past the last; which product is which index is
+//!   not laid down, nor which one MsiGetProductCodeW answers with;
+//! - MsiGetComponentPathW answers INSTALLSTATE_LOCAL and the key path
+//!   that one product registered, so two products on one component
+//!   answer differently, with the size in characters without the NUL; a
+//!   size too small is INSTALLSTATE_MOREDATA and the whole length, and
+//!   no buffer at all is INSTALLSTATE_LOCAL and the whole length;
+//!   MsiLocateComponentW answers the same without being given a product;
+//! - a key path carrying Windows Installer's `?` marker right after the
+//!   drive comes back with the marker taken away, and a key path that
+//!   names a registry value rather than a file comes back exactly as
+//!   stored;
+//! - MsiGetProductCodeA and MsiGetComponentPathA answer as the W forms do.
+//!
+//! Whether the registered file is there is not asked, because it could
+//! not be measured: of the 27886 plain registrations on the machine the
+//! answers come from, every one names a file that is there (`user/msi`
+//! says so as its own limit). The fixture is gala's registry, so
+//! elsewhere `registered` prints
+//! `msi_test: info registered components skipped` and checks nothing.
+//!
 //! Reading a database is in `db`, over a fixture this program writes
 //! beside its own image (`user/galapkg/testdata/msi/basic.msi`, built
 //! with wixl and checked in), so the one program asks Windows and gala
@@ -131,6 +165,7 @@ unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> usize;
     fn GetModuleFileNameW(module: usize, path: *mut u16, size: u32) -> u32;
+    fn GetModuleHandleW(name: *const u16) -> Handle;
 }
 
 #[cfg_attr(
@@ -246,8 +281,10 @@ const ERROR_CREATE_FAILED: u32 = 1631;
 const ERROR_NO_MORE_ITEMS: u32 = 259;
 const ERROR_UNKNOWN_PRODUCT: u32 = 1605;
 const ERROR_UNKNOWN_COMPONENT: u32 = 1607;
+const INSTALLSTATE_MOREDATA: i32 = -3;
 const INSTALLSTATE_INVALIDARG: i32 = -2;
 const INSTALLSTATE_UNKNOWN: i32 = -1;
+const INSTALLSTATE_LOCAL: i32 = 3;
 const INSTALLSTATE_DEFAULT: i32 = 5;
 const INSTALLLEVEL_DEFAULT: i32 = 0;
 const INSTALLUILEVEL_NOCHANGE: u32 = 0;
@@ -290,6 +327,28 @@ const MISSING_DIRECTORY_DATABASE: &str = r"C:\gala\no-such-directory\no-such-dat
 /// A product and a component no machine has (made-up GUIDs).
 const PRODUCT: &str = "{6700E8CF-95AB-4D9C-BC2C-15840DEA7A5D}";
 const COMPONENT: &str = "{A9D5E2C4-31B7-4F0E-9C6A-2E8D7B1F4A03}";
+
+/// The component `user/msi_test/components.regseed` registers for two
+/// products, each with a key path of its own, and the two products. The
+/// second is stored in lower case, which is the spelling Windows hands
+/// back; `SECOND_PRODUCT_UPPER` is the same product asked about in
+/// upper case, which must find it all the same.
+const REGISTERED_COMPONENT: &str = "{A1B2C3D4-E5F6-47A8-B9CA-0D1E2F3A4B5C}";
+const FIRST_PRODUCT: &str = "{11223344-5566-4788-9A0B-C1D2E3F40506}";
+const SECOND_PRODUCT: &str = "{0fedcba9-8765-4321-a0b1-c2d3e4f50607}";
+const SECOND_PRODUCT_UPPER: &str = "{0FEDCBA9-8765-4321-A0B1-C2D3E4F50607}";
+const FIRST_PATH: &str = r"C:\gala\msi_test\first.dll";
+const SECOND_PATH: &str = r"C:\gala\msi_test\second.dll";
+
+/// A component whose key path carries Windows Installer's `?` marker
+/// right after the drive, and the path with the marker taken away.
+const MARKED_COMPONENT: &str = "{BBBBBBBB-CCCC-4DDD-AEEE-FFF000111222}";
+const MARKED_PATH: &str = r"C:\gala\msi_test\marked.dll";
+
+/// A component whose key path is a registry value, not a file (the two
+/// digits are the root): handed back exactly as stored.
+const REGISTRY_COMPONENT: &str = "{CCCCCCCC-DDDD-4EEE-AFFF-000111222333}";
+const REGISTRY_KEYPATH: &str = r"02:\Software\gala\msi_test\Version";
 
 struct Line {
     buf: [u8; 160],
@@ -401,6 +460,59 @@ fn ansi<const N: usize>(text: &str) -> [u8; N] {
         *slot = b;
     }
     out
+}
+
+/// Whether `buf` holds exactly `text` and then a NUL: the spelling as
+/// well as the characters, since a product code comes back in the case
+/// it was registered with.
+fn is_wide(buf: &[u16], text: &str) -> bool {
+    let mut n = 0;
+    for b in text.bytes() {
+        if buf.get(n) != Some(&u16::from(b)) {
+            return false;
+        }
+        n += 1;
+    }
+    buf.get(n) == Some(&0)
+}
+
+/// `is_wide` for an ANSI buffer.
+fn is_ansi(buf: &[u8], text: &str) -> bool {
+    let mut n = 0;
+    for b in text.bytes() {
+        if buf.get(n) != Some(&b) {
+            return false;
+        }
+        n += 1;
+    }
+    buf.get(n) == Some(&0)
+}
+
+/// The first four characters of a string that came back, so a failure
+/// line says what it got instead of only that it did not match.
+fn head(buf: &[u16]) -> u64 {
+    buf.iter().take(4).fold(0u64, |acc, &u| (acc << 16) | u64::from(u))
+}
+
+/// `head` for an ANSI buffer.
+fn head_ansi(buf: &[u8]) -> u64 {
+    buf.iter().take(4).fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+}
+
+/// A line printed where a check cannot be made, so a run that skipped
+/// one says so instead of passing quietly.
+fn info(what: &[u8]) {
+    Line::new().s(NAME.as_bytes()).s(b": info ").s(what).s(b"\r\n").print();
+}
+
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleW(wide::<6>("ntdll").as_ptr());
+        ntdll == 0 || GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()) != 0
+    }
 }
 
 /// A NUL-terminated path: `directory` itself, or `tail` inside it.
@@ -672,6 +784,164 @@ fn components(c: &mut Checks) -> Result<(), u32> {
             .into(),
             ERROR_UNKNOWN_COMPONENT.into(),
         )?;
+    }
+    Ok(())
+}
+
+/// The components `components.regseed` registers. This is what Office's
+/// own resource loader asks msi.dll for: the install path of the
+/// component whose key file is WINWORD.EXE, which is its own directory
+/// (ROADMAP OF). Only gala is given the fixture, so on another machine
+/// this prints a line and checks nothing.
+fn registered(c: &mut Checks) -> Result<(), u32> {
+    if !on_gala() {
+        info(b"registered components skipped: the fixture is gala's registry");
+        return Ok(());
+    }
+    let component = wide::<39>(REGISTERED_COMPONENT);
+    let first = wide::<39>(FIRST_PRODUCT);
+    let second = wide::<39>(SECOND_PRODUCT);
+    let second_upper = wide::<39>(SECOND_PRODUCT_UPPER);
+    let marked = wide::<39>(MARKED_COMPONENT);
+    let in_registry = wide::<39>(REGISTRY_COMPONENT);
+    let mut product = [0u16; 39];
+    let mut path = [0u16; 260];
+    let mut size;
+    // SAFETY: documented calls with our arguments.
+    unsafe {
+        // A component that is registered has a product code, in the
+        // case it was registered with. Which of the two clients it is
+        // is not laid down, so either stands.
+        c.eq(
+            MsiGetProductCodeW(component.as_ptr(), product.as_mut_ptr()).into(),
+            ERROR_SUCCESS.into(),
+        )?;
+        c.ok(
+            is_wide(&product, FIRST_PRODUCT) || is_wide(&product, SECOND_PRODUCT),
+            head(&product),
+        )?;
+
+        // Both clients, once each, and nothing past them. Their order
+        // is not laid down either, so the pair is read as a set.
+        let mut clients = [[0u16; 39]; 2];
+        for (index, client) in [0u32, 1].into_iter().zip(clients.iter_mut()) {
+            c.eq(
+                MsiEnumClientsW(component.as_ptr(), index, client.as_mut_ptr()).into(),
+                ERROR_SUCCESS.into(),
+            )?;
+        }
+        let both = (is_wide(&clients[0], FIRST_PRODUCT) && is_wide(&clients[1], SECOND_PRODUCT))
+            || (is_wide(&clients[0], SECOND_PRODUCT) && is_wide(&clients[1], FIRST_PRODUCT));
+        c.ok(both, head(&clients[0]))?;
+        c.eq(
+            MsiEnumClientsW(component.as_ptr(), 2, product.as_mut_ptr()).into(),
+            ERROR_NO_MORE_ITEMS.into(),
+        )?;
+
+        // Each product's own key path, which is what proves the lookup
+        // picked by product instead of taking the first value it found.
+        size = 260;
+        c.state(
+            MsiGetComponentPathW(first.as_ptr(), component.as_ptr(), path.as_mut_ptr(), &mut size),
+            INSTALLSTATE_LOCAL,
+        )?;
+        c.ok(is_wide(&path, FIRST_PATH), head(&path))?;
+        c.eq(size.into(), FIRST_PATH.len() as u64)?;
+        size = 260;
+        c.state(
+            MsiGetComponentPathW(second.as_ptr(), component.as_ptr(), path.as_mut_ptr(), &mut size),
+            INSTALLSTATE_LOCAL,
+        )?;
+        c.ok(is_wide(&path, SECOND_PATH), head(&path))?;
+        c.eq(size.into(), SECOND_PATH.len() as u64)?;
+
+        // The same product in upper case is the same product: the codes
+        // a program asks about are matched without regard to case.
+        size = 260;
+        c.state(
+            MsiGetComponentPathW(
+                second_upper.as_ptr(),
+                component.as_ptr(),
+                path.as_mut_ptr(),
+                &mut size,
+            ),
+            INSTALLSTATE_LOCAL,
+        )?;
+        c.ok(is_wide(&path, SECOND_PATH), head(&path))?;
+
+        // A size too small is the whole length; no buffer at all is the
+        // whole length and the component is local all the same.
+        size = 8;
+        c.state(
+            MsiGetComponentPathW(first.as_ptr(), component.as_ptr(), path.as_mut_ptr(), &mut size),
+            INSTALLSTATE_MOREDATA,
+        )?;
+        c.eq(size.into(), FIRST_PATH.len() as u64)?;
+        size = 0;
+        c.state(
+            MsiGetComponentPathW(first.as_ptr(), component.as_ptr(), null_mut(), &mut size),
+            INSTALLSTATE_LOCAL,
+        )?;
+        c.eq(size.into(), FIRST_PATH.len() as u64)?;
+
+        // Without a product: whichever client the component is found
+        // through, so both paths stand.
+        size = 260;
+        c.state(
+            MsiLocateComponentW(component.as_ptr(), path.as_mut_ptr(), &mut size),
+            INSTALLSTATE_LOCAL,
+        )?;
+        c.ok(is_wide(&path, FIRST_PATH) || is_wide(&path, SECOND_PATH), head(&path))?;
+
+        // The `?` marker right after the drive is taken away.
+        size = 260;
+        c.state(
+            MsiGetComponentPathW(first.as_ptr(), marked.as_ptr(), path.as_mut_ptr(), &mut size),
+            INSTALLSTATE_LOCAL,
+        )?;
+        c.ok(is_wide(&path, MARKED_PATH), head(&path))?;
+        c.eq(size.into(), MARKED_PATH.len() as u64)?;
+
+        // A key path that names a registry value, not a file, comes
+        // back exactly as stored.
+        size = 260;
+        c.state(
+            MsiGetComponentPathW(
+                first.as_ptr(),
+                in_registry.as_ptr(),
+                path.as_mut_ptr(),
+                &mut size,
+            ),
+            INSTALLSTATE_LOCAL,
+        )?;
+        c.ok(is_wide(&path, REGISTRY_KEYPATH), head(&path))?;
+        c.eq(size.into(), REGISTRY_KEYPATH.len() as u64)?;
+
+        // The ANSI forms answer as the wide ones do.
+        let component_a = ansi::<39>(REGISTERED_COMPONENT);
+        let first_a = ansi::<39>(FIRST_PRODUCT);
+        let mut product_a = [0u8; 39];
+        let mut path_a = [0u8; 260];
+        c.eq(
+            MsiGetProductCodeA(component_a.as_ptr(), product_a.as_mut_ptr()).into(),
+            ERROR_SUCCESS.into(),
+        )?;
+        c.ok(
+            is_ansi(&product_a, FIRST_PRODUCT) || is_ansi(&product_a, SECOND_PRODUCT),
+            head_ansi(&product_a),
+        )?;
+        size = 260;
+        c.state(
+            MsiGetComponentPathA(
+                first_a.as_ptr(),
+                component_a.as_ptr(),
+                path_a.as_mut_ptr(),
+                &mut size,
+            ),
+            INSTALLSTATE_LOCAL,
+        )?;
+        c.ok(is_ansi(&path_a, FIRST_PATH), head_ansi(&path_a))?;
+        c.eq(size.into(), FIRST_PATH.len() as u64)?;
     }
     Ok(())
 }
@@ -1024,6 +1294,7 @@ fn run() -> Result<(), u32> {
     handles_and_ui(&mut c)?;
     products(&mut c)?;
     components(&mut c)?;
+    registered(&mut c)?;
     office(&mut c)?;
     databases(&mut c)?;
     installs(&mut c)?;
