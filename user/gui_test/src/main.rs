@@ -166,6 +166,8 @@ unsafe extern "system" {
     fn IsWindowUnicode(hwnd: Hwnd) -> i32;
     fn SetGestureConfig(hwnd: Hwnd, reserved: u32, count: u32, config: *const u8, size: u32)
     -> i32;
+    fn RegisterTouchHitTestingWindow(hwnd: Hwnd, value: u32) -> i32;
+    fn GetDesktopWindow() -> Hwnd;
     fn PhysicalToLogicalPoint(hwnd: Hwnd, point: *mut [i32; 2]) -> i32;
     fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> Handle;
     fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32;
@@ -243,6 +245,7 @@ unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> Handle;
     fn Sleep(ms: u32);
     fn GetLastError() -> u32;
+    fn SetLastError(error: u32);
     fn CreateThread(
         sa: *const c_void,
         stack: usize,
@@ -794,6 +797,52 @@ extern "system" fn closer(_: *mut c_void) -> u32 {
     0
 }
 
+/// RegisterTouchHitTestingWindow, which MSO's UI delay-loads (Word's
+/// Mso40UIwin32client.dll) to say a window does its own touch hit
+/// testing. A window of the calling thread takes it with any value,
+/// including values no header names, and the last error is left as it
+/// was; a handle that is no window is ERROR_INVALID_WINDOW_HANDLE, and
+/// the handle is looked at before the value (a NULL window with a
+/// nonsense value is still 1400); the desktop is ERROR_ACCESS_DENIED,
+/// and so is a window of another thread of the same process
+/// (`paint_thread_test`) or of another process. Windows 11; gala has no
+/// touch input, so nothing follows from the registration.
+fn touch_hit_testing(hwnd: Hwnd) -> Result<(), u32> {
+    // A sentinel no call sets: a success that returns leaving it there
+    // has not touched the last error.
+    const SENTINEL: u32 = 0xdead;
+    // SAFETY: plain calls; the window is the test's and the rest are
+    // handles that are deliberately no window.
+    unsafe {
+        // TOUCH_HIT_TESTING_DEFAULT (0), ..._CLIENT (1), then values
+        // nothing names, and back to the default.
+        let mut values = [0u32, 1, 1, 2, 3, u32::MAX, 0].into_iter();
+        for value in &mut values {
+            SetLastError(SENTINEL);
+            check(RegisterTouchHitTestingWindow(hwnd, value) != 0, value.into())?;
+            check(GetLastError() == SENTINEL, GetLastError().into())?;
+        }
+        // A child window of the same thread (the combo box) is its
+        // thread's too.
+        let combo = COMBO.load(Ordering::SeqCst) as Hwnd;
+        check(!combo.is_null(), 0)?;
+        SetLastError(SENTINEL);
+        check(RegisterTouchHitTestingWindow(combo, 1) != 0, GetLastError().into())?;
+        check(GetLastError() == SENTINEL, GetLastError().into())?;
+        // No window: the value is never looked at.
+        check(RegisterTouchHitTestingWindow(core::ptr::null_mut(), 0) == 0, 0)?;
+        check(GetLastError() == 1400, GetLastError().into())?;
+        check(RegisterTouchHitTestingWindow(core::ptr::null_mut(), 99) == 0, 0)?;
+        check(GetLastError() == 1400, GetLastError().into())?;
+        check(RegisterTouchHitTestingWindow(0x1234 as Hwnd, 0) == 0, 0)?;
+        check(GetLastError() == 1400, GetLastError().into())?;
+        // Somebody else's window: the desktop is nobody's to register.
+        check(RegisterTouchHitTestingWindow(GetDesktopWindow(), 1) == 0, 0)?;
+        check(GetLastError() == 5, GetLastError().into())?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let class: [u16; 16] = wide("GalaTestWindow");
     let title: [u16; 16] = wide("gala window");
@@ -873,6 +922,7 @@ fn run() -> Result<(), u32> {
         check(GetLastError() == 87, GetLastError().into())?;
         check(SetGestureConfig(hwnd, 0, 1, config, 11) == 0, 0)?;
         check(GetLastError() == 87, GetLastError().into())?;
+        touch_hit_testing(hwnd)?;
         let mut point = [10, 20];
         check(PhysicalToLogicalPoint(hwnd, &mut point) != 0 && point == [10, 20], 0)?;
         check(IsWindowVisible(hwnd) == 0, 0)?;
@@ -909,6 +959,10 @@ fn run() -> Result<(), u32> {
         check(msg.wparam == 7, msg.wparam as u64)?;
         check(DESTROYED.load(Ordering::SeqCst) == 1, 0)?;
         check(IsWindow(hwnd) == 0, 0)?;
+        // A destroyed window is no window: the touch registration that
+        // took every value a moment ago is ERROR_INVALID_WINDOW_HANDLE.
+        check(RegisterTouchHitTestingWindow(hwnd, 1) == 0, 0)?;
+        check(GetLastError() == 1400, GetLastError().into())?;
         // The input arrived; the close button closed it.
         check(DOWNS.load(Ordering::SeqCst) >= 1, 0)?;
         check(UPS.load(Ordering::SeqCst) >= 1, 0)?;

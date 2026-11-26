@@ -14,6 +14,9 @@
 //!   (Mesa's win32 WSI holds the window's DC and blits each frame into
 //!   it, and DXVK does that blit from a presenter thread of its own,
 //!   which is this test's shape: `d3d11_test`).
+//!   It also asks, from that thread, that the window do its own touch
+//!   hit testing: RegisterTouchHitTestingWindow is ERROR_ACCESS_DENIED
+//!   from a thread that is not the window's.
 //! - The square reaches the desktop although the window's thread does
 //!   nothing: on Windows GDI drawing on a window DC goes to the device as
 //!   it is drawn. xtask's screen check reads it from the screen; then a
@@ -21,7 +24,7 @@
 //!   WM_CLOSE after 60 seconds if no click comes: a failure).
 //!
 //! It prints `paint_thread_test: ok` at the end, or exits with the number
-//! of the failing check (the second thread's own are 90 and 91).
+//! of the failing check (the second thread's own are 90, 91 and 92).
 
 #![no_std]
 #![no_main]
@@ -108,6 +111,7 @@ unsafe extern "system" {
     fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn PostQuitMessage(code: i32);
     fn GetDC(hwnd: Hwnd) -> Handle;
+    fn RegisterTouchHitTestingWindow(hwnd: Hwnd, value: u32) -> i32;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
 }
 
@@ -125,6 +129,7 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn GetModuleHandleW(name: *const u16) -> Handle;
     fn Sleep(ms: u32);
+    fn GetLastError() -> u32;
     fn CreateEventW(sa: *const c_void, manual: i32, signalled: i32, name: *const u16) -> Handle;
     fn SetEvent(event: Handle) -> i32;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
@@ -173,6 +178,8 @@ static WINDOW: AtomicUsize = AtomicUsize::new(0);
 static READY: AtomicUsize = AtomicUsize::new(0);
 static PAINTS: AtomicU32 = AtomicU32::new(0);
 static DREW: AtomicU32 = AtomicU32::new(0);
+/// Whether the second thread's RegisterTouchHitTestingWindow was refused.
+static NO_TOUCH: AtomicU32 = AtomicU32::new(0);
 static TIMED_OUT: AtomicU32 = AtomicU32::new(0);
 static CLICKED: AtomicU32 = AtomicU32::new(0);
 /// Checks run in order; the number of the first that failed, which the
@@ -290,7 +297,19 @@ extern "system" fn drawer(_: *mut c_void) -> u32 {
             fail(91);
             return 1;
         }
+        // Drawing on another thread's window is allowed; saying that
+        // window does its own touch hit testing is not:
+        // RegisterTouchHitTestingWindow is ERROR_ACCESS_DENIED from a
+        // thread that is not the window's, whatever the value, so the
+        // rule is per thread and not per process (Windows 11; the
+        // calling thread's own windows are in `gui_test`).
+        let other = RegisterTouchHitTestingWindow(WINDOW.load(Ordering::SeqCst) as Hwnd, 0);
+        if other != 0 || GetLastError() != 5 {
+            fail(92);
+            return 1;
+        }
     }
+    NO_TOUCH.store(1, Ordering::SeqCst);
     DREW.store(1, Ordering::SeqCst);
     out(b"paint_thread_test: drew from another thread\r\n");
     0
@@ -374,6 +393,7 @@ fn run() -> Result<(), u32> {
         // The square was drawn, the screen check saw it, and the click
         // ended the program (not the thread that posts WM_CLOSE).
         check(DREW.load(Ordering::SeqCst) == 1)?;
+        check(NO_TOUCH.load(Ordering::SeqCst) == 1)?;
         check(CLICKED.load(Ordering::SeqCst) >= 1)?;
         check(TIMED_OUT.load(Ordering::SeqCst) == 0)?;
     }

@@ -9884,6 +9884,18 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   popup `window::activate` recorded with its owner, while it is there
   and shown; ShowOwnedPopups hides the shown owned popups and shows the
   ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
+- **Touch** (`window.rs`): gala has no touch input, so no WM_GESTURE and
+  no WM_TOUCHHITTESTING is ever sent; what a program calls to arrange
+  them only answers. RegisterTouchHitTestingWindow, which MSO's UI
+  delay-loads, is a per-**thread** rule: a window of the calling thread
+  takes it with any value, including values no header names, repeat
+  calls and going back to the default among them, and leaves the last
+  error as it was; a window of another thread of the same process, a
+  window of another process, and the desktop are ERROR_ACCESS_DENIED;
+  a handle that is no window is ERROR_INVALID_WINDOW_HANDLE, and the
+  handle is looked at before the value, so a NULL window with a nonsense
+  value is still 1400. `gui_test` has the calling thread's own windows
+  and every refusal, `paint_thread_test` the other thread's.
 - **A box with nothing to show it** (`lib.rs`): MessageBoxW writes the
   caption and the text to the program's standard error and answers IDOK,
   as if its only button had been pressed; and it records what was said
