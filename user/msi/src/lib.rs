@@ -1,8 +1,11 @@
 //! gala's msi.dll: the Windows Installer functions programs ask before
 //! (or instead of) installing anything, and the reading of an installer
-//! database. What Windows Installer has installed, gala has not: there
-//! is no installer database of its own and no installer service, so no
-//! product or component is known. What the Office Deployment Tool's
+//! database. gala has no installer database of its own and no
+//! installer service, so nothing here installs anything. What an
+//! installer registered before is another matter: a component's
+//! registration lives in the registry, and gala reads it back out of
+//! there (`components`) -- which is how Word finds its own resource
+//! files. Nothing else is known. What the Office Deployment Tool's
 //! setup.exe and its integrator.exe import (by ordinal: build.rs), as
 //! Windows answers for products and components it does not have
 //! (`msi_test`, `wow64_msi_test`; Wine's conformance tests, and the
@@ -15,6 +18,14 @@
 //! - MsiProvideQualifiedComponentExW, MsiEnumComponentQualifiersW:
 //!   ERROR_UNKNOWN_COMPONENT;
 //! - MsiSetInternalUI: the process's UI level and window, kept.
+//!
+//! A component a product has registered is answered out of the registry
+//! instead (`components`): MsiGetProductCodeW and MsiEnumClientsW name
+//! the products that installed it, MsiGetComponentPathW,
+//! MsiGetComponentPathA and MsiLocateComponentW where it is
+//! (INSTALLSTATE_LOCAL). What that reading does not cover is named in
+//! `components`, and a registration too long to read is a ledger row of
+//! its own rather than an answer of "nothing installed".
 //!
 //! Word's shared code (MSO.DLL, Mso30win32client.dll,
 //! Mso40UIwin32client.dll, Mso98win32client.dll) delay-loads eleven
@@ -83,6 +94,7 @@ use gala_heap as _;
 #[cfg(target_arch = "x86")]
 use ntrt as _;
 
+mod components;
 mod db;
 
 // The 64-bit builds take the memory routines from gala's ntdll, which
@@ -166,8 +178,10 @@ const ERROR_CREATE_FAILED: u32 = 1631;
 /// path to persist to, which is a database to create as well.
 const MSIDBOPEN_CREATE: usize = 3;
 const MSIDBOPEN_PATCHFILE: usize = 32;
+const INSTALLSTATE_MOREDATA: i32 = -3;
 const INSTALLSTATE_INVALIDARG: i32 = -2;
 const INSTALLSTATE_UNKNOWN: i32 = -1;
+const INSTALLSTATE_LOCAL: i32 = 3;
 const USERINFOSTATE_INVALIDARG: i32 = -2;
 const USERINFOSTATE_UNKNOWN: i32 = -1;
 
@@ -508,9 +522,12 @@ pub extern "system" fn MsiEnumProductsW(index: u32, product: *mut u16) -> u32 {
     ERROR_NO_MORE_ITEMS
 }
 
-/// MsiGetComponentPathW (#173): INSTALLSTATE_UNKNOWN for a product and
-/// component (the size untouched); INSTALLSTATE_INVALIDARG for a missing
-/// or malformed code, or a buffer without its size.
+/// MsiGetComponentPathW (#173): where a component is, as the product
+/// that registered it put it -- INSTALLSTATE_LOCAL and the path, or
+/// INSTALLSTATE_MOREDATA for a buffer too small (`components`).
+/// INSTALLSTATE_UNKNOWN for a component or product with no registration
+/// between them, the size untouched; INSTALLSTATE_INVALIDARG for a
+/// missing or malformed code, or a buffer without its size.
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiGetComponentPathW(
     product: *const u16,
@@ -521,11 +538,17 @@ pub extern "system" fn MsiGetComponentPathW(
     if !is_guid(product) || !is_guid(component) || (!path.is_null() && size.is_null()) {
         return INSTALLSTATE_INVALIDARG;
     }
+    if let Some(found) = components::Component::open(component, b"MsiGetComponentPathW")
+        .and_then(|c| c.key_path(product))
+    {
+        return components::hand_back(&found, path, size);
+    }
     asked_about_two(b"MsiGetComponentPathW", 173, product, component, CODE_LEN);
     INSTALLSTATE_UNKNOWN
 }
 
-/// MsiLocateComponentW (#90): as MsiGetComponentPathW without a product.
+/// MsiLocateComponentW (#90): as MsiGetComponentPathW without a product,
+/// so whichever product registered the component answers for it.
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiLocateComponentW(
     component: *const u16,
@@ -534,6 +557,11 @@ pub extern "system" fn MsiLocateComponentW(
 ) -> i32 {
     if !is_guid(component) || (!path.is_null() && size.is_null()) {
         return INSTALLSTATE_INVALIDARG;
+    }
+    if let Some(found) = components::Component::open(component, b"MsiLocateComponentW")
+        .and_then(|c| c.any_key_path())
+    {
+        return components::hand_back(&found, path, size);
     }
     asked_about(b"MsiLocateComponentW", 90, component);
     INSTALLSTATE_UNKNOWN
@@ -700,28 +728,43 @@ pub extern "system" fn MsiGetUserInfoW(
     USERINFOSTATE_UNKNOWN
 }
 
-/// MsiEnumClientsW (#37): the products that use a component --
-/// ERROR_UNKNOWN_COMPONENT, no component being installed, whatever the
-/// index.
+/// MsiEnumClientsW (#37): the products that registered a component, one
+/// per index, in the order the registration lists them (which Windows
+/// does not lay down); ERROR_NO_MORE_ITEMS past the last of them and
+/// ERROR_UNKNOWN_COMPONENT for a component nothing registered.
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiEnumClientsW(
     component: *const u16,
-    _index: u32,
+    index: u32,
     product: *mut u16,
 ) -> u32 {
     if !is_guid(component) || product.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
+    if let Some(registration) = components::Component::open(component, b"MsiEnumClientsW") {
+        let Some(code) = registration.client(index) else {
+            return ERROR_NO_MORE_ITEMS;
+        };
+        components::write_code(product, &code);
+        return ERROR_SUCCESS;
+    }
     asked_about(b"MsiEnumClientsW", 37, component);
     ERROR_UNKNOWN_COMPONENT
 }
 
-/// MsiGetProductCodeW (#66): which product installed a component --
-/// ERROR_UNKNOWN_COMPONENT, none having.
+/// MsiGetProductCodeW (#66): which product installed a component -- its
+/// first client, as MsiEnumClientsW of index 0; ERROR_UNKNOWN_COMPONENT
+/// for a component nothing registered.
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiGetProductCodeW(component: *const u16, product: *mut u16) -> u32 {
     if !is_guid(component) || product.is_null() {
         return ERROR_INVALID_PARAMETER;
+    }
+    if let Some(code) = components::Component::open(component, b"MsiGetProductCodeW")
+        .and_then(|registration| registration.client(0))
+    {
+        components::write_code(product, &code);
+        return ERROR_SUCCESS;
     }
     asked_about(b"MsiGetProductCodeW", 66, component);
     ERROR_UNKNOWN_COMPONENT
@@ -732,6 +775,12 @@ pub extern "system" fn MsiGetProductCodeW(component: *const u16, product: *mut u
 pub extern "system" fn MsiGetProductCodeA(component: *const u8, product: *mut u8) -> u32 {
     if !is_guid(component) || product.is_null() {
         return ERROR_INVALID_PARAMETER;
+    }
+    if let Some(code) = components::Component::open(component, b"MsiGetProductCodeA")
+        .and_then(|registration| registration.client(0))
+    {
+        components::write_code_ansi(product, &code);
+        return ERROR_SUCCESS;
     }
     asked_about(b"MsiGetProductCodeA", 65, component);
     ERROR_UNKNOWN_COMPONENT
@@ -765,6 +814,11 @@ pub extern "system" fn MsiGetComponentPathA(
 ) -> i32 {
     if !is_guid(product) || !is_guid(component) || (!path.is_null() && size.is_null()) {
         return INSTALLSTATE_INVALIDARG;
+    }
+    if let Some(found) = components::Component::open(component, b"MsiGetComponentPathA")
+        .and_then(|c| c.key_path(product))
+    {
+        return components::hand_back_ansi(&found, path, size);
     }
     asked_about_two(b"MsiGetComponentPathA", 172, product, component, CODE_LEN);
     INSTALLSTATE_UNKNOWN

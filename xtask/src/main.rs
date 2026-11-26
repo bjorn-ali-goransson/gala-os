@@ -3191,6 +3191,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msi_test", "ntdll.dll", "Windows/System32"),
     ("msi_test", "kernel32.dll", "Windows/System32"),
     ("msi_test", "msi.dll", "Windows/System32"),
+    ("msi_test", "user/msi_test/components.regseed", "registry"),
     ("wow64_rstrtmgr_test", "wow64.dll", "Windows/System32"),
     ("wow64_rstrtmgr_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_rstrtmgr_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3201,6 +3202,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "user/msi_test/components.regseed", "registry"),
     // webservices' XML reader (user/webservices_test), x64 and x86.
     ("webservices_test", "ntdll.dll", "Windows/System32"),
     ("webservices_test", "kernel32.dll", "Windows/System32"),

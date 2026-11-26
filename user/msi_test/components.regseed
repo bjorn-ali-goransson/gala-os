@@ -1,0 +1,37 @@
+; Four components registered the way Windows Installer registers one: a
+; key named for the component's packed ("squished") GUID under the
+; per-machine UserData of the local system account, holding one value per
+; product that installed it, named for the product's squished GUID, whose
+; data is the component's key path. This is the shape msi_test's
+; `registered` checks read back, and the shape Office's own registration
+; has on the machine the expectations were measured on (and in
+; office_word's own registry, where Click-to-Run wrote it).
+;
+; The squish of a braced GUID: reverse the first eight hex digits,
+; reverse the next four, reverse the next four, then swap each remaining
+; pair. Case is carried through unchanged in both directions, which is
+; why product 2 is written in lower case here: MsiEnumClientsW and
+; MsiGetProductCodeW must hand back the stored spelling, not an
+; upper-cased one. Loaded after registry.seed (module string `registry`).
+;
+;   component                  {A1B2C3D4-E5F6-47A8-B9CA-0D1E2F3A4B5C}
+;   product 1                  {11223344-5566-4788-9A0B-C1D2E3F40506}
+;   product 2                  {0fedcba9-8765-4321-a0b1-c2d3e4f50607}
+;   marked component           {BBBBBBBB-CCCC-4DDD-AEEE-FFF000111222}
+;   registry-keypath component {CCCCCCCC-DDDD-4EEE-AFFF-000111222333}
+
+; One component two products installed, with a different file each, so an
+; answer proves the lookup picked by product instead of taking the first.
+[\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components\4D3C2B1A6F5E8A749BACD0E1F2A3B4C5]
+"4433221166558874A9B01C2D3E4F5060"=sz:C:\gala\msi_test\first.dll
+"9abcdef0567812340a1b2c3d4e5f6070"=sz:C:\gala\msi_test\second.dll
+
+; A key path carrying Windows Installer's `?` marker right after the
+; drive. Windows answers INSTALLSTATE_LOCAL and strips the marker.
+[\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components\BBBBBBBBCCCCDDD4EAEEFF0F00112122]
+"4433221166558874A9B01C2D3E4F5060"=sz:C:\?gala\msi_test\marked.dll
+
+; A component whose key path is a registry value, not a file (the two
+; digits are the root). Windows hands this back exactly as stored.
+[\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components\CCCCCCCCDDDDEEE4FAFF001011223233]
+"4433221166558874A9B01C2D3E4F5060"=sz:02:\Software\gala\msi_test\Version
