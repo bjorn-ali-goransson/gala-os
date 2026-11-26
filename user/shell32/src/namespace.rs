@@ -35,6 +35,7 @@ use crate::link::VTable;
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
+    fn SetLastError(e: u32);
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;
     fn GetFileAttributesW(path: *const u16) -> u32;
@@ -1729,6 +1730,58 @@ pub extern "system" fn SHGetPathFromIDListW(list: *const u8, path: *mut u16) -> 
         *path.add(name.len()) = 0;
     }
     1
+}
+
+/// SHGetPathFromIDListEx(list, path, cch, flags): the same path into a
+/// buffer the caller measures. Word's recent documents delay-load it,
+/// and a Word that does not find it dies there.
+///
+/// As Windows 11 answers it, measured and kept by `shell32_test`: the
+/// path and TRUE, with the last error set to 0, for a list that has
+/// one; the flags make no difference to a file-system path
+/// (GPFIDL_DEFAULT, GPFIDL_ALTNAME, GPFIDL_UNCPRINTER and bits nothing
+/// names all answer alike, so gala reads none of them). A buffer one
+/// character short of the path and its NUL is FALSE and holds the path
+/// cut to `cch - 1` characters -- what fits is written either way, so
+/// the caller that ignores the answer reads a path that is not the one
+/// it asked for -- and a `cch` of 1 is FALSE and the empty string. A
+/// `cch` of 0 writes nothing at all and leaves the last error alone,
+/// and so does a NULL list, which is the one way to tell "no room"
+/// from "no path": a list with no path (a virtual folder, This PC) is
+/// FALSE with the empty string and the last error 0.
+#[unsafe(no_mangle)]
+pub extern "system" fn SHGetPathFromIDListEx(
+    list: *const u8,
+    path: *mut u16,
+    cch: u32,
+    _flags: u32,
+) -> i32 {
+    // Nowhere to write: the buffer and the last error both stand.
+    // (Windows faults on a NULL buffer with room asked for; gala says
+    // no instead, which no caller can tell from a fault it survived.)
+    if cch == 0 || path.is_null() {
+        return 0;
+    }
+    put(path, 0);
+    if list.is_null() {
+        return 0;
+    }
+    let name = items_of(list).and_then(|items| name_of(&items, SIGDN_FILESYSPATH));
+    // SAFETY: plain call.
+    unsafe { SetLastError(0) };
+    let Some(name) = name else { return 0 };
+    if name.is_empty() {
+        return 0;
+    }
+    // What fits, whether or not all of it does.
+    let room = cch as usize - 1;
+    let n = name.len().min(room);
+    // SAFETY: the caller's buffer of `cch` units, and `n` < `cch`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), path, n);
+        *path.add(n) = 0;
+    }
+    i32::from(n == name.len())
 }
 
 /// ILCreateFromPathW(path): the list of an existing path (NULL otherwise).

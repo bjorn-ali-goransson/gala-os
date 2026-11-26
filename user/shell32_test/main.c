@@ -49,6 +49,23 @@
  *   KF_FLAG_CREATE) is %LOCALAPPDATA%\Programs and exists afterwards;
  *   CSIDL_COMMON_PROGRAMS is under %ProgramData%.
  *
+ * - SHGetPathFromIDListEx(list, path, cch, flags) (Word delay-loads it
+ *   while it reads its recent documents, and dies with
+ *   0xc06d007f -- a delay-loaded function not found -- where it is
+ *   missing; measured on the pinned host): the path of a list that has
+ *   one, TRUE, with the last error set to 0. The flags make no
+ *   difference to a plain file-system path (GPFIDL_DEFAULT,
+ *   GPFIDL_ALTNAME, GPFIDL_UNCPRINTER and an unknown bit all answer
+ *   alike). A buffer of the path's length and a NUL is enough; one
+ *   character short is FALSE and leaves a path cut to cch - 1
+ *   characters in the buffer, a cch of 1 is FALSE and an empty string,
+ *   and a cch of 0 is FALSE with the buffer and the last error both as
+ *   they were found. A virtual folder (This PC) is FALSE with an empty
+ *   string, as SHGetPathFromIDListW is; a NULL list is FALSE with an
+ *   empty string and the last error untouched, and so is NULL with a
+ *   NULL buffer and a cch of 0. (A NULL buffer with a cch that is not 0
+ *   faults on Windows, so this does not call it.)
+ *
  * - Shell links (CLSID_ShellLink; Microsoft's IShellLinkW, IPersistFile,
  *   IShellLinkDataList pages, [MS-SHLLINK] for the file, [MS-PROPSTORE]
  *   for its property store, and the checks Wine's shell32/tests/
@@ -379,6 +396,91 @@ static void links(const wchar_t *self) {
 }
 
 /* SHAddToRecentDocs: a link in the Recent folder named after the file. */
+/* SHGetPathFromIDListEx, as Word calls it: the path of a list, the
+ * flags, a buffer too small, and the lists that have no path. */
+static void path_from_list_ex(void) {
+    HMODULE shell = GetModuleHandleA("shell32.dll");
+    BOOL (WINAPI *get_ex)(LPCITEMIDLIST, PWSTR, DWORD, DWORD) =
+        (void *)GetProcAddress(shell, "SHGetPathFromIDListEx");
+    CHECK(get_ex != NULL);
+
+    LPITEMIDLIST (WINAPI *il_from_path)(LPCWSTR) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(190));
+    void (WINAPI *il_free)(LPITEMIDLIST) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(155));
+    CHECK(il_from_path != NULL && il_free != NULL);
+    LPITEMIDLIST windows = il_from_path(L"C:\\Windows");
+    CHECK(windows != NULL);
+    const DWORD len = 10; /* lstrlenW(L"C:\\Windows") */
+
+    WCHAR path[MAX_PATH];
+    DWORD flags[] = { GPFIDL_DEFAULT, GPFIDL_ALTNAME, GPFIDL_UNCPRINTER, 0xff00 };
+    for (int i = 0; i < 4; i++) {
+        for (DWORD j = 0; j < MAX_PATH; j++) {
+            path[j] = 0x4242;
+        }
+        SetLastError(0xdeadbeef);
+        CHECK(get_ex(windows, path, MAX_PATH, flags[i]));
+        CHECK(GetLastError() == 0);
+        CHECK(lstrcmpiW(path, L"C:\\Windows") == 0);
+    }
+
+    /* The path and its NUL, exactly. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(get_ex(windows, path, len + 1, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0 && lstrcmpiW(path, L"C:\\Windows") == 0);
+
+    /* One character short: FALSE, and what fits is left behind. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(windows, path, len, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0);
+    CHECK((DWORD)lstrlenW(path) == len - 1 && memcmp(path, L"C:\\Window", (len - 1) * sizeof(WCHAR)) == 0);
+
+    /* Room for the NUL alone: FALSE, and an empty string. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(windows, path, 1, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0 && path[0] == 0);
+
+    /* No room at all: the buffer and the last error stand. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(windows, path, 0, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0xdeadbeef && path[0] == 0x4242);
+
+    /* A virtual folder has no path, as SHGetPathFromIDListW says too. */
+    LPITEMIDLIST drives = NULL;
+    CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &drives) == S_OK && drives != NULL);
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(drives, path, MAX_PATH, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0 && path[0] == 0);
+    WCHAR old_way[MAX_PATH];
+    old_way[0] = 0x4242;
+    CHECK(!SHGetPathFromIDListW(drives, old_way) && old_way[0] == 0);
+    il_free(drives);
+
+    /* The desktop's empty list has one, the same either way. */
+    LPITEMIDLIST desktop = NULL;
+    CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &desktop) == S_OK && desktop != NULL);
+    path[0] = 0x4242;
+    CHECK(get_ex(desktop, path, MAX_PATH, GPFIDL_DEFAULT));
+    old_way[0] = 0x4242;
+    CHECK(SHGetPathFromIDListW(desktop, old_way) && lstrcmpiW(path, old_way) == 0 && path[0] != 0);
+    il_free(desktop);
+
+    /* No list: FALSE, an empty string, and the last error untouched. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(NULL, path, MAX_PATH, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0xdeadbeef && path[0] == 0);
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(NULL, NULL, 0, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0xdeadbeef);
+
+    il_free(windows);
+}
+
 static void recent_docs(void) {
     wchar_t doc[MAX_PATH], recent[MAX_PATH];
     CHECK(GetCurrentDirectoryW(MAX_PATH, doc) > 0);
@@ -605,6 +707,7 @@ int main(int argc, char **argv) {
     stream->lpVtbl->Release(stream);
 
     links(self);
+    path_from_list_ex();
     recent_docs();
 
     printf("shell32_test: ok\n");

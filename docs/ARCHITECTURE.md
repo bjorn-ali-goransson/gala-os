@@ -17165,7 +17165,15 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   SHGetFolderLocation and SHGetSpecialFolderLocation (CSIDL_DESKTOP the
   empty list, CSIDL_DRIVES This PC; a profile folder gala's profile
   lacks still has its list, as SHGetFolderPathW gives its path),
-  SHGetPathFromIDListW.
+  SHGetPathFromIDListW and SHGetPathFromIDListEx (the same path into a
+  buffer the caller measures, which Word's recent documents delay-load:
+  the path and TRUE with the last error set to 0; the flags make no
+  difference to a file-system path, so none is read; a buffer one
+  character short is FALSE and still holds the path cut to `cch - 1`
+  characters, and a `cch` of 1 is FALSE and the empty string; a `cch` of
+  0 writes nothing and leaves the last error alone, which with a NULL
+  list is the one way to tell "no room" from "no path", a list that has
+  none being FALSE with the empty string and the last error 0).
 - **Opening a file** (ShellExecuteW/ExW, `shellops.rs`): a document runs
   its association's command (AssocQueryStringW's ASSOCSTR_COMMAND for
   the verb, "open" by default, from the user's classes then HKCR; `%1`
