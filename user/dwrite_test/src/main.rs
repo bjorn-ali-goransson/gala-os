@@ -36,7 +36,13 @@
 //!     a gamma outside (0, 256], a negative contrast or ClearType level,
 //!     and a pixel geometry or rendering mode past the enumeration are
 //!     E_INVALIDARG; one object answers IDWriteRenderingParams 1, 2 and
-//!     3, and each call gives a new object.
+//!     3, and each call gives a new object;
+//! 11. the factory's later revisions and its GDI interop object, as
+//!     Word's startup asks for them: IDWriteFactory1 through 7 are all
+//!     this one factory, asked for from the start (DWriteCreateFactory)
+//!     or grown into (QueryInterface), and GetGdiInterop gives one
+//!     object per factory -- the same pointer on a second call -- which
+//!     answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself.
 
 #![no_std]
 #![no_main]
@@ -102,6 +108,20 @@ const IID_PARAMS2: Iid =
     guid(0xf9d711c3, 0x9777, 0x40ae, [0x87, 0xe8, 0x3e, 0x5a, 0xf9, 0xbf, 0x09, 0x48]);
 const IID_PARAMS3: Iid =
     guid(0xb7924baa, 0x391b, 0x412a, [0x8c, 0x5c, 0xe4, 0x4c, 0xc2, 0xd8, 0x67, 0xdc]);
+/// The factory's later revisions, each adding methods to the one before.
+const IID_FACTORY_REVISIONS: [Iid; 7] = [
+    guid(0x30572f99, 0xdac6, 0x41db, [0xa1, 0x6e, 0x04, 0x86, 0x30, 0x7e, 0x60, 0x6a]),
+    guid(0x0439fc60, 0xca44, 0x4994, [0x8d, 0xee, 0x3a, 0x9a, 0xf7, 0xb7, 0x32, 0xec]),
+    guid(0x9a1b41c3, 0xd3bb, 0x466a, [0x87, 0xfc, 0xfe, 0x67, 0x55, 0x6a, 0x3b, 0x65]),
+    guid(0x4b0b5bd3, 0x0797, 0x4549, [0x8a, 0xc5, 0xfe, 0x91, 0x5c, 0xc5, 0x38, 0x56]),
+    guid(0x958db99a, 0xbe2a, 0x4f09, [0xaf, 0x7d, 0x65, 0x18, 0x98, 0x03, 0xd1, 0xd3]),
+    guid(0xf3744d80, 0x21f7, 0x42eb, [0xb3, 0x5d, 0x99, 0x5b, 0xc7, 0x2f, 0xc2, 0x23]),
+    guid(0x35d0e0b3, 0x9076, 0x4d2e, [0xa0, 0x16, 0xa9, 0x1b, 0x56, 0x8a, 0x06, 0xb4]),
+];
+const IID_GDI_INTEROP: Iid =
+    guid(0x1edd9491, 0x9853, 0x4299, [0x89, 0x8f, 0x64, 0x32, 0x98, 0x3b, 0x6f, 0x3a]);
+const IID_GDI_INTEROP1: Iid =
+    guid(0x4556be70, 0x3abd, 0x4f70, [0x90, 0xbe, 0x42, 0x17, 0x80, 0xa6, 0xf5, 0x15]);
 
 /// The test's objects' QueryInterface: themselves for IUnknown and their
 /// own interface, E_NOINTERFACE (and NULL) for anything else. DirectWrite
@@ -893,6 +913,44 @@ fn tests() {
         }
         let release: GetU32 = method(params, 2);
         release(params);
+
+        // 11. The later factory revisions: one object answers them all,
+        // whether a program asks for the revision from the start or
+        // grows into it. A revision gala did not answer is what Word's
+        // startup walked into (ROADMAP OF).
+        let factory_qi: extern "system" fn(*mut c_void, *const Iid, *mut *mut c_void) -> HResult =
+            method(factory, 0);
+        for iid in IID_FACTORY_REVISIONS {
+            let mut same: *mut c_void = core::ptr::null_mut();
+            check(factory_qi(factory, &iid, &mut same) == 0 && same == factory, 11);
+            let release: GetU32 = method(same, 2);
+            release(same);
+            let mut made: *mut c_void = core::ptr::null_mut();
+            check(DWriteCreateFactory(0, &iid, &mut made) == 0 && made == factory, 11);
+            let release: GetU32 = method(made, 2);
+            release(made);
+        }
+        // IDWriteFactory::GetGdiInterop (17): the factory's own object,
+        // the same one on a second call, which answers both GDI interop
+        // interfaces as itself.
+        let gdi_interop: GetPtr = method(factory, 17);
+        let mut interop: *mut c_void = core::ptr::null_mut();
+        check(gdi_interop(factory, &mut interop) == 0 && !interop.is_null(), 11);
+        check(interop != factory, 11);
+        let mut interop_again: *mut c_void = core::ptr::null_mut();
+        check(gdi_interop(factory, &mut interop_again) == 0 && interop_again == interop, 11);
+        let release: GetU32 = method(interop_again, 2);
+        release(interop_again);
+        let interop_qi: extern "system" fn(*mut c_void, *const Iid, *mut *mut c_void) -> HResult =
+            method(interop, 0);
+        for iid in [IID_GDI_INTEROP, IID_GDI_INTEROP1, IID_UNKNOWN] {
+            let mut same: *mut c_void = core::ptr::null_mut();
+            check(interop_qi(interop, &iid, &mut same) == 0 && same == interop, 11);
+            let release: GetU32 = method(same, 2);
+            release(same);
+        }
+        let release: GetU32 = method(interop, 2);
+        release(interop);
 
         // Release what we were given (each Release is slot 2).
         for o in

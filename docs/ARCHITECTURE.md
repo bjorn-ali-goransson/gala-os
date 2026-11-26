@@ -12696,8 +12696,25 @@ Roman, ... are found as Selawik, as in gdi32. Every object reachable from
 it is static (AddRef/Release count nothing): factory, collection, family
 (also the font list), fonts, faces (metrics, glyph indices and design
 metrics, font tables in place), files with the local file loader (paths)
-and streams, localized strings (en-us). Each factory method not built
-yet records its own name (`dwrite.dll!IDWriteFactory::<method>`).
+and streams, localized strings (en-us). Each method not built yet
+records its own name, interface and all
+(`dwrite.dll!IDWriteFactory3::GetSystemFontSet`), and a call about an
+interface gala has not got names the whole IID
+(`dwrite.dll!QueryInterface({GUID}): refused`), the first dword naming
+an interface only to a reader who already has the list to match it
+against.
+
+The factory's later revisions (IDWriteFactory1 through 7, each only
+adding methods to the one before) are the same object, which answers
+every one of their IIDs through QueryInterface and through
+DWriteCreateFactory, as Windows does -- measured, not assumed. Its
+vtable is IDWriteFactory7's whole length, so a method a revision added
+lands on a slot that records its name instead of a word past the end of
+the table. Its GDI interop object (`GetGdiInterop`, one per factory on
+Windows, so one static object here), which bridges a font and a
+LOGFONT, answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself;
+none of its methods is built, each recording its own name, so the run of
+a program that wants one names it. Test: `dwrite_test` step 11.
 
 Custom font files and collections (the renderer's font proxy: its
 collection loader enumerates the browser's handles to the system's font
@@ -12749,7 +12766,9 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
   compatible targets, effects or command lists ("Direct2D" lists them).
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
-  rotation, skew or sideways runs; no text layout, IDWriteFactory1+.
+  rotation, skew or sideways runs; no text layout. The later factory
+  revisions and the GDI interop object answer for themselves but
+  implement none of their own methods ("DirectWrite").
 - Mitigation policies are kept, not enforced; no sandbox (stage 3).
 - One Windows Runtime class (PackageManager, with no packages); no
   shell namespace objects, no COM proxies (see their sections).

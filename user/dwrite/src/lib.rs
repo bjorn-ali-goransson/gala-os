@@ -126,6 +126,30 @@ pub const IID_IUNKNOWN: Iid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 pub const IID_IDWRITE_FACTORY: Iid =
     guid(0xb859ee5a, 0xd838, 0x4b5b, [0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48]);
 
+/// Every factory interface this DLL answers: IDWriteFactory and the
+/// revisions after it, each of which only adds methods to the one
+/// before. DirectWrite answers them all with the one factory object --
+/// QueryInterface and DWriteCreateFactory both give the shared factory's
+/// own pointer, measured on Windows -- and so does gala, whose vtable is
+/// IDWriteFactory7's whole length so that a method a revision added
+/// lands on a slot that records its name (dwrite_test step 11).
+const FACTORY_IIDS: [Iid; 8] = [
+    IID_IDWRITE_FACTORY,
+    guid(0x30572f99, 0xdac6, 0x41db, [0xa1, 0x6e, 0x04, 0x86, 0x30, 0x7e, 0x60, 0x6a]),
+    guid(0x0439fc60, 0xca44, 0x4994, [0x8d, 0xee, 0x3a, 0x9a, 0xf7, 0xb7, 0x32, 0xec]),
+    guid(0x9a1b41c3, 0xd3bb, 0x466a, [0x87, 0xfc, 0xfe, 0x67, 0x55, 0x6a, 0x3b, 0x65]),
+    guid(0x4b0b5bd3, 0x0797, 0x4549, [0x8a, 0xc5, 0xfe, 0x91, 0x5c, 0xc5, 0x38, 0x56]),
+    guid(0x958db99a, 0xbe2a, 0x4f09, [0xaf, 0x7d, 0x65, 0x18, 0x98, 0x03, 0xd1, 0xd3]),
+    guid(0xf3744d80, 0x21f7, 0x42eb, [0xb3, 0x5d, 0x99, 0x5b, 0xc7, 0x2f, 0xc2, 0x23]),
+    guid(0x35d0e0b3, 0x9076, 0x4d2e, [0xa0, 0x16, 0xa9, 0x1b, 0x56, 0x8a, 0x06, 0xb4]),
+];
+
+/// The GDI interop interfaces, which the one interop object answers.
+const GDI_INTEROP_IIDS: [Iid; 2] = [
+    guid(0x1edd9491, 0x9853, 0x4299, [0x89, 0x8f, 0x64, 0x32, 0x98, 0x3b, 0x6f, 0x3a]),
+    guid(0x4556be70, 0x3abd, 0x4f70, [0x90, 0xbe, 0x42, 0x17, 0x80, 0xa6, 0xf5, 0x15]),
+];
+
 /// A vtable: the methods' addresses, in the interface's order.
 pub struct VTable<const N: usize>(pub [*const (); N]);
 // SAFETY: function addresses only, never written.
@@ -147,7 +171,7 @@ unsafe impl Sync for Factory {}
 
 static FACTORY: Factory = Factory { vtbl: vt(&FACTORY_VTBL) };
 
-static FACTORY_VTBL: VTable<24> = VTable([
+static FACTORY_VTBL: VTable<57> = VTable([
     factory_qi as *const (),
     static_add_ref as *const (),
     static_release as *const (),
@@ -172,7 +196,80 @@ static FACTORY_VTBL: VTable<24> = VTable([
     factory_CreateTextAnalyzer as *const (),
     factory_CreateNumberSubstitution as *const (),
     glyphs::create_glyph_run_analysis as *const (),
+    // IDWriteFactory1 and the revisions after it, in the order the
+    // headers declare them: a program that asked for a revision calls
+    // these through the same vtable.
+    factory1_GetEudcFontCollection as *const (),
+    factory1_CreateCustomRenderingParams as *const (),
+    factory2_GetSystemFontFallback as *const (),
+    factory2_CreateFontFallbackBuilder as *const (),
+    factory2_TranslateColorGlyphRun as *const (),
+    factory2_CreateCustomRenderingParams as *const (),
+    factory2_CreateGlyphRunAnalysis as *const (),
+    factory3_CreateGlyphRunAnalysis as *const (),
+    factory3_CreateCustomRenderingParams as *const (),
+    factory3_CreateFontFaceReference_file as *const (),
+    factory3_CreateFontFaceReference_path as *const (),
+    factory3_GetSystemFontSet as *const (),
+    factory3_CreateFontSetBuilder as *const (),
+    factory3_CreateFontCollectionFromFontSet as *const (),
+    factory3_GetSystemFontCollection as *const (),
+    factory3_GetFontDownloadQueue as *const (),
+    factory4_TranslateColorGlyphRun as *const (),
+    factory4_ComputeGlyphOrigins_baseline as *const (),
+    factory4_ComputeGlyphOrigins_measuring as *const (),
+    factory5_CreateFontSetBuilder as *const (),
+    factory5_CreateInMemoryFontFileLoader as *const (),
+    factory5_CreateHttpFontFileLoader as *const (),
+    factory5_AnalyzeContainerType as *const (),
+    factory5_UnpackFontFile as *const (),
+    factory6_CreateFontFaceReference as *const (),
+    factory6_CreateFontResource as *const (),
+    factory6_GetSystemFontSet as *const (),
+    factory6_GetSystemFontCollection as *const (),
+    factory6_CreateFontCollectionFromFontSet as *const (),
+    factory6_CreateFontSetBuilder as *const (),
+    factory6_CreateTextFormat as *const (),
+    factory7_GetSystemFontSet as *const (),
+    factory7_GetSystemFontCollection as *const (),
 ]);
+
+/// The GDI interop object (one for the factory, as Windows has it): the
+/// bridge between a font and a LOGFONT, which Word asks the factory for
+/// while it lays out its window's text. Its methods are not implemented;
+/// each records its own name, so a run names the one a program wanted
+/// rather than stopping with nothing said.
+#[repr(C)]
+struct GdiInterop {
+    vtbl: *const (),
+}
+// SAFETY: an immutable pointer to a static vtable.
+unsafe impl Sync for GdiInterop {}
+
+static GDI_INTEROP: GdiInterop = GdiInterop { vtbl: vt(&GDI_INTEROP_VTBL) };
+
+static GDI_INTEROP_VTBL: VTable<12> = VTable([
+    interop_qi as *const (),
+    static_add_ref as *const (),
+    static_release as *const (),
+    interop_CreateFontFromLOGFONT as *const (),
+    interop_ConvertFontToLOGFONT as *const (),
+    interop_ConvertFontFaceToLOGFONT as *const (),
+    interop_CreateFontFaceFromHdc as *const (),
+    interop_CreateBitmapRenderTarget as *const (),
+    interop1_CreateFontFromLOGFONT as *const (),
+    interop1_GetFontSignature_face as *const (),
+    interop1_GetFontSignature_font as *const (),
+    interop1_GetMatchingFontsByLOGFONT as *const (),
+]);
+
+extern "system" fn interop_qi(
+    this: *const c_void,
+    riid: *const Iid,
+    out: *mut *const c_void,
+) -> HResult {
+    query(this, &GDI_INTEROP_IIDS, riid, out)
+}
 
 /// Records `dwrite.dll!<what>` the first time a program reaches the call
 /// site: a call that works leaves nothing else behind, so the ledger
@@ -229,14 +326,50 @@ pub fn query(
             return S_OK;
         }
         *out = core::ptr::null();
-        missing(b"dwrite.dll!QueryInterface(refused)", data1(&*riid));
+        let (name, n) = about(b"dwrite.dll!QueryInterface", &*riid, b"refused");
+        missing(&name[..n], 0);
     }
     E_NOINTERFACE
 }
 
-/// The first dword of a GUID (a ledger detail), as DEFINE_GUID writes it.
-pub fn data1(g: &Iid) -> u64 {
-    u64::from(u32::from_le_bytes([g[0], g[1], g[2], g[3]]))
+/// The bytes of a GUID in string order (Data1..Data3 little-endian).
+const GUID_ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/// `<call>({XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}): <why>`, the record a
+/// call about an interface leaves. The whole IID and not its first
+/// dword: the dword names an interface only to a reader who already has
+/// a list to match it against, and the one who needs the record is the
+/// one who has not.
+pub fn about(call: &[u8], g: &Iid, why: &[u8]) -> ([u8; 128], usize) {
+    let mut text = [0u8; 128];
+    let mut n = 0;
+    let mut put = |b: u8| {
+        if n < text.len() {
+            text[n] = b;
+            n += 1;
+        }
+    };
+    for &b in call {
+        put(b);
+    }
+    put(b'(');
+    put(b'{');
+    for (i, &b) in GUID_ORDER.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            put(b'-');
+        }
+        let hex = |v: u8| b"0123456789ABCDEF"[usize::from(v & 15)];
+        put(hex(g[b] >> 4));
+        put(hex(g[b]));
+    }
+    put(b'}');
+    put(b')');
+    put(b':');
+    put(b' ');
+    for &b in why {
+        put(b);
+    }
+    (text, n)
 }
 
 /// AddRef/Release of the static objects: they live for the process.
@@ -253,7 +386,21 @@ extern "system" fn factory_qi(
     riid: *const Iid,
     out: *mut *const c_void,
 ) -> HResult {
-    query(this, &[IID_IDWRITE_FACTORY], riid, out)
+    query(this, &FACTORY_IIDS, riid, out)
+}
+
+/// IDWriteFactory::GetGdiInterop (17): the factory's GDI interop object.
+/// Windows gives the same object on every call of a factory, so gala's
+/// is the one static object (dwrite_test step 11).
+#[allow(non_snake_case)]
+extern "system" fn factory_GetGdiInterop(_this: *const c_void, out: *mut *const c_void) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    reached!(b"IDWriteFactory::GetGdiInterop");
+    // SAFETY: the caller's output.
+    unsafe { *out = (&raw const GDI_INTEROP).cast() };
+    S_OK
 }
 
 extern "system" fn factory_get_system_font_collection(
@@ -412,35 +559,80 @@ extern "system" fn factory_create_font_face(
     }
 }
 
-/// The factory methods not implemented yet (they all return an HRESULT;
-/// the caller's arguments are left alone, outputs included); each reports
-/// the method's own name, which is the one the header gives it.
-macro_rules! factory_not_impl {
+/// The methods not implemented yet (they all return an HRESULT; the
+/// caller's arguments are left alone, outputs included); each reports
+/// its own name, interface and all, which is the one the header gives
+/// it. A slot that exists and says so is the point: a program that
+/// asked for IDWriteFactory7 and called a method of it would otherwise
+/// read a word past the end of the vtable and call it.
+macro_rules! not_impl {
     ($($name:ident as $shown:literal)*) => {
         $(
             #[allow(non_snake_case)]
             extern "system" fn $name(_this: *const c_void) -> HResult {
-                missing(concat!("dwrite.dll!IDWriteFactory::", $shown).as_bytes(), 0);
+                missing(concat!("dwrite.dll!", $shown).as_bytes(), 0);
                 E_NOTIMPL
             }
         )*
     };
 }
 
-factory_not_impl! {
-    factory_CreateTextFormat as "CreateTextFormat"
-    factory_CreateTypography as "CreateTypography"
-    factory_GetGdiInterop as "GetGdiInterop"
-    factory_CreateTextLayout as "CreateTextLayout"
-    factory_CreateGdiCompatibleTextLayout as "CreateGdiCompatibleTextLayout"
-    factory_CreateEllipsisTrimmingSign as "CreateEllipsisTrimmingSign"
-    factory_CreateTextAnalyzer as "CreateTextAnalyzer"
-    factory_CreateNumberSubstitution as "CreateNumberSubstitution"
+not_impl! {
+    factory_CreateTextFormat as "IDWriteFactory::CreateTextFormat"
+    factory_CreateTypography as "IDWriteFactory::CreateTypography"
+    factory_CreateTextLayout as "IDWriteFactory::CreateTextLayout"
+    factory_CreateGdiCompatibleTextLayout as "IDWriteFactory::CreateGdiCompatibleTextLayout"
+    factory_CreateEllipsisTrimmingSign as "IDWriteFactory::CreateEllipsisTrimmingSign"
+    factory_CreateTextAnalyzer as "IDWriteFactory::CreateTextAnalyzer"
+    factory_CreateNumberSubstitution as "IDWriteFactory::CreateNumberSubstitution"
+    factory1_GetEudcFontCollection as "IDWriteFactory1::GetEudcFontCollection"
+    factory1_CreateCustomRenderingParams as "IDWriteFactory1::CreateCustomRenderingParams"
+    factory2_GetSystemFontFallback as "IDWriteFactory2::GetSystemFontFallback"
+    factory2_CreateFontFallbackBuilder as "IDWriteFactory2::CreateFontFallbackBuilder"
+    factory2_TranslateColorGlyphRun as "IDWriteFactory2::TranslateColorGlyphRun"
+    factory2_CreateCustomRenderingParams as "IDWriteFactory2::CreateCustomRenderingParams"
+    factory2_CreateGlyphRunAnalysis as "IDWriteFactory2::CreateGlyphRunAnalysis"
+    factory3_CreateGlyphRunAnalysis as "IDWriteFactory3::CreateGlyphRunAnalysis"
+    factory3_CreateCustomRenderingParams as "IDWriteFactory3::CreateCustomRenderingParams"
+    factory3_CreateFontFaceReference_file as "IDWriteFactory3::CreateFontFaceReference(file)"
+    factory3_CreateFontFaceReference_path as "IDWriteFactory3::CreateFontFaceReference(path)"
+    factory3_GetSystemFontSet as "IDWriteFactory3::GetSystemFontSet"
+    factory3_CreateFontSetBuilder as "IDWriteFactory3::CreateFontSetBuilder"
+    factory3_CreateFontCollectionFromFontSet as "IDWriteFactory3::CreateFontCollectionFromFontSet"
+    factory3_GetSystemFontCollection as "IDWriteFactory3::GetSystemFontCollection"
+    factory3_GetFontDownloadQueue as "IDWriteFactory3::GetFontDownloadQueue"
+    factory4_TranslateColorGlyphRun as "IDWriteFactory4::TranslateColorGlyphRun"
+    factory4_ComputeGlyphOrigins_baseline as "IDWriteFactory4::ComputeGlyphOrigins(baseline)"
+    factory4_ComputeGlyphOrigins_measuring as "IDWriteFactory4::ComputeGlyphOrigins(measuring)"
+    factory5_CreateFontSetBuilder as "IDWriteFactory5::CreateFontSetBuilder"
+    factory5_CreateInMemoryFontFileLoader as "IDWriteFactory5::CreateInMemoryFontFileLoader"
+    factory5_CreateHttpFontFileLoader as "IDWriteFactory5::CreateHttpFontFileLoader"
+    factory5_AnalyzeContainerType as "IDWriteFactory5::AnalyzeContainerType"
+    factory5_UnpackFontFile as "IDWriteFactory5::UnpackFontFile"
+    factory6_CreateFontFaceReference as "IDWriteFactory6::CreateFontFaceReference"
+    factory6_CreateFontResource as "IDWriteFactory6::CreateFontResource"
+    factory6_GetSystemFontSet as "IDWriteFactory6::GetSystemFontSet"
+    factory6_GetSystemFontCollection as "IDWriteFactory6::GetSystemFontCollection"
+    factory6_CreateFontCollectionFromFontSet as "IDWriteFactory6::CreateFontCollectionFromFontSet"
+    factory6_CreateFontSetBuilder as "IDWriteFactory6::CreateFontSetBuilder"
+    factory6_CreateTextFormat as "IDWriteFactory6::CreateTextFormat"
+    factory7_GetSystemFontSet as "IDWriteFactory7::GetSystemFontSet"
+    factory7_GetSystemFontCollection as "IDWriteFactory7::GetSystemFontCollection"
+    interop_CreateFontFromLOGFONT as "IDWriteGdiInterop::CreateFontFromLOGFONT"
+    interop_ConvertFontToLOGFONT as "IDWriteGdiInterop::ConvertFontToLOGFONT"
+    interop_ConvertFontFaceToLOGFONT as "IDWriteGdiInterop::ConvertFontFaceToLOGFONT"
+    interop_CreateFontFaceFromHdc as "IDWriteGdiInterop::CreateFontFaceFromHdc"
+    interop_CreateBitmapRenderTarget as "IDWriteGdiInterop::CreateBitmapRenderTarget"
+    interop1_CreateFontFromLOGFONT as "IDWriteGdiInterop1::CreateFontFromLOGFONT(collection)"
+    interop1_GetFontSignature_face as "IDWriteGdiInterop1::GetFontSignature(face)"
+    interop1_GetFontSignature_font as "IDWriteGdiInterop1::GetFontSignature(font)"
+    interop1_GetMatchingFontsByLOGFONT as "IDWriteGdiInterop1::GetMatchingFontsByLOGFONT"
 }
 
 /// DWriteCreateFactory(factoryType, iid, **factory): the process's
-/// factory, for IDWriteFactory (or IUnknown); E_NOINTERFACE for the later
-/// factory interfaces (IDWriteFactory1..8), which gala lacks.
+/// factory, for IDWriteFactory, the revisions after it (IDWriteFactory1
+/// through 7) or IUnknown -- the same object for every one of them, as
+/// Windows gives.
 #[unsafe(no_mangle)]
 pub extern "system" fn DWriteCreateFactory(
     factory_type: u32,
@@ -455,11 +647,12 @@ pub extern "system" fn DWriteCreateFactory(
         unsafe { *factory = core::ptr::null() };
         return E_INVALIDARG;
     }
-    let r = query((&raw const FACTORY).cast(), &[IID_IDWRITE_FACTORY], iid, factory);
+    let r = query((&raw const FACTORY).cast(), &FACTORY_IIDS, iid, factory);
     if r != S_OK {
-        // SAFETY: the caller's IID: its first four bytes as the detail.
-        let d1 = unsafe { u64::from(iid.cast::<u32>().read_unaligned()) };
-        missing(b"dwrite.dll!DWriteCreateFactory(interface)", d1);
+        // SAFETY: the caller's IID, which query() read as well.
+        let (name, n) =
+            unsafe { about(b"dwrite.dll!DWriteCreateFactory", &*iid, b"no such interface") };
+        missing(&name[..n], 0);
     }
     r
 }
