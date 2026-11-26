@@ -12136,7 +12136,30 @@ stations and desktops a program creates are refused until stage 3).
   answer, and what the plugin pointer points at is never looked into). The name missing was what
   stopped Word: a delay load that resolves to nothing is
   ERROR_PROC_NOT_FOUND, the 0x8007007F
-  Office.Licensing.FullValidation reported before Word's "(6)" box. XrML
+  Office.Licensing.FullValidation reported before Word's "(6)" box. The
+  authentication data that licensing deposits once the plugin pair
+  answers is taken and dropped: SLSetAuthenticationData, which no
+  public header declares either, takes a handle, a count and a buffer,
+  and the order it looks at them in is measured by calling Windows'
+  own export as the standard user Office runs as -- a NULL handle is
+  E_INVALIDARG first of all, a count above 1024 is
+  ERROR_BUFFER_OVERFLOW before either the buffer or the handle (2048
+  bytes through a handle that was never opened is the overflow, not
+  the context mismatch that handle earns with a count of 32), a count
+  that is not zero with a NULL buffer is E_INVALIDARG before the
+  handle, a handle that is not one past those two is
+  RPC_NT_SS_CONTEXT_MISMATCH, and a count of zero is S_OK with the
+  buffer never read, which a reserved page proves: zero answers S_OK
+  where 32 faults in the caller, so sppc reads the blob in the
+  caller's context without a probe. 1024 bytes are read and 1025 are
+  not. Windows reads a blob of that size and its service refuses
+  filler with ERROR_INVALID_DATA; gala has no such service and takes
+  it, because there is no SLGetAuthenticationData and no other call
+  reads the data back (measured: the name does not resolve), so a blob
+  gala accepts and keeps nothing of leaves no state a caller can
+  observe to be wrong, where a refusal would be gala inventing a
+  verdict on bytes it never looked at. That one case is the only
+  answer the two do not share, and `sppc_test` leaves it to either. XrML
   signatures are not verified, where Windows refuses a license that is
   not signed (`sppc_test` runs its round trip only where its unsigned
   license is taken). A license file's id is a hash of its bytes (what
