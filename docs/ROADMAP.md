@@ -4332,7 +4332,11 @@ need gala's.
      codes; the round trip of an unsigned license is gala's own, which
      Windows refuses). Integrator.exe now installs Office's licenses
      through it (SLInstallLicense, SLGetSLIDList, SLGetLicenseInformation
-     in the ledger) and exits 0. The next integrator.exe died of
+     in the ledger) and exits 0. WINWORD resolves one more of the API by
+     name, `SLGetProductSkuInformation` (named by a stack capture at the
+     ledger's missing-export row: MSO 3.0's client through
+     GetProcAddress), which answers out of the SKU's generic public
+     end-user license. The next integrator.exe died of
      0xc06d007f (delay-loaded function not found):
      `CRYPT32.dll!CryptSIPAddProvider`, a named stub. Done: crypt32's
      CryptSIPAddProvider and CryptSIPRemoveProvider (ARCHITECTURE

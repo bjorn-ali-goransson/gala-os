@@ -103,6 +103,14 @@ unsafe extern "system" {
         size: *mut u32,
         value: *mut *mut u8,
     ) -> i32;
+    fn SLGetProductSkuInformation(
+        h: Handle,
+        sku: *const Guid,
+        name: *const u16,
+        data_type: *mut u32,
+        size: *mut u32,
+        value: *mut *mut u8,
+    ) -> i32;
     fn SLGetLicensingStatusInformation(
         h: Handle,
         app: *const Guid,
@@ -167,6 +175,8 @@ unsafe extern "system" {
 
 const S_OK: i32 = 0;
 const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+/// SL_E_VALUE_NOT_FOUND.
+const SL_E_VALUE_NOT_FOUND: i32 = 0xc004_f012u32 as i32;
 /// SL_E_RIGHT_NOT_GRANTED.
 const SL_E_RIGHT_NOT_GRANTED: i32 = 0xc004_f013u32 as i32;
 /// SL_E_APPLICATION_POLICIES_MISSING.
@@ -213,11 +223,14 @@ xmlns:tm=\"http://www.microsoft.com/DRM/XrML2/TM/v2\"><r:title>sppc_test (Public
 <tm:infoStr name=\"productSkuId\">{5AA0C7E1-2F4E-4D3B-9A61-1F52607E3C02}</tm:infoStr>\
 <tm:infoStr name=\"applicationId\">{5aa0c7e1-2f4e-4d3b-9a61-1f52607e3c01}</tm:infoStr>\
 <tm:infoStr name=\"productName\">sppc_test edition</tm:infoStr>\
+<tm:infoStr name=\"productDescription\">sppc_test, GALA channel</tm:infoStr>\
 </tm:infoList></tm:infoTables></r:otherInfo></r:license>\
 <r:license xmlns:r=\"urn:mpeg:mpeg21:2003:01-REL-R-NS\" licenseId=\"{5aa0c7e1-2f4e-4d3b-9a61-1f52607e3c04}\" \
 xmlns:tm=\"http://www.microsoft.com/DRM/XrML2/TM/v2\"><r:title>sppc_test (Private)</r:title>\
 <r:otherInfo><tm:infoTables><tm:infoList tag=\"#global\">\
 <tm:infoStr name=\"licenseType\">msft:sl/EUL/GENERIC/PRIVATE</tm:infoStr>\
+<tm:infoStr name=\"productName\">sppc_test private edition</tm:infoStr>\
+<tm:infoStr name=\"privateOnly\">private</tm:infoStr>\
 <tm:infoStr name=\"productSkuId\">{5AA0C7E1-2F4E-4D3B-9A61-1F52607E3C02}</tm:infoStr>\
 </tm:infoList></tm:infoTables></r:otherInfo></r:license>\
 </rg:licenseGroup>";
@@ -331,6 +344,22 @@ impl Checks {
     }
 }
 
+/// The string value a getter gave: SL_DATA_SZ, as long as `expect`
+/// with its NUL, and those characters; then freed.
+#[track_caller]
+fn string_is(c: &mut Checks, expect: &str, ty: u32, size: u32, value: *mut u8) -> Result<(), u32> {
+    c.ok(ty == SL_DATA_SZ, ty.into())?;
+    c.ok(size as usize == (expect.len() + 1) * 2, size.into())?;
+    for (i, b) in expect.bytes().enumerate() {
+        // SAFETY: size bytes were given.
+        let ch = unsafe { *value.cast::<u16>().add(i) };
+        c.ok(ch == u16::from(b), ch.into())?;
+    }
+    // SAFETY: allocated by the function with LocalAlloc.
+    unsafe { LocalFree(value) };
+    Ok(())
+}
+
 /// A NUL-terminated UTF-16 copy of `s` (at most 63 characters).
 fn wide(s: &str) -> [u16; 64] {
     let mut w = [0u16; 64];
@@ -392,6 +421,32 @@ fn run() -> Result<(), u32> {
         SLGetLicenseInformation(h, &NOBODY, name.as_ptr(), &mut ty, &mut size, &mut value)
     };
     c.failed(b"information of a license not installed", hr)?;
+    let name = wide("Name");
+    // SAFETY: as above.
+    let hr = unsafe {
+        SLGetProductSkuInformation(h, &NOBODY, name.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.code(b"information of a SKU not installed", hr, SL_E_VALUE_NOT_FOUND)?;
+    // SAFETY: as above, with the optional data type left out.
+    let hr = unsafe {
+        SLGetProductSkuInformation(h, &NOBODY, name.as_ptr(), null_mut(), &mut size, &mut value)
+    };
+    c.code(b"a SKU's information without the data type", hr, SL_E_VALUE_NOT_FOUND)?;
+    // The arguments are looked at before the SKU.
+    // SAFETY: our handle, identifier and outputs; a NULL name.
+    let hr =
+        unsafe { SLGetProductSkuInformation(h, &NOBODY, null(), &mut ty, &mut size, &mut value) };
+    c.code(b"a SKU's information with a NULL value name", hr, E_INVALIDARG)?;
+    // SAFETY: not a handle; our identifier, name and outputs.
+    let hr = unsafe {
+        SLGetProductSkuInformation(0, &NOBODY, name.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.code(b"a SKU's information on what is not a handle", hr, E_INVALIDARG)?;
+    // SAFETY: our handle, name and outputs; a NULL identifier.
+    let hr = unsafe {
+        SLGetProductSkuInformation(h, null(), name.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.code(b"the information of a NULL SKU", hr, E_INVALIDARG)?;
     // The policies of a right nobody consumed: not a value that is
     // missing, a right that was never granted.
     let mut v = 0u32;
@@ -414,10 +469,10 @@ fn run() -> Result<(), u32> {
     // SAFETY: our handle, name and outputs; the data type is optional.
     let hr = unsafe { SLGetPolicyInformation(h, name.as_ptr(), null_mut(), &mut size, &mut value) };
     c.code(b"a policy without the optional data type", hr, SL_E_RIGHT_NOT_GRANTED)?;
-    // The right is answered before the name is looked at.
+    // The name is looked at before the right, as in the DWORD sibling.
     // SAFETY: our handle and outputs; a NULL name.
     let hr = unsafe { SLGetPolicyInformation(h, null(), &mut ty, &mut size, &mut value) };
-    c.code(b"a policy with a NULL value name", hr, SL_E_RIGHT_NOT_GRANTED)?;
+    c.code(b"a policy with a NULL value name", hr, E_INVALIDARG)?;
     // SAFETY: not a handle; our name and outputs.
     let hr = unsafe { SLGetPolicyInformation(0, name.as_ptr(), &mut ty, &mut size, &mut value) };
     c.code(b"SLGetPolicyInformation of what is not a handle", hr, E_INVALIDARG)?;
@@ -547,22 +602,52 @@ fn round_trip(c: &mut Checks, h: Handle) -> Result<(), u32> {
         SLGetLicenseInformation(h, &PUBLIC, name.as_ptr(), &mut ty, &mut size, &mut value)
     };
     c.ok(hr == S_OK, hr as u32 as u64)?;
-    c.ok(ty == SL_DATA_SZ, ty.into())?;
-    let expect = "sppc_test edition";
-    c.ok(size as usize == (expect.len() + 1) * 2, size.into())?;
-    for (i, b) in expect.bytes().enumerate() {
-        // SAFETY: size bytes were given.
-        let ch = unsafe { *value.cast::<u16>().add(i) };
-        c.ok(ch == u16::from(b), ch.into())?;
-    }
-    // SAFETY: allocated by the function with LocalAlloc.
-    unsafe { LocalFree(value) };
+    string_is(c, "sppc_test edition", ty, size, value)?;
+    let name = wide("licenseId");
+    // SAFETY: as above.
+    let hr = unsafe {
+        SLGetLicenseInformation(h, &PUBLIC, name.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.ok(hr == S_OK, hr as u32 as u64)?;
+    string_is(c, "5aa0c7e1-2f4e-4d3b-9a61-1f52607e3c03", ty, size, value)?;
     let name = wide("sppc_test-no-such-value");
     // SAFETY: as above.
     let hr = unsafe {
         SLGetLicenseInformation(h, &PUBLIC, name.as_ptr(), &mut ty, &mut size, &mut value)
     };
     c.failed(b"a value the license has not", hr)?;
+
+    // The SKU's information is its generic public end-user license's:
+    // `Name` and `Description` are that license's productName and
+    // productDescription, its identifier is the public license's, and
+    // what only the private half has is not the SKU's.
+    let name = wide("Name");
+    // SAFETY: our handle, identifier, name and outputs.
+    let hr = unsafe {
+        SLGetProductSkuInformation(h, &SKU, name.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.ok(hr == S_OK, hr as u32 as u64)?;
+    string_is(c, "sppc_test edition", ty, size, value)?;
+    let name = wide("Description");
+    // SAFETY: as above.
+    let hr = unsafe {
+        SLGetProductSkuInformation(h, &SKU, name.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.ok(hr == S_OK, hr as u32 as u64)?;
+    string_is(c, "sppc_test, GALA channel", ty, size, value)?;
+    let name = wide("licenseId");
+    // SAFETY: as above.
+    let hr = unsafe {
+        SLGetProductSkuInformation(h, &SKU, name.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.ok(hr == S_OK, hr as u32 as u64)?;
+    string_is(c, "5aa0c7e1-2f4e-4d3b-9a61-1f52607e3c03", ty, size, value)?;
+    let name = wide("privateOnly");
+    // SAFETY: as above.
+    let hr = unsafe {
+        SLGetProductSkuInformation(h, &SKU, name.as_ptr(), &mut ty, &mut size, &mut value)
+    };
+    c.code(b"a SKU's value only its private license has", hr, SL_E_VALUE_NOT_FOUND)?;
 
     // The SKU's status: licensed by no product key.
     let (mut n, mut status) = (0u32, null_mut::<LicensingStatus>());

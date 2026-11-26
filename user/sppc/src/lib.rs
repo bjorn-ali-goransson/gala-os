@@ -230,6 +230,16 @@ impl Slid {
         out
     }
 
+    /// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, lower case and without
+    /// the braces: an identifier as a getter's value, which is how
+    /// Windows answers `licenseId` and `fileId`. The braced spelling
+    /// names a license file and a ledger row.
+    fn format_value(&self) -> [u8; 36] {
+        let mut out = [0u8; 36];
+        out.copy_from_slice(&self.format()[1..37]);
+        out
+    }
+
     /// A license file's identifier: a name-based (version 5 layout)
     /// identifier from two FNV-1a hashes of its bytes.
     fn of_bytes(data: &[u8]) -> Slid {
@@ -715,13 +725,86 @@ pub extern "system" fn SLGetLicenseInformation(
     };
     let text;
     let found = if name.eq_ignore_ascii_case("licenseId") {
-        text = l.id.format();
+        text = l.id.format_value();
         core::str::from_utf8(&text).ok()
     } else if name.eq_ignore_ascii_case("fileId") {
-        text = l.file.format();
+        text = l.file.format_value();
         core::str::from_utf8(&text).ok()
     } else {
         l.info.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name)).map(|(_, v)| v.as_str())
+    };
+    match found {
+        Some(v) => {
+            let hr = string_value(v, data_type, size, value);
+            record(F, &name, hr)
+        }
+        None => record(F, &name, SL_E_VALUE_NOT_FOUND),
+    }
+}
+
+/// The license a SKU's information comes from: the SKU's generic public
+/// end-user license (`licenseType` `msft:sl/EUL/GENERIC/PUBLIC`). A SKU
+/// has no values of its own in the store - they are its licenses' - and
+/// that one holds the product metadata Windows answers with, over the
+/// SKU's proof-of-licence, phone, store and private siblings.
+fn sku_license(licenses: &[License], sku: Slid) -> Option<&License> {
+    licenses.iter().find(|l| {
+        l.sku == Some(sku)
+            && l.info.iter().any(|(n, v)| {
+                n.eq_ignore_ascii_case("licenseType")
+                    && v.eq_ignore_ascii_case("msft:sl/EUL/GENERIC/PUBLIC")
+            })
+    })
+}
+
+/// SLGetProductSkuInformation(hSLC, pProductSkuId, pwszValueName,
+/// *peDataType, *pcbValue, **ppbValue): a value of the SKU's generic
+/// public end-user license, as a string. `Name` and `Description` are
+/// that license's `productName` and `productDescription`; any other
+/// name is read as SLGetLicenseInformation reads it, so `licenseId`,
+/// `fileId` and the license's own `tm:infoStr` names answer too. A name
+/// the license has not - `Channel`, `Version`, `LicenseStatus` - is
+/// SL_E_VALUE_NOT_FOUND, as on Windows.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLGetProductSkuInformation(
+    handle: usize,
+    sku: *const Slid,
+    name: *const u16,
+    data_type: *mut u32,
+    size: *mut u32,
+    value: *mut *mut u8,
+) -> i32 {
+    const F: &str = "SLGetProductSkuInformation";
+    let Some(name) = from_wide(name) else {
+        return record(F, "invalid argument", E_INVALIDARG);
+    };
+    if !valid(handle) || sku.is_null() || size.is_null() || value.is_null() {
+        return record(F, &name, E_INVALIDARG);
+    }
+    // SAFETY: the caller's identifier.
+    let id = unsafe { *sku };
+    let licenses = load();
+    let Some(l) = sku_license(&licenses, id) else {
+        return record(F, "SKU not installed", SL_E_VALUE_NOT_FOUND);
+    };
+    // The two names of the SKU's own, under which the license keeps its
+    // product metadata.
+    let wanted = if name.eq_ignore_ascii_case("Name") {
+        "productName"
+    } else if name.eq_ignore_ascii_case("Description") {
+        "productDescription"
+    } else {
+        name.as_str()
+    };
+    let text;
+    let found = if wanted.eq_ignore_ascii_case("licenseId") {
+        text = l.id.format_value();
+        core::str::from_utf8(&text).ok()
+    } else if wanted.eq_ignore_ascii_case("fileId") {
+        text = l.file.format_value();
+        core::str::from_utf8(&text).ok()
+    } else {
+        l.info.iter().find(|(n, _)| n.eq_ignore_ascii_case(wanted)).map(|(_, v)| v.as_str())
     };
     match found {
         Some(v) => {
@@ -842,12 +925,13 @@ pub extern "system" fn SLGetPolicyInformation(
     value: *mut *mut u8,
 ) -> i32 {
     const F: &str = "SLGetPolicyInformation";
-    if !valid(handle) || size.is_null() || value.is_null() {
+    let Some(name) = from_wide(name) else {
         return record(F, "invalid argument", E_INVALIDARG);
+    };
+    if !valid(handle) || size.is_null() || value.is_null() {
+        return record(F, &name, E_INVALIDARG);
     }
-    let name = from_wide(name);
-    let case = name.as_deref().unwrap_or("no value name");
-    record(F, case, SL_E_RIGHT_NOT_GRANTED)
+    record(F, &name, SL_E_RIGHT_NOT_GRANTED)
 }
 
 /// SLGetPolicyInformationDWORD(hSLC, pwszValueName, *pdwValue): policies
