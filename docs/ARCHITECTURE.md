@@ -6477,12 +6477,16 @@ built for x64 and x86.
   content not of the type) leaves, char's value and a failed typed
   load's parse error.
 
-### xmllite (XmlLite's reader and writer)
+### xmllite (XmlLite's reader, writer and writer outputs)
 
-XmlLite's pull reader and its writer, `CreateXmlReader`/`IXmlReader` and
-`CreateXmlWriter`/`IXmlWriter` (`user/xmllite`, `xmllite_test`; ROADMAP
-OF). Word delay-loads both and ends on 0xc06d007f without either; SQL
-Server LocalDB imports both. Built for x64, x86 and ARM64. The reader is
+XmlLite's pull reader, its writer and the outputs the writer writes
+through: `CreateXmlReader`/`IXmlReader`, `CreateXmlWriter`/`IXmlWriter`
+and `CreateXmlWriterOutputWithEncodingName` /
+`CreateXmlWriterOutputWithEncodingCodePage` (`user/xmllite`,
+`xmllite_test`; ROADMAP OF). Word delay-loads the reader, the writer and
+the first of the two output creators, and ends on 0xc06d007f without any
+of them; SQL Server LocalDB imports the reader and the writer. Built for
+x64, x86 and ARM64. The reader is
 `gala_xml`'s `Scan`, so it refuses what msxml6's DOM and webservices'
 reader refuse, in the same words; the writer is its own (`writer.rs`),
 and every byte it writes is measured against Windows' writer.
@@ -6555,15 +6559,20 @@ and every byte it writes is measured against Windows' writer.
 The writer is `writer.rs`: `CreateXmlWriter(IID_IXmlWriter, &writer,
 NULL)` and the 32 methods of `IXmlWriter`. What it writes is measured,
 not derived from the standard -- `xmllite_test`'s `writer` module writes
-twenty-six documents with the same calls on Windows and under gala and
-compares the bytes (1048 checks for the DLL in all). The parts a program
-can tell apart:
+fifty cases with the same calls on Windows and under gala and compares
+the bytes (2936 checks for the DLL in all, the reader's among them). The
+parts a program can tell apart:
 
 - **When bytes reach the stream**: never until they are asked for. Flush
   hands over what there is; the last Release closes every element still
   open and then hands over. WriteEndDocument closes the open elements
   and writes nothing itself, so a program that ends its document and
-  never flushes gets the same bytes from Release. A writer whose last
+  never flushes gets the same bytes from Release. It ends what an
+  element opened and not what WriteStartDocument started: with no
+  element written it is WR_E_INVALIDACTION (a comment on its own is not
+  a document to end), with one it is S_OK whether a document was
+  started or not, and a document is ended once -- a second call, and
+  anything written after the first, is out of place. A writer whose last
   call killed it (below) keeps the unfinished document it had and closes
   nothing, which is why a refused doctype leaves a half-written `<r` in
   the stream.
@@ -6578,13 +6587,49 @@ can tell apart:
   output up, and every write is E_UNEXPECTED without one while Flush is
   S_OK. A second SetOutput starts the document over and keeps the
   properties.
-- **The declaration** is written at the first call that produces bytes,
-  with the standalone a *successful* WriteStartDocument asked for. A
-  fragment has no document to start, so WriteStartDocument is
-  WR_E_INVALIDACTION there -- and the declaration still comes out,
-  which is what the measurement says and what no reading of the
-  documentation would give. A stream output never gets a byte order
-  mark, whatever the ByteOrderMark property says.
+- **The encoding** is the output's and not the writer's (`output.rs`):
+  `CreateXmlWriterOutputWithEncodingName` and
+  `CreateXmlWriterOutputWithEncodingCodePage` wrap a stream and the
+  encoding to write it in, as an `IXmlWriterOutput` -- an object whose
+  only interface is its own IID (`{C1131708-0F59-477F-9359-7D332451BC1A}`),
+  which answers even IUnknown with E_NOINTERFACE, measured. SetOutput
+  takes a stream or one of these, so a writer handed a plain stream
+  writes UTF-8 and says so. What XmlLite takes is 25 names and 22 code
+  pages: UTF-8, UTF-16 and UTF-16BE, UCS-4 (and its aliases), US-ASCII
+  and the eighteen single-byte pages 1250-1258 and 28591-28599
+  (`codepages.rs`: each table taken from the host's code page data and
+  then checked byte by byte through XmlLite's own writer, which is the
+  measurement and not a copy of anyone's table); everything else leaves
+  a writer that answers MX_E_ENCODING for every write while Flush is
+  S_OK and the properties stay unlocked, revived by a good output. The
+  document is held as its own text and encoded on the way to the
+  stream, so where the encoding has no byte for a character: an
+  attribute value or character data gets a hexadecimal reference, while
+  a comment, a CDATA section or raw text -- where a reference is not
+  allowed -- kills the encoder. A dead encoder's
+  hand-over is E_FAIL; the bytes before the character that killed it
+  are paid at the next hand-over, and nothing after it ever reaches the
+  stream.
+- **The declaration** is WriteStartDocument's and no other call's: an
+  element, a comment or a doctype written with no document started gets
+  none. Inside that call the order was measured step by step -- a
+  document started already, a declaration written already or any byte
+  written is WR_E_INVALIDACTION, which kills the writer at Document
+  level and leaves it alive in a fragment; then the declaration, which
+  needs an output (E_UNEXPECTED without one) and says the standalone
+  just asked for; then the conformance level, so a fragment gets its
+  declaration on the stream and the refusal for an answer, which is
+  what the measurement says and what no reading of the documentation
+  would give; then the output again, for a call whose declaration was
+  left out. A declaration left out settles nothing: a document-level
+  call that failed for want of an output fails the same way again,
+  while one whose declaration reached the stream is WR_E_INVALIDACTION
+  from then on. The call locks the properties whether or not a byte
+  came of it, so a document started with OmitXmlDeclaration writes
+  nothing and locks them all the same -- and a fragment's refused call
+  with the declaration omitted writes nothing and locks nothing. A
+  plain stream output never gets a byte order mark, whatever the
+  ByteOrderMark property says; an output with a wide encoding does.
 - **The properties** are six slots read back exactly as they were set
   (MultiLanguage, Indent, ByteOrderMark, OmitXmlDeclaration,
   ConformanceLevel and an undocumented fifth that reads 0); the sixth
@@ -6635,8 +6680,9 @@ can tell apart:
 - **Limits**, each recorded when a program meets it: WriteAttributes,
   WriteNode and WriteNodeShallow copy from an `IXmlReader` and are
   E_NOTIMPL, the MultiLanguage property is kept and not acted on (the
-  output is UTF-8), and a doctype with a public identifier and no system
-  identifier is a shape no measurement covers.
+  encoding comes from the output and from nowhere else), and a doctype
+  with a public identifier and no system identifier is a shape no
+  measurement covers.
 
 ### RPC: rpcrt4
 

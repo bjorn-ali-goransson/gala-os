@@ -3,8 +3,10 @@
 //! (`CreateXmlWriter` and `IXmlWriter`, in `writer`) that writes a
 //! document out.
 //!
-//! Word delay-loads both and ends with 0xc06d007f without either
-//! (ROADMAP OF); SQL Server LocalDB imports both. What this DLL does
+//! Word delay-loads the reader, the writer and
+//! `CreateXmlWriterOutputWithEncodingName` (`output`, which is a stream
+//! with the encoding to write it in); SQL Server LocalDB imports the
+//! reader and the writer. What this DLL does
 //! not implement fails honestly: E_NOTIMPL, recorded in the ledger as
 //! `xmllite.dll!<interface>::<method>` ("not implemented"), and an
 //! export with nothing behind it ends the process (`gala_stubs`), so the
@@ -25,6 +27,8 @@ use alloc::vec::Vec;
 
 use gala_heap as _;
 
+mod codepages;
+mod output;
 mod reader;
 mod writer;
 
@@ -101,6 +105,12 @@ pub fn data1(g: &Guid) -> u64 {
 
 /// A COM object pointer, as the interfaces here take and hand out.
 pub type Obj = *mut core::ffi::c_void;
+
+/// A COM vtable: an object's first field, and function pointers only.
+#[repr(C)]
+pub struct VTable<const N: usize>(pub [*const (); N]);
+// SAFETY: function pointers only.
+unsafe impl<const N: usize> Sync for VTable<N> {}
 
 /// `IUnknown`, which every object answers for.
 pub const IID_IUNKNOWN: Guid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);

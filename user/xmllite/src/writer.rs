@@ -26,6 +26,16 @@
 //!   answers S_OK, and only a new output revives it. A refusal about
 //!   the call's own arguments (a bad name, an undeclared namespace, a
 //!   duplicate attribute, text at the top of a document) does not;
+//! - the encoding is the output's and not the writer's. A plain
+//!   stream is written UTF-8 and declared as such; an
+//!   `IXmlWriterOutput` (`output`) decides what the declaration says,
+//!   whether a byte order mark leads the stream, which characters
+//!   become references and which character kills the encoder -- the
+//!   one it cannot write where no reference is allowed, after which
+//!   the hand-over that meets it answers E_FAIL and writes nothing,
+//!   the next hand-over writes the prefix the encoder did take, and
+//!   nothing reaches that stream again. An encoding gala does not know
+//!   leaves every write MX_E_ENCODING while Flush still answers S_OK;
 //! - it is writing that locks the properties, not SetOutput:
 //!   SetProperty answers E_ACCESSDENIED from the first byte on, and a
 //!   locked property is still read back.
@@ -33,9 +43,9 @@
 //! Limits, each recorded in the ledger when a program meets it:
 //! WriteAttributes, WriteNode and WriteNodeShallow copy from an
 //! `IXmlReader` and are not implemented, the MultiLanguage property is
-//! not acted on (the output is UTF-8), and a doctype with a public
-//! identifier and no system identifier is a shape no measurement
-//! covers.
+//! not acted on (the encoding comes from the output and from nowhere
+//! else), and a doctype with a public identifier and no system
+//! identifier is a shape no measurement covers.
 //!
 //! Indenting is measured for elements; where a document holds character
 //! data, a CDATA section or white space, which never stand on a line of
@@ -45,10 +55,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::output::{Encoding, Says, taken};
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, Guid, HResult, IID_ISEQUENTIAL_STREAM,
-    IID_ISTREAM, IID_IUNKNOWN, LEDGER_OTHER, LEDGER_REACHED, LEDGER_UNSUPPORTED, Obj, S_OK, data1,
-    free_box, guid, not_implemented, put, record, text, try_box,
+    IID_ISTREAM, IID_IUNKNOWN, LEDGER_OTHER, LEDGER_REACHED, LEDGER_UNSUPPORTED, Obj, S_OK, VTable,
+    data1, free_box, guid, not_implemented, put, record, record_head, text, try_box,
 };
 
 /// `IXmlWriter` (xmllite.idl).
@@ -58,6 +69,10 @@ const IID_IXML_WRITER: Guid =
 // The writer's own codes (xmllite.h), which the reader does not use.
 const E_ACCESSDENIED: HResult = 0x8007_0005u32 as HResult;
 const E_UNEXPECTED: HResult = 0x8000_ffffu32 as HResult;
+const E_FAIL: HResult = 0x8000_4005u32 as HResult;
+/// The encoding is one XmlLite cannot write: what every write through
+/// such an output answers (measured).
+const MX_E_ENCODING: HResult = 0xc00c_ee02u32 as HResult;
 const WR_E_NONWHITESPACE: HResult = 0xc00c_ef01u32 as HResult;
 const WR_E_NSPREFIXDECLARED: HResult = 0xc00c_ef02u32 as HResult;
 const WR_E_NSPREFIXWITHEMPTYNSURI: HResult = 0xc00c_ef03u32 as HResult;
@@ -72,6 +87,7 @@ const WC_E_NAMECHARACTER: HResult = 0xc00c_ee2cu32 as HResult;
 // set is the value it reads back, whatever it was.
 const PROP_MULTI_LANGUAGE: usize = 0;
 const PROP_INDENT: usize = 1;
+const PROP_BYTE_ORDER_MARK: usize = 2;
 const PROP_OMIT_XML_DECLARATION: usize = 3;
 const PROP_CONFORMANCE_LEVEL: usize = 4;
 /// A property that is not documented and reads 0; the enumeration ends
@@ -204,9 +220,9 @@ fn stream_of(output: Obj) -> Result<(Obj, bool), HResult> {
             return Ok((out, committable));
         }
     }
-    // An output that is no stream: XmlLite also takes an
-    // IXmlWriterOutput (CreateXmlWriterOutputWithEncodingName), which
-    // gala does not make.
+    // Neither a stream nor the stream inside an output: there is
+    // nowhere for the document to go. Every write answers
+    // E_UNEXPECTED, and Flush answers S_OK (measured).
     record(b"IXmlWriter::SetOutput(not a stream)", LEDGER_UNSUPPORTED, 0);
     Err(E_NOINTERFACE)
 }
@@ -214,11 +230,6 @@ fn stream_of(output: Obj) -> Result<(Obj, bool), HResult> {
 // ---------------------------------------------------------------------
 // The object.
 // ---------------------------------------------------------------------
-
-#[repr(C)]
-struct VTable<const N: usize>([*const (); N]);
-// SAFETY: function pointers only.
-unsafe impl<const N: usize> Sync for VTable<N> {}
 
 /// An element the writer is inside.
 struct Open {
@@ -245,21 +256,41 @@ struct Writer {
     out: Obj,
     /// That stream answered as an IStream, so it has Commit.
     committable: bool,
-    /// What is written and not handed over yet.
+    /// What is written and not handed over yet, as the document's
+    /// own text in UTF-8: the encoding is applied on the way to the
+    /// stream, not here.
     buf: Vec<u8>,
+    /// The encoding the output asked for, which the declaration says
+    /// and the hand-over writes in.
+    enc: Encoding,
+    /// That encoding's name, as the declaration says it.
+    says: Says,
+    /// Encoded bytes the stream is owed: what a hand-over could not
+    /// pay, which is the byte order mark before the first bytes it
+    /// belongs in front of, and the prefix a dying encoder got through
+    /// before the character that killed it.
+    kept: Vec<u8>,
+    /// The mark is still to lead the stream.
+    mark_due: bool,
+    /// The encoder met a character the encoding has no byte for: this
+    /// stream gets what is owed and nothing after it (measured).
+    enc_dead: bool,
     /// A buffer that would not grow, which the call in progress answers
     /// with E_OUTOFMEMORY.
     oom: bool,
     /// XmlWriterProperty, by its own number. Property 2 is
-    /// ByteOrderMark, which is kept and not acted on: a stream output
-    /// never gets a mark, whatever it says (measured).
+    /// ByteOrderMark, which a wide encoding acts on at SetOutput and
+    /// every other encoding has nothing to write for (measured).
     props: [isize; PROPS],
     /// Bytes have been produced, which locks the properties.
     begun: bool,
     /// The code every write answers until a new output revives the
     /// writer (S_OK while it is alive).
     dead: HResult,
-    /// The declaration is settled: written, or left out.
+    /// The declaration has reached the stream, which is what settles
+    /// the start of the document where the call itself was refused: a
+    /// declaration left out settles nothing, so the call that failed
+    /// for want of an output fails the same way again (measured).
     declared: bool,
     /// WriteStartDocument has been answered, so another is refused.
     started: bool,
@@ -269,6 +300,8 @@ struct Writer {
     dtd: bool,
     /// A root element has been written (a document allows one).
     rooted: bool,
+    /// WriteEndDocument has answered, so another is refused.
+    ended: bool,
     /// The elements that are open, outermost first.
     open: Vec<Open>,
     /// A start tag whose `>` is still to come.
@@ -291,6 +324,11 @@ impl Writer {
             out: core::ptr::null_mut(),
             committable: false,
             buf: Vec::new(),
+            enc: Encoding::Utf8,
+            says: Says::new("UTF-8"),
+            kept: Vec::new(),
+            mark_due: false,
+            enc_dead: false,
             oom: false,
             props: [0, 0, 1, 0, LEVEL_DOCUMENT, 0],
             begun: false,
@@ -300,6 +338,7 @@ impl Writer {
             standalone: 0,
             dtd: false,
             rooted: false,
+            ended: false,
             open: Vec::new(),
             in_tag: false,
             attrs: Vec::new(),
@@ -313,6 +352,11 @@ impl Writer {
     /// document left behind goes.
     fn reset(&mut self) {
         self.buf = Vec::new();
+        self.enc = Encoding::Utf8;
+        self.says = Says::new("UTF-8");
+        self.kept = Vec::new();
+        self.mark_due = false;
+        self.enc_dead = false;
         self.oom = false;
         self.begun = false;
         self.dead = S_OK;
@@ -321,6 +365,7 @@ impl Writer {
         self.standalone = 0;
         self.dtd = false;
         self.rooted = false;
+        self.ended = false;
         self.open = Vec::new();
         self.in_tag = false;
         self.attrs = Vec::new();
@@ -391,7 +436,7 @@ impl Writer {
                 '\t' => self.emit(b"&#x9;"),
                 '\n' => self.emit(b"&#xA;"),
                 '\r' => self.emit(b"&#xD;"),
-                _ => self.emit_char(c),
+                _ => self.emit_representable(c),
             }
         }
     }
@@ -412,21 +457,36 @@ impl Writer {
                     self.emit(b"\r\n");
                 }
                 '\n' => self.emit(b"\r\n"),
-                _ => self.emit_char(c),
+                _ => self.emit_representable(c),
             }
         }
     }
 
-    /// The XML declaration, at the first call that produces bytes.
+    /// A character where a reference is allowed: itself, or an upper-
+    /// case hexadecimal reference when the encoding has no byte for it
+    /// (measured). Everywhere else -- a name, raw text, a comment, a
+    /// CDATA section, a processing instruction -- the character goes in
+    /// as it is and kills the encoder at the hand-over.
+    fn emit_representable(&mut self, c: char) {
+        if self.enc.has(c) {
+            self.emit_char(c);
+        } else {
+            self.emit_reference(c as u32);
+        }
+    }
+
+    /// The XML declaration, which WriteStartDocument writes and no
+    /// other call does: an element, a comment or a doctype written
+    /// without a document started gets none (measured).
     fn declaration(&mut self) {
-        if self.declared {
+        if self.declared || self.omitting() {
             return;
         }
         self.declared = true;
-        if self.omitting() {
-            return;
-        }
-        self.emit(b"<?xml version=\"1.0\" encoding=\"UTF-8\"");
+        let says = self.says;
+        self.emit(b"<?xml version=\"1.0\" encoding=\"");
+        self.emit(says.as_bytes());
+        self.emit(b"\"");
         match self.standalone {
             STANDALONE_YES => self.emit(b" standalone=\"yes\""),
             STANDALONE_NO => self.emit(b" standalone=\"no\""),
@@ -563,7 +623,6 @@ impl Writer {
     /// A node is being written inside the element that is open: its
     /// start tag ends here, and it has a child now.
     fn open_content(&mut self, character_data: bool) {
-        self.declaration();
         self.finish_tag();
         if let Some(e) = self.open.last_mut() {
             if character_data {
@@ -606,10 +665,64 @@ impl Writer {
     // The stream.
     // -----------------------------------------------------------------
 
+    /// What is written, in the encoding of the output it is going to,
+    /// appended to what the stream is owed: S_OK, E_FAIL for the
+    /// character that kills the encoder, or E_OUTOFMEMORY. A dead
+    /// encoder encodes nothing more.
+    fn encode(&mut self) -> HResult {
+        let buf = core::mem::take(&mut self.buf);
+        if self.enc_dead || buf.is_empty() {
+            return S_OK;
+        }
+        if self.mark_due {
+            self.mark_due = false;
+            let mark = self.enc.mark();
+            if self.kept.try_reserve(mark.len()).is_err() {
+                self.oom = true;
+                return E_OUTOFMEMORY;
+            }
+            self.kept.extend_from_slice(mark);
+        }
+        let Ok(text) = core::str::from_utf8(&buf) else {
+            // Nothing the writer emits is anything but UTF-8, so this
+            // is the writer being wrong and not the document.
+            record(b"IXmlWriter::Flush(buffer is not UTF-8)", LEDGER_OTHER, 0);
+            return E_UNEXPECTED;
+        };
+        for c in text.chars() {
+            if !self.enc.has(c) {
+                // The end of this encoder: what it encoded before the
+                // character stays owed and goes out at the next
+                // hand-over, and nothing reaches the stream after it
+                // (measured).
+                self.enc_dead = true;
+                record_head(
+                    "IXmlWriter::Flush(the encoding has no",
+                    self.says.as_str(),
+                    LEDGER_OTHER,
+                    u64::from(c),
+                );
+                return E_FAIL;
+            }
+            if !self.enc.push(c, &mut self.kept) {
+                self.oom = true;
+                return E_OUTOFMEMORY;
+            }
+        }
+        S_OK
+    }
+
     /// Hands the bytes over: Write, and Commit for a stream that has
-    /// one. Nothing buffered is nothing to hand over.
+    /// one. Nothing written and nothing owed is nothing to hand over.
     fn hand_over(&mut self) -> HResult {
-        if self.out.is_null() || self.buf.is_empty() {
+        if self.out.is_null() || (self.buf.is_empty() && self.kept.is_empty()) {
+            return S_OK;
+        }
+        let hr = self.encode();
+        if hr != S_OK {
+            return hr;
+        }
+        if self.kept.is_empty() {
             return S_OK;
         }
         let mut wrote: u32 = 0;
@@ -619,10 +732,10 @@ impl Writer {
             let vtable = *(self.out as *const *const usize);
             let f: extern "system" fn(Obj, *const u8, u32, *mut u32) -> HResult =
                 core::mem::transmute(*vtable.add(4));
-            f(self.out, self.buf.as_ptr(), self.buf.len() as u32, &mut wrote)
+            f(self.out, self.kept.as_ptr(), self.kept.len() as u32, &mut wrote)
         };
-        let handed = self.buf.len() as u64;
-        self.buf.clear();
+        let handed = self.kept.len() as u64;
+        self.kept.clear();
         if hr < 0 {
             record(b"IXmlWriter::Flush(stream write)", LEDGER_OTHER, hr as u32 as u64);
             return hr;
@@ -649,6 +762,13 @@ impl Writer {
         if self.out.is_null() {
             return;
         }
+        if self.enc_dead && !self.kept.is_empty() {
+            // What a dead encoder owes the stream it is leaving: the
+            // prefix it got through, which is what the old stream
+            // holds after a SetOutput that revives the writer
+            // (measured).
+            self.hand_over();
+        }
         let out = core::mem::replace(&mut self.out, core::ptr::null_mut());
         self.committable = false;
         // SAFETY: slot 2 is IUnknown::Release, and the reference is the
@@ -668,19 +788,34 @@ impl Writer {
         if self.alive() != S_OK {
             return self.alive();
         }
-        // A fragment has no document to start, and that is the answer
-        // even with nowhere to write it (measured).
+        // A document is started once, and before anything else is
+        // written: a second call kills the writer -- but in a fragment
+        // the call is refused and the writer lives, because there the
+        // call was never going to be answered (measured).
+        if self.started || self.declared || self.begun {
+            if self.fragment() {
+                return WR_E_INVALIDACTION;
+            }
+            return self.poison(WR_E_INVALIDACTION);
+        }
+        // This is the call the declaration belongs to, and it is
+        // written before the level is looked at: a fragment gets the
+        // declaration on its stream and the refusal for an answer. So
+        // a declaration with nowhere to go is what the answer is about
+        // where there is no output, and a fragment that writes no
+        // declaration is refused for being one (measured).
+        self.standalone = standalone;
+        if !self.omitting() && self.out.is_null() {
+            return E_UNEXPECTED;
+        }
+        self.declaration();
         if self.fragment() {
             return WR_E_INVALIDACTION;
-        }
-        if self.started || self.declared || self.begun {
-            return self.poison(WR_E_INVALIDACTION);
         }
         if self.out.is_null() {
             return E_UNEXPECTED;
         }
         self.started = true;
-        self.standalone = standalone;
         S_OK
     }
 
@@ -925,12 +1060,14 @@ impl Writer {
         if self.out.is_null() {
             return E_UNEXPECTED;
         }
-        // A fragment has no document to end (measured); a document
-        // that is finished already has nothing left to close, which is
-        // not an error.
-        if self.fragment() {
+        // A fragment has no document to end (measured). Neither has a
+        // writer that has written no element: this call ends what an
+        // element opened, so a comment on its own is not a document to
+        // end, and a document is ended once (measured, all three).
+        if self.fragment() || !self.rooted || self.ended {
             return WR_E_INVALIDACTION;
         }
+        self.ended = true;
         while !self.open.is_empty() {
             self.close_element();
         }
@@ -1106,7 +1243,6 @@ impl Writer {
         if !prefixed_name(name) {
             return WC_E_NAMECHARACTER;
         }
-        self.declaration();
         let depth = self.open.len();
         self.indent_at(depth);
         self.emit(b"<!DOCTYPE ");
@@ -1377,9 +1513,10 @@ extern "system" fn release(this: Obj) -> u32 {
     left
 }
 
-/// SetOutput: the stream to write to, which starts the writer over --
-/// and NULL gives the output up, leaving the writes E_UNEXPECTED
-/// (measured). What was buffered and not flushed is dropped with it.
+/// SetOutput: the stream to write to and the encoding to write it in,
+/// which starts the writer over -- and NULL gives the output up,
+/// leaving the writes E_UNEXPECTED (measured). What was buffered and
+/// not flushed is dropped with it.
 extern "system" fn set_output(this: Obj, output: Obj) -> HResult {
     let w = obj(this);
     w.drop_output();
@@ -1387,10 +1524,25 @@ extern "system" fn set_output(this: Obj, output: Obj) -> HResult {
     if output.is_null() {
         return S_OK;
     }
-    match stream_of(output) {
+    // An `IXmlWriterOutput` says what the stream is and what encoding
+    // to write it in; anything else is asked to be a stream itself and
+    // is written UTF-8. That question comes first, before the stream is
+    // asked anything (measured).
+    let (stream, enc, says) = taken(output).unwrap_or((output, Encoding::Utf8, Says::new("UTF-8")));
+    match stream_of(stream) {
         Ok((stream, committable)) => {
             w.out = stream;
             w.committable = committable;
+            w.enc = enc;
+            w.says = says;
+            w.mark_due = !enc.mark().is_empty() && w.props[PROP_BYTE_ORDER_MARK] != 0;
+            if !enc.known() {
+                // Every write answers this until another output brings
+                // an encoding gala can write. Flush still answers
+                // S_OK, and the properties never lock, because nothing
+                // is ever written (measured).
+                w.dead = MX_E_ENCODING;
+            }
             S_OK
         }
         Err(hr) => hr,
@@ -1416,12 +1568,16 @@ extern "system" fn set_property(this: Obj, property: u32, value: isize) -> HResu
         return E_NOTIMPL;
     }
     // It is writing that locks the properties, not the output.
-    if w.begun {
+    // Writing locks them, and so does starting the document even
+    // where the declaration is left out and no byte comes of it
+    // (measured).
+    if w.begun || w.started {
         return E_ACCESSDENIED;
     }
     match property as usize {
         PROP_MULTI_LANGUAGE if value != 0 => {
-            // gala writes UTF-8 and nothing else.
+            // The encoding comes from the output and from nowhere
+            // else.
             record(b"IXmlWriter::SetProperty(MultiLanguage)", LEDGER_UNSUPPORTED, value as u64);
         }
         PROP_UNDOCUMENTED if value != 0 => {

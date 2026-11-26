@@ -3414,7 +3414,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msxml_test", "ole32.dll", "Windows/System32"),
     ("msxml_test", "oleaut32.dll", "Windows/System32"),
     ("msxml_test", "msxml6.dll", "Windows/System32"),
-    // XmlLite's reader (user/xmllite_test).
+    // XmlLite's reader, writer and writer outputs
+    // (user/xmllite_test).
     ("xmllite_test", "ntdll.dll", "Windows/System32"),
     ("xmllite_test", "kernel32.dll", "Windows/System32"),
     ("xmllite_test", "xmllite.dll", "Windows/System32"),
@@ -10050,11 +10051,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // declarations among them), text, an empty element, CDATA, a
         // processing instruction and end tags -- then end of file and a
         // document that is not well formed. The writer: CreateXmlWriter
-        // and all 32 methods of IXmlWriter, twenty-six documents
-        // compared byte for byte with what Windows' own writer wrote,
-        // the properties, the namespaces it declares and the refusals
-        // that kill a writer among them. Word delay-loads both and ends
-        // on 0xc06d007f without them (ROADMAP OF).
+        // and all 32 methods of IXmlWriter, fifty cases compared byte
+        // for byte with what Windows' own writer wrote, the properties,
+        // the namespaces it declares, the place of the XML declaration
+        // (WriteStartDocument's call and no other's) and the refusals
+        // that kill a writer among them. The outputs:
+        // CreateXmlWriterOutputWithEncodingName and
+        // ...WithEncodingCodePage, the encodings XmlLite takes and what
+        // an encoding nothing knows leaves behind. Word delay-loads the
+        // reader, the writer and the first of the two creators, and
+        // ends on 0xc06d007f without any of them (ROADMAP OF).
         name: "xmllite_test",
         cmdline: "qemu_exit run=xmllite_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -10066,6 +10072,12 @@ const BASE_SCENARIOS: &[Scenario] = &[
             r#"ledger: {"service":"xmllite.dll!IXmlWriter hands its bytes over","what":"reached""#,
             r#"ledger: {"service":"xmllite.dll!CreateXmlWriter(iid)","what":"unsupported""#,
             r#"ledger: {"service":"xmllite.dll!IXmlWriter::SetOutput(not a stream)","what":"unsupported""#,
+            // The output: the encoding a document was asked to be
+            // written in, an encoding nothing knows, and the one
+            // interface the object has.
+            r#"ledger: {"service":"xmllite.dll!CreateXmlWriterOutput utf-8","what":"reached""#,
+            r#"ledger: {"service":"xmllite.dll!CreateXmlWriterOutput(encoding) bogus","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlWriterOutput::QueryInterface(iid)","what":"unsupported""#,
             "exited with status 0x00000000",
         ],
     },

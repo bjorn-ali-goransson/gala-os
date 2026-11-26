@@ -50,8 +50,8 @@ use gala_xml::{Attr, Event, Reason, Scan};
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
     IID_ISEQUENTIAL_STREAM, IID_ISTREAM, IID_IUNKNOWN, LEDGER_NOT_IMPLEMENTED, LEDGER_OTHER,
-    LEDGER_UNSUPPORTED, Obj, S_FALSE, S_OK, data1, free_box, guid, not_implemented, push, put,
-    record, record_head, text, try_box,
+    LEDGER_UNSUPPORTED, Obj, S_FALSE, S_OK, VTable, data1, free_box, guid, not_implemented, push,
+    put, record, record_head, text, try_box,
 };
 
 /// `IXmlReader` (xmllite.idl).
@@ -568,11 +568,6 @@ fn read_all(stream: Obj) -> Result<Vec<u8>, HResult> {
 // ---------------------------------------------------------------------
 // The object.
 // ---------------------------------------------------------------------
-
-#[repr(C)]
-struct VTable<const N: usize>([*const (); N]);
-// SAFETY: function pointers only.
-unsafe impl<const N: usize> Sync for VTable<N> {}
 
 /// `this` as the reader we handed out.
 fn obj<'a>(this: Obj) -> &'a mut Reader {

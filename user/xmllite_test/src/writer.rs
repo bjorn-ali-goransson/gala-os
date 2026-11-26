@@ -1,6 +1,8 @@
-//! XmlLite's writer (xmllite.dll's `CreateXmlWriter` and `IXmlWriter`),
-//! as Windows answers it. Word delay-loads `CreateXmlWriter` and ends on
-//! 0xc06d007f without it (ROADMAP OF), as it did without the reader.
+//! XmlLite's writer (xmllite.dll's `CreateXmlWriter`, `IXmlWriter` and
+//! the two output creators), as Windows answers it. Word delay-loads
+//! `CreateXmlWriter` and then
+//! `CreateXmlWriterOutputWithEncodingName`, and ends on 0xc06d007f
+//! without either (ROADMAP OF), as it did without the reader.
 //!
 //! The output is this program's own stream, which keeps the bytes and
 //! records every method it is called on, one bit per vtable slot.
@@ -32,7 +34,28 @@
 //!   closes what is open, where Flush does not and will write half a
 //!   start tag;
 //! - every call a writer refuses, with the code Windows answers, and
-//!   which of those refusals leave the writer dead.
+//!   which of those refusals leave the writer dead;
+//! - the output object both creators make: what they refuse (and that a
+//!   refusal leaves the stream untouched, not even AddRef'd), that the
+//!   object answers only IUnknown and an IID of its own -- and that
+//!   what the IID of its own hands back is no IUnknown, so a caller
+//!   cannot let go of it -- whose reference is whose, and that an output
+//!   is shared between writers rather than owned by one;
+//! - what the declaration says, which is the one thing an
+//!   implementation cannot work out for itself: a name is echoed
+//!   verbatim, case and all, while a code page has a canonical name;
+//! - the mark, which belongs to SetOutput and not to the output, so the
+//!   same output set twice writes a second one mid-stream;
+//! - the encodings that work -- the nine Windows code pages, the nine
+//!   ISO ones, us-ascii, UTF-8, UTF-16 and UCS-4 -- what each of them
+//!   escapes, and that an encoding XmlLite does not know is S_OK at
+//!   create and MX_E_ENCODING at every write;
+//! - and the failure rule no documentation gives: a character the
+//!   encoding cannot write where no reference is allowed is S_OK at the
+//!   write, and the encoder dies on it -- the hand-over that reaches it
+//!   is E_FAIL and writes nothing, the next writes what was encoded
+//!   before it, nothing is ever written after it, and a new output
+//!   brings the writer back whole.
 //!
 //! Three slots take an `IXmlReader` (WriteAttributes, WriteNode and
 //! WriteNodeShallow) and are not measured here; gala's writer records
@@ -48,11 +71,28 @@ use crate::{IID_ISEQUENTIAL_STREAM, IID_ISTREAM, IID_IUNKNOWN, IID_IXML_READER};
 #[link(name = "xmllite", kind = "raw-dylib")]
 unsafe extern "system" {
     fn CreateXmlWriter(iid: *const Guid, out: *mut Obj, malloc: Obj) -> HResult;
+    fn CreateXmlWriterOutputWithEncodingName(
+        stream: Obj,
+        malloc: Obj,
+        encoding: *const u16,
+        out: *mut Obj,
+    ) -> HResult;
+    fn CreateXmlWriterOutputWithEncodingCodePage(
+        stream: Obj,
+        malloc: Obj,
+        codepage: u32,
+        out: *mut Obj,
+    ) -> HResult;
 }
 
 const E_INVALIDARG: HResult = 0x8007_0057u32 as HResult;
 const E_ACCESSDENIED: HResult = 0x8007_0005u32 as HResult;
 const E_UNEXPECTED: HResult = 0x8000_ffffu32 as HResult;
+/// What a hand-over answers once the encoder has met a character the
+/// encoding cannot write.
+const E_FAIL: HResult = 0x8000_4005u32 as HResult;
+/// What every write answers when the encoding is not one XmlLite knows.
+const MX_E_ENCODING: HResult = 0xc00c_ee02u32 as HResult;
 
 // The writer's own codes, from xmllite.h.
 const WR_E_NONWHITESPACE: HResult = 0xc00c_ef01u32 as HResult;
@@ -68,6 +108,14 @@ const WC_E_NAMECHARACTER: HResult = 0xc00c_ee2cu32 as HResult;
 /// `IXmlWriter` (xmllite.idl, uuid 7279FC88-709D-4095-B63D-69FE4B0D9030).
 const IID_IXML_WRITER: Guid = [
     0x88, 0xfc, 0x79, 0x72, 0x9d, 0x70, 0x95, 0x40, 0xb6, 0x3d, 0x69, 0xfe, 0x4b, 0x0d, 0x90, 0x30,
+];
+/// `IXmlWriterOutput` (uuid C1131708-0F59-477F-9359-7D332451BC1A). It
+/// is in no public header, and the writer is what names it: `SetOutput`
+/// asks for this IID first and takes a stream's refusal for an answer.
+/// An output answers it, and what it hands back is no IUnknown -- see
+/// [`output_object`].
+const IID_IXML_WRITER_OUTPUT: Guid = [
+    0x08, 0x17, 0x13, 0xc1, 0x59, 0x0f, 0x7f, 0x47, 0x93, 0x59, 0x7d, 0x33, 0x24, 0x51, 0xbc, 0x1a,
 ];
 /// `IMarshal` (00000003-0000-0000-C000-000000000046), which it refuses.
 const IID_IMARSHAL: Guid = [3, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
@@ -147,8 +195,9 @@ struct Out {
     refs: i32,
     used: u32,
     /// The first IID the writer asked for that is neither IUnknown nor a
-    /// stream: `SetOutput` has one of its own, and a stream may refuse
-    /// it, as this one does.
+    /// stream, which is [`IID_IXML_WRITER_OUTPUT`]: `SetOutput` asks a
+    /// raw stream whether it is an output before it asks whether it is a
+    /// stream, and this one refuses.
     unknown: Guid,
     /// Which stream interface this one admits to, so a writer given only
     /// one of the two is a case of its own.
@@ -514,17 +563,25 @@ fn writer(c: &mut Checks) -> Result<Obj, u32> {
 /// order is the one a program has to use: writing locks the properties,
 /// so they go in before the first call that produces bytes.
 fn writing(c: &mut Checks, props: &[(u32, isize)], out: &mut Out) -> Result<Obj, u32> {
+    let obj = out.obj();
+    writing_obj(c, props, obj)
+}
+
+/// The same, where the output is an `IXmlWriterOutput` and not the
+/// stream itself.
+fn writing_obj(c: &mut Checks, props: &[(u32, isize)], out: Obj) -> Result<Obj, u32> {
     let w = writer(c)?;
     for &(which, value) in props {
         c.hr(set_prop(w, which, value), S_OK)?;
     }
-    c.hr(set_output(w, out.obj()), S_OK)?;
+    c.hr(set_output(w, out), S_OK)?;
     Ok(w)
 }
 
 /// What a case left on its stream, as a `doc` line -- printed whether or
 /// not it is what Windows wrote, since a writer that differs is read
 /// here and not guessed at -- and then checked byte for byte.
+#[track_caller]
 fn doc(c: &mut Checks, what: &str, out: &Out, want: &[u8]) -> Result<(), u32> {
     Line::new()
         .s(NAME.as_bytes())
@@ -568,8 +625,9 @@ fn object(c: &mut Checks) -> Result<(), u32> {
         }
     }
 
-    // The defaults. ByteOrderMark is TRUE and no case ever sees a BOM:
-    // it is for an output made with an encoding, not for a stream.
+    // The defaults. ByteOrderMark is TRUE, and a writer given a stream
+    // never writes one whatever it says: the mark belongs to an output
+    // made with a wide encoding ([`output_marks`]).
     for (which, want) in [
         (PROP_MULTI_LANGUAGE, 0),
         (PROP_INDENT, 0),
@@ -752,8 +810,12 @@ fn escapes(c: &mut Checks) -> Result<(), u32> {
     )
 }
 
-/// A standalone declaration, with ByteOrderMark asked for: a stream
-/// output never gets one.
+/// The XML declaration: what it says, which call writes it, and what
+/// that call settles. A standalone declaration first, with ByteOrderMark
+/// asked for, since a stream output never gets one -- and then the place
+/// of the declaration, which is WriteStartDocument's call and no other's:
+/// it goes out before the conformance level is looked at, and the call
+/// locks the properties whether or not a byte comes of it.
 fn declaration(c: &mut Checks) -> Result<(), u32> {
     let mut out = Out::new();
     let w = writing(c, &[(PROP_BYTE_ORDER_MARK, 1)], &mut out)?;
@@ -767,7 +829,178 @@ fn declaration(c: &mut Checks) -> Result<(), u32> {
         "declaration",
         &out,
         b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><r />",
-    )
+    )?;
+
+    // It is WriteStartDocument that writes the declaration and no other
+    // call: an element, a comment or a doctype written without a
+    // document started gets none, however much is written after it.
+    // WriteEndDocument is not that call either -- it ends what an
+    // element opened, which is why it answers a comment on its own with
+    // the refusal and the element with S_OK, document or no document.
+    for (label, write) in [
+        ("element-no-declaration", 0u32),
+        ("comment-no-declaration", 1),
+        ("doctype-no-declaration", 2),
+    ] {
+        let mut out = Out::new();
+        let w = writing(c, &[], &mut out)?;
+        let want: &[u8] = match write {
+            0 => {
+                c.hr(start_element(w, None, Some("q"), None), S_OK)?;
+                c.hr(end_document(w), S_OK)?;
+                b"<q />"
+            }
+            1 => {
+                c.hr(comment(w, Some("c")), S_OK)?;
+                c.hr(end_document(w), WR_E_INVALIDACTION)?;
+                b"<!--c-->"
+            }
+            _ => {
+                c.hr(doc_type(w, Some("q"), None, None, None), S_OK)?;
+                c.hr(start_element(w, None, Some("q"), None), S_OK)?;
+                c.hr(end_document(w), S_OK)?;
+                b"<!DOCTYPE q><q />"
+            }
+        };
+        c.hr(flush(w), S_OK)?;
+        c.eq(u64::from(release(w)), 0)?;
+        doc(c, label, &out, want)?;
+    }
+
+    // An ended document is ended: a second WriteEndDocument and any
+    // element after it are both out of place, and neither kills the
+    // writer. An element closed by hand leaves the document ready to be
+    // ended all the same.
+    let mut out = Out::new();
+    let w = writing(c, &[], &mut out)?;
+    c.hr(start_element(w, None, Some("q"), None), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(end_document(w), WR_E_INVALIDACTION)?;
+    c.hr(start_element(w, None, Some("z"), None), WR_E_INVALIDACTION)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "document-ended-once", &out, b"<q />")?;
+
+    let mut out = Out::new();
+    let w = writing(c, &[], &mut out)?;
+    c.hr(start_element(w, None, Some("q"), None), S_OK)?;
+    c.hr(end_element(w), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "end-element-then-document", &out, b"<q />")?;
+
+    // And a doctype is not the document being started: the start
+    // document after it is out of place, and the writer is dead.
+    let mut out = Out::new();
+    let w = writing(c, &[], &mut out)?;
+    c.hr(doc_type(w, Some("q"), None, None, None), S_OK)?;
+    c.hr(start_document(w, STANDALONE_OMIT), WR_E_INVALIDACTION)?;
+    c.hr(start_element(w, None, Some("q"), None), WR_E_INVALIDACTION)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "doctype-then-start", &out, b"<!DOCTYPE q>")?;
+
+    // The declaration reaches the stream at the call that asks for it,
+    // with nothing else written -- and that call is what locks the
+    // properties, whether or not a byte came of it.
+    let mut out = Out::new();
+    let w = writing(c, &[], &mut out)?;
+    c.hr(start_document(w, STANDALONE_OMIT), S_OK)?;
+    c.hr(set_prop(w, PROP_INDENT, 1), E_ACCESSDENIED)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "declaration-alone", &out, b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>")?;
+
+    let mut out = Out::new();
+    let w = writing(c, &[(PROP_OMIT_XML_DECLARATION, 1)], &mut out)?;
+    c.hr(start_document(w, STANDALONE_OMIT), S_OK)?;
+    c.hr(set_prop(w, PROP_INDENT, 1), E_ACCESSDENIED)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "omitted-declaration-locks", &out, b"")?;
+
+    // A fragment has no document to start -- and the declaration is
+    // written before the level is looked at, so the stream gets it all
+    // the same, standalone and all, and the refusal is the answer. The
+    // writer lives through it: in a fragment the call was never going
+    // to be answered, and a second one is refused the same way.
+    let mut out = Out::new();
+    let w = writing(c, &[(PROP_CONFORMANCE_LEVEL, LEVEL_FRAGMENT)], &mut out)?;
+    c.hr(start_document(w, STANDALONE_YES), WR_E_INVALIDACTION)?;
+    c.hr(start_document(w, STANDALONE_YES), WR_E_INVALIDACTION)?;
+    c.hr(set_prop(w, PROP_INDENT, 1), E_ACCESSDENIED)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(end_element(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(
+        c,
+        "fragment-start-document",
+        &out,
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><r />",
+    )?;
+
+    // With the declaration left out there is nothing to write, so
+    // nothing is written and nothing is locked.
+    let mut out = Out::new();
+    let w = writing(
+        c,
+        &[(PROP_OMIT_XML_DECLARATION, 1), (PROP_CONFORMANCE_LEVEL, LEVEL_FRAGMENT)],
+        &mut out,
+    )?;
+    c.hr(start_document(w, STANDALONE_OMIT), WR_E_INVALIDACTION)?;
+    c.hr(set_prop(w, PROP_INDENT, 1), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "fragment-omitted", &out, b"")?;
+
+    // Anything written before the start document is out of place: in a
+    // document that kills the writer, in a fragment it does not.
+    let mut out = Out::new();
+    let w = writing(c, &[(PROP_OMIT_XML_DECLARATION, 1)], &mut out)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(start_document(w, STANDALONE_OMIT), WR_E_INVALIDACTION)?;
+    c.hr(end_element(w), WR_E_INVALIDACTION)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "element-then-start", &out, b"<r")?;
+
+    let mut out = Out::new();
+    let w = writing(
+        c,
+        &[(PROP_OMIT_XML_DECLARATION, 1), (PROP_CONFORMANCE_LEVEL, LEVEL_FRAGMENT)],
+        &mut out,
+    )?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(start_document(w, STANDALONE_OMIT), WR_E_INVALIDACTION)?;
+    c.hr(end_element(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "fragment-element-then-start", &out, b"<r />")?;
+
+    // And a declaration with nowhere to go is what a writer with no
+    // output answers about: E_UNEXPECTED where it is to be written, and
+    // the level's refusal where it is not. Neither settles anything --
+    // the properties are open and the call can be asked again.
+    let w = writer(c)?;
+    c.hr(set_prop(w, PROP_CONFORMANCE_LEVEL, LEVEL_FRAGMENT), S_OK)?;
+    c.hr(start_document(w, STANDALONE_OMIT), E_UNEXPECTED)?;
+    c.hr(start_document(w, STANDALONE_OMIT), E_UNEXPECTED)?;
+    c.hr(set_prop(w, PROP_INDENT, 1), S_OK)?;
+    c.hr(set_prop(w, PROP_OMIT_XML_DECLARATION, 1), S_OK)?;
+    c.hr(start_document(w, STANDALONE_OMIT), WR_E_INVALIDACTION)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+
+    // A document with no output has nowhere to write either way.
+    let w = writer(c)?;
+    c.hr(set_prop(w, PROP_OMIT_XML_DECLARATION, 1), S_OK)?;
+    c.hr(start_document(w, STANDALONE_OMIT), E_UNEXPECTED)?;
+    c.hr(start_document(w, STANDALONE_OMIT), E_UNEXPECTED)?;
+    c.hr(set_prop(w, PROP_INDENT, 1), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)
 }
 
 /// Names a writer refuses, and the arguments it takes as nothing at all.
@@ -1110,6 +1343,700 @@ fn more(c: &mut Checks) -> Result<(), u32> {
     doc(c, "doctype-subset", &out, b"<!DOCTYPE r [<!ENTITY x \"y\">]><r />")
 }
 
+// ---------------------------------------------------------------------
+// The output object: an encoding put in front of the stream.
+// ---------------------------------------------------------------------
+
+/// An output over `out`, named. Neither creator looks at the name: an
+/// encoding XmlLite has never heard of is S_OK here and fails at every
+/// write ([`output_unknown`]).
+fn named(c: &mut Checks, out: &mut Out, enc: &str) -> Result<Obj, u32> {
+    let mut o: Obj = null_mut();
+    let w = Wide::new(enc);
+    // SAFETY: a plain call; the stream and the out pointer are ours.
+    let hr =
+        unsafe { CreateXmlWriterOutputWithEncodingName(out.obj(), null_mut(), w.ptr(), &mut o) };
+    c.hr(hr, S_OK)?;
+    c.ok(!o.is_null(), 0)?;
+    Ok(o)
+}
+
+/// The same, by code page.
+fn by_page(c: &mut Checks, out: &mut Out, page: u32) -> Result<Obj, u32> {
+    let mut o: Obj = null_mut();
+    // SAFETY: as in `named`.
+    let hr =
+        unsafe { CreateXmlWriterOutputWithEncodingCodePage(out.obj(), null_mut(), page, &mut o) };
+    c.hr(hr, S_OK)?;
+    c.ok(!o.is_null(), 0)?;
+    Ok(o)
+}
+
+/// Bytes a case expects, put together rather than spelled out: a
+/// declaration is the same shape in every encoding, and only the name
+/// in it and the width of a character differ.
+struct Build {
+    buf: [u8; 256],
+    len: usize,
+}
+
+impl Build {
+    fn new() -> Self {
+        Self { buf: [0; 256], len: 0 }
+    }
+
+    /// The bytes as they are.
+    fn s(&mut self, b: &[u8]) -> &mut Self {
+        for &x in b {
+            if self.len < self.buf.len() {
+                self.buf[self.len] = x;
+            }
+            self.len += 1;
+        }
+        self
+    }
+
+    /// Each byte as one UTF-16LE unit, which is what a wide output makes
+    /// of every character up to U+00FF.
+    fn wide(&mut self, b: &[u8]) -> &mut Self {
+        for &x in b {
+            self.s(&[x, 0]);
+        }
+        self
+    }
+
+    /// Each byte as one UCS-4LE unit.
+    fn quad(&mut self, b: &[u8]) -> &mut Self {
+        for &x in b {
+            self.s(&[x, 0, 0, 0]);
+        }
+        self
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// `<r a="e-acute">cjk-zhong</r>` with its declaration: one document
+/// that shows the encoding's name, a character the encoding may have a
+/// byte of its own for, and one that no single-byte encoding has.
+fn declared(c: &mut Checks, o: Obj, out: &Out, enc: &str, has_e9: bool) -> Result<(), u32> {
+    let w = writing_obj(c, &[], o)?;
+    c.hr(start_document(w, STANDALONE_OMIT), S_OK)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(attr(w, None, Some("a"), None, Some("\u{e9}")), S_OK)?;
+    c.hr(string(w, Some("\u{4e2d}")), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    let mut want = Build::new();
+    want.s(b"<?xml version=\"1.0\" encoding=\"")
+        .s(enc.as_bytes())
+        .s(b"\"?><r a=\"")
+        .s(if has_e9 { &b"\xe9"[..] } else { b"&#xE9;" })
+        .s(b"\">&#x4E2D;</r>");
+    doc(c, enc, out, want.bytes())
+}
+
+/// The same document through a wide output, where every character has
+/// units of its own and nothing is escaped.
+fn declared_wide(c: &mut Checks, o: Obj, out: &Out, says: &str, quad: bool) -> Result<(), u32> {
+    let w = writing_obj(c, &[], o)?;
+    c.hr(start_document(w, STANDALONE_OMIT), S_OK)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(attr(w, None, Some("a"), None, Some("\u{e9}")), S_OK)?;
+    c.hr(string(w, Some("\u{4e2d}")), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    let head = b"<?xml version=\"1.0\" encoding=\"";
+    let middle = b"\"?><r a=\"\xe9\">";
+    let mut want = Build::new();
+    if quad {
+        want.s(b"\xff\xfe\x00\x00")
+            .quad(head)
+            .quad(says.as_bytes())
+            .quad(middle)
+            .s(b"\x2d\x4e\x00\x00")
+            .quad(b"</r>");
+    } else {
+        want.s(b"\xff\xfe")
+            .wide(head)
+            .wide(says.as_bytes())
+            .wide(middle)
+            .s(b"\x2d\x4e")
+            .wide(b"</r>");
+    }
+    doc(c, says, out, want.bytes())
+}
+
+/// The object both creators make: what they refuse, what they ask of
+/// the stream, what the object answers to, and whose reference is
+/// whose.
+fn output_object(c: &mut Checks) -> Result<(), u32> {
+    // No stream, or nowhere to put the answer: E_INVALIDARG, and the out
+    // value is left exactly as it was.
+    let enc = Wide::new("utf-8");
+    let mut p: Obj = usize::MAX as Obj;
+    // SAFETY: a plain call; the out pointer is ours.
+    c.hr(
+        unsafe { CreateXmlWriterOutputWithEncodingName(null_mut(), null_mut(), enc.ptr(), &mut p) },
+        E_INVALIDARG,
+    )?;
+    c.eq(p as usize as u64, usize::MAX as u64)?;
+    // SAFETY: as above.
+    c.hr(
+        unsafe { CreateXmlWriterOutputWithEncodingCodePage(null_mut(), null_mut(), 65001, &mut p) },
+        E_INVALIDARG,
+    )?;
+    c.eq(p as usize as u64, usize::MAX as u64)?;
+
+    // A refused create does not touch the stream at all: no reference
+    // and not one question, so a program may hand in a stream it is
+    // about to give up on.
+    let mut out = Out::new();
+    // SAFETY: a plain call; the stream is ours.
+    c.hr(
+        unsafe {
+            CreateXmlWriterOutputWithEncodingName(out.obj(), null_mut(), enc.ptr(), null_mut())
+        },
+        E_INVALIDARG,
+    )?;
+    // SAFETY: as above.
+    c.hr(
+        unsafe {
+            CreateXmlWriterOutputWithEncodingCodePage(out.obj(), null_mut(), 65001, null_mut())
+        },
+        E_INVALIDARG,
+    )?;
+    c.eq(out.refs as u64, 1)?;
+    c.eq(u64::from(out.used), 0)?;
+
+    // Creating takes a reference and asks the stream nothing: AddRef and
+    // no QueryInterface. A stream learns what is wanted of it when a
+    // writer is given the output, and not before.
+    let o = named(c, &mut out, "utf-8")?;
+    c.eq(out.refs as u64, 2)?;
+    c.eq(u64::from(out.used), 1 << 1)?;
+
+    // It is an IUnknown and an output and nothing else.
+    for (iid, want) in [
+        (&IID_IUNKNOWN, S_OK),
+        (&IID_ISTREAM, E_NOINTERFACE),
+        (&IID_ISEQUENTIAL_STREAM, E_NOINTERFACE),
+        (&IID_IXML_WRITER, E_NOINTERFACE),
+        (&IID_IXML_READER, E_NOINTERFACE),
+        (&IID_IMARSHAL, E_NOINTERFACE),
+    ] {
+        let mut q: Obj = usize::MAX as Obj;
+        c.hr(call!(o, 0, fn(*const Guid, *mut Obj) -> HResult, iid, &mut q), want)?;
+        if want == S_OK {
+            c.ok(!q.is_null(), 4)?;
+            release(q);
+        } else {
+            c.ok(q.is_null(), 5)?;
+        }
+    }
+
+    // SetOutput is where the stream is asked what it is, and the one
+    // question it is asked is IStream: an output knows it is an output
+    // and does not ask the stream to be one. The writer holds the output
+    // and not the stream, so taking the output away gives both
+    // references back.
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.eq(u64::from(out.used), u64::from(1u32 | (1 << 1) | used::STREAM_IID))?;
+    c.ok(out.refs > 2, out.refs as u64)?;
+    c.hr(start_element(w, None, Some("a"), None), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    doc(c, "through-an-output", &out, b"<a />")?;
+    Line::new()
+        .s(NAME.as_bytes())
+        .s(b": out refs while written to ")
+        .dec(out.refs as u64)
+        .s(b"\r\n")
+        .print();
+    c.hr(set_output(w, null_mut()), S_OK)?;
+    c.eq(out.refs as u64, 2)?;
+    c.eq(u64::from(release(w)), 0)?;
+    c.eq(out.refs as u64, 2)?;
+    c.eq(u64::from(release(o)), 0)?;
+    c.eq(out.refs as u64, 1)?;
+    // Nothing it was asked for was unexpected: a stream reached through
+    // an output is never asked whether it is an output.
+    c.ok(out.used & used::UNKNOWN_IID == 0, u64::from(out.used))?;
+    c.ok(out.used & NEVER == 0, u64::from(out.used))?;
+
+    // The IID of its own, which is the whole difference between an
+    // output and a stream. What the output hands back for it is not an
+    // IUnknown: it is another pointer whose third slot is no Release --
+    // it answers a number that is no count and gives nothing back -- so
+    // a caller cannot let go of what it asked for, and the output stays
+    // alive with the stream still in its hands. That is why this case
+    // gets an output of its own to leak.
+    let mut leaked = Out::new();
+    let o = named(c, &mut leaked, "utf-8")?;
+    let mut q: Obj = usize::MAX as Obj;
+    c.hr(call!(o, 0, fn(*const Guid, *mut Obj) -> HResult, &IID_IXML_WRITER_OUTPUT, &mut q), S_OK)?;
+    c.ok(!q.is_null(), 6)?;
+    c.ok(q != o, q as usize as u64)?;
+    c.eq(u64::from(release(o)), 1)?;
+    c.eq(leaked.refs as u64, 2)?;
+
+    // A raw stream, for the other half of that: the writer asks it for
+    // the output IID first, and that refusal is the one `unknown` keeps.
+    let mut raw = Out::new();
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], raw.obj())?;
+    c.ok(raw.used & used::UNKNOWN_IID != 0, u64::from(raw.used))?;
+    c.ok(raw.unknown == IID_IXML_WRITER_OUTPUT, u64::from(raw.used))?;
+    c.eq(u64::from(release(w)), 0)?;
+
+    // An object that is no stream is taken by the creator all the same,
+    // since the creator asks nothing: it is SetOutput that finds out.
+    // The output is asked for a stream, has none, and every write is
+    // E_UNEXPECTED while Flush is S_OK -- as for a writer with no output
+    // at all.
+    let mut plain = Plain { vtable: &PLAIN_VTABLE, refs: 1 };
+    let p = &mut plain as *mut Plain as Obj;
+    let mut o: Obj = null_mut();
+    // SAFETY: a plain call; both pointers are ours.
+    c.hr(unsafe { CreateXmlWriterOutputWithEncodingName(p, null_mut(), enc.ptr(), &mut o) }, S_OK)?;
+    c.eq(plain.refs as u64, 2)?;
+    let w = writer(c)?;
+    c.hr(set_output(w, o), E_NOINTERFACE)?;
+    c.hr(start_element(w, None, Some("a"), None), E_UNEXPECTED)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    c.eq(u64::from(release(o)), 0)?;
+    c.eq(plain.refs as u64, 1)
+}
+
+/// What the declaration says, which is the one thing an implementation
+/// cannot work out for itself: a name is echoed as it was given, and a
+/// code page has a name of its own.
+fn output_declaration(c: &mut Checks) -> Result<(), u32> {
+    // A code page, the name it declares, and whether that encoding has a
+    // byte for U+00E9.
+    for (page, says, has_e9) in [
+        (1250u32, "WINDOWS-1250", true),
+        (1251, "WINDOWS-1251", false),
+        (1252, "WINDOWS-1252", true),
+        (1253, "WINDOWS-1253", false),
+        (1254, "WINDOWS-1254", true),
+        (1255, "WINDOWS-1255", false),
+        (1256, "WINDOWS-1256", true),
+        (1257, "WINDOWS-1257", true),
+        (1258, "WINDOWS-1258", true),
+        (20127, "us-ascii", false),
+        (28591, "iso-8859-1", true),
+        (28592, "iso-8859-2", true),
+        (28593, "iso-8859-3", true),
+        (28594, "iso-8859-4", true),
+        (28595, "iso-8859-5", false),
+        (28596, "iso-8859-6", false),
+        (28597, "iso-8859-7", false),
+        (28598, "iso-8859-8", false),
+        (28599, "iso-8859-9", true),
+    ] {
+        let mut out = Out::new();
+        let o = by_page(c, &mut out, page)?;
+        declared(c, o, &out, says, has_e9)?;
+        c.eq(u64::from(release(o)), 0)?;
+    }
+
+    // A name, which comes back exactly as it was given -- its case
+    // included, since the writer echoes the name and does not look one
+    // up to print it.
+    for (name, has_e9) in [
+        ("windows-1250", true),
+        ("windows-1251", false),
+        ("windows-1252", true),
+        ("windows-1253", false),
+        ("windows-1254", true),
+        ("windows-1255", false),
+        ("windows-1256", true),
+        ("windows-1257", true),
+        ("windows-1258", true),
+        ("us-ascii", false),
+        ("iso-8859-1", true),
+        ("iso-8859-2", true),
+        ("iso-8859-3", true),
+        ("iso-8859-4", true),
+        ("iso-8859-5", false),
+        ("iso-8859-6", false),
+        ("iso-8859-7", false),
+        ("iso-8859-8", false),
+        ("iso-8859-9", true),
+        ("WINDOWS-1252", true),
+        ("ISO-8859-1", true),
+        ("Us-Ascii", false),
+    ] {
+        let mut out = Out::new();
+        let o = named(c, &mut out, name)?;
+        declared(c, o, &out, name, has_e9)?;
+        c.eq(u64::from(release(o)), 0)?;
+    }
+
+    // UTF-8, where both characters have bytes of their own.
+    for (page, name) in [(Some(65001u32), "UTF-8"), (None, "utf-8"), (None, "unicode-1-1-utf-8")] {
+        let mut out = Out::new();
+        let o = match page {
+            Some(p) => by_page(c, &mut out, p)?,
+            None => named(c, &mut out, name)?,
+        };
+        let w = writing_obj(c, &[], o)?;
+        c.hr(start_document(w, STANDALONE_OMIT), S_OK)?;
+        c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+        c.hr(attr(w, None, Some("a"), None, Some("\u{e9}")), S_OK)?;
+        c.hr(string(w, Some("\u{4e2d}")), S_OK)?;
+        c.hr(end_document(w), S_OK)?;
+        c.hr(flush(w), S_OK)?;
+        c.eq(u64::from(release(w)), 0)?;
+        let mut want = Build::new();
+        want.s(b"<?xml version=\"1.0\" encoding=\"")
+            .s(name.as_bytes())
+            .s(b"\"?><r a=\"\xc3\xa9\">\xe4\xb8\xad</r>");
+        doc(c, name, &out, want.bytes())?;
+        c.eq(u64::from(release(o)), 0)?;
+    }
+
+    // And the wide ones, which begin with their mark.
+    for (page, name, says) in [
+        (Some(1200u32), "", "UTF-16"),
+        (None, "utf-16", "utf-16"),
+        (None, "ucs-2", "ucs-2"),
+        (None, "iso-10646-ucs-2", "iso-10646-ucs-2"),
+    ] {
+        let mut out = Out::new();
+        let o = match page {
+            Some(p) => by_page(c, &mut out, p)?,
+            None => named(c, &mut out, name)?,
+        };
+        declared_wide(c, o, &out, says, false)?;
+        c.eq(u64::from(release(o)), 0)?;
+    }
+    for (page, name, says) in [(Some(12000u32), "", "UCS-4"), (None, "ucs-4", "ucs-4")] {
+        let mut out = Out::new();
+        let o = match page {
+            Some(p) => by_page(c, &mut out, p)?,
+            None => named(c, &mut out, name)?,
+        };
+        declared_wide(c, o, &out, says, true)?;
+        c.eq(u64::from(release(o)), 0)?;
+    }
+    Ok(())
+}
+
+/// The mark: who gets one, where it falls, and what turns it off.
+fn output_marks(c: &mut Checks) -> Result<(), u32> {
+    // ByteOrderMark is TRUE by default and only a wide encoding acts on
+    // it: a single-byte one never writes a mark, whatever it says.
+    for (name, mark, want) in [
+        ("utf-8", 1isize, &b"<r />"[..]),
+        ("utf-8", 0, b"<r />"),
+        ("windows-1252", 1, b"<r />"),
+        ("windows-1252", 0, b"<r />"),
+        ("us-ascii", 1, b"<r />"),
+        ("utf-16", 1, b"\xff\xfe<\x00r\x00 \x00/\x00>\x00"),
+        ("utf-16", 0, b"<\x00r\x00 \x00/\x00>\x00"),
+        (
+            "ucs-4",
+            1,
+            b"\xff\xfe\x00\x00<\x00\x00\x00r\x00\x00\x00 \x00\x00\x00/\x00\x00\x00>\x00\x00\x00",
+        ),
+        ("ucs-4", 0, b"<\x00\x00\x00r\x00\x00\x00 \x00\x00\x00/\x00\x00\x00>\x00\x00\x00"),
+    ] {
+        let mut out = Out::new();
+        let o = named(c, &mut out, name)?;
+        let props = [(PROP_OMIT_XML_DECLARATION, 1), (PROP_BYTE_ORDER_MARK, mark)];
+        let w = writing_obj(c, &props, o)?;
+        c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+        c.hr(end_document(w), S_OK)?;
+        c.hr(flush(w), S_OK)?;
+        c.eq(u64::from(release(w)), 0)?;
+        doc(c, name, &out, want)?;
+        c.eq(u64::from(release(o)), 0)?;
+    }
+
+    // The mark belongs to SetOutput and not to the output: the same
+    // output set twice writes a second mark, in the middle.
+    let mut out = Out::new();
+    let o = named(c, &mut out, "utf-16")?;
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.hr(start_element(w, None, Some("a"), None), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.hr(set_output(w, o), S_OK)?;
+    c.hr(start_element(w, None, Some("b"), None), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(
+        c,
+        "two-marks",
+        &out,
+        b"\xff\xfe<\x00a\x00 \x00/\x00>\x00\xff\xfe<\x00b\x00 \x00/\x00>\x00",
+    )?;
+    c.eq(u64::from(release(o)), 0)?;
+    c.eq(out.refs as u64, 1)?;
+
+    // Indenting through an output, where the declaration ends a line of
+    // its own.
+    let mut out = Out::new();
+    let o = named(c, &mut out, "windows-1252")?;
+    let w = writing_obj(c, &[(PROP_INDENT, 1)], o)?;
+    c.hr(start_document(w, STANDALONE_OMIT), S_OK)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(start_element(w, None, Some("c"), None), S_OK)?;
+    c.hr(string(w, Some("\u{e9}")), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(
+        c,
+        "indented-1252",
+        &out,
+        b"<?xml version=\"1.0\" encoding=\"windows-1252\"?>\r\n<r>\r\n  <c>\xe9</c>\r\n</r>",
+    )?;
+    c.eq(u64::from(release(o)), 0)
+}
+
+/// A character the encoding has no byte for. Where a reference is
+/// allowed the writer writes one; where none is -- a name, raw text, a
+/// comment, CDATA, the text of a PI -- the write itself is S_OK and the
+/// encoder dies on that character.
+fn output_limits(c: &mut Checks) -> Result<(), u32> {
+    // Where a reference is allowed: an attribute value and character
+    // data. A character above the sixteen-bit range becomes one
+    // reference for the whole code point and not two for its halves.
+    let mut out = Out::new();
+    let o = named(c, &mut out, "us-ascii")?;
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(attr(w, None, Some("a"), None, Some("\u{4e2d}\t")), S_OK)?;
+    c.hr(string(w, Some("\u{e9}\u{4e2d}")), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "ascii-references", &out, b"<r a=\"&#x4E2D;&#x9;\">&#xE9;&#x4E2D;</r>")?;
+    c.eq(u64::from(release(o)), 0)?;
+
+    let mut out = Out::new();
+    let o = named(c, &mut out, "us-ascii")?;
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(string(w, Some("\u{1f600}")), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "ascii-astral", &out, b"<r>&#x1F600;</r>")?;
+    c.eq(u64::from(release(o)), 0)?;
+
+    // A name, where no reference is allowed: the start tag is written
+    // and then the hand-over fails. The second hand-over writes the
+    // bytes up to the character that stopped the encoder -- "<r" and not
+    // "<r>" -- and the writer's own place in the document is untouched,
+    // so the end element is S_OK and a second root is refused for being
+    // a second root.
+    let mut out = Out::new();
+    let o = named(c, &mut out, "us-ascii")?;
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.hr(start_element(w, None, Some("r\u{4e2d}"), None), S_OK)?;
+    c.hr(flush(w), E_FAIL)?;
+    c.eq(out.len as u64, 0)?;
+    c.hr(flush(w), S_OK)?;
+    doc(c, "dead-prefix", &out, b"<r")?;
+    c.hr(end_element(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.hr(start_element(w, None, Some("q"), None), WR_E_INVALIDACTION)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "dead-after-release", &out, b"<r")?;
+    c.eq(out.refs as u64, 2)?;
+    c.eq(u64::from(release(o)), 0)?;
+    c.eq(out.refs as u64, 1)?;
+
+    // The same, with bytes already handed over: what came before the
+    // character stands, what comes after is dropped, and every later
+    // hand-over is S_OK with nothing to do.
+    let mut out = Out::new();
+    let o = named(c, &mut out, "us-ascii")?;
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(out.len as u64, 2)?;
+    c.hr(raw(w, Some("\u{4e2d}")), S_OK)?;
+    c.hr(flush(w), E_FAIL)?;
+    c.eq(out.len as u64, 2)?;
+    c.hr(raw(w, Some("ok")), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    doc(c, "dead-mid-document", &out, b"<r>")?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "dead-mid-after-release", &out, b"<r>")?;
+    c.eq(u64::from(release(o)), 0)?;
+
+    // A comment, in an encoding that had the character before it in
+    // text. The failing hand-over writes nothing, and the one after it
+    // writes the prefix the encoder did take -- down to the comment's
+    // opening delimiter, which went through before the character that
+    // killed it. Releasing the writer is that next hand-over.
+    let mut out = Out::new();
+    let o = named(c, &mut out, "iso-8859-1")?;
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(string(w, Some("\u{e9}")), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    doc(c, "latin1-text", &out, b"<r>\xe9")?;
+    c.hr(comment(w, Some("\u{141}")), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), E_FAIL)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "latin1-dead-comment", &out, b"<r>\xe9<!--")?;
+    c.eq(u64::from(release(o)), 0)?;
+
+    // A new output gives the writer a new encoder and it writes whole
+    // again: what died was the encoder and not the writer. The old
+    // stream keeps what could be encoded, which SetOutput hands over on
+    // its way out.
+    let mut out = Out::new();
+    let o = named(c, &mut out, "us-ascii")?;
+    let w = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.hr(start_element(w, None, Some("r\u{4e2d}"), None), S_OK)?;
+    c.hr(flush(w), E_FAIL)?;
+    c.eq(out.len as u64, 0)?;
+    let mut fresh = Out::new();
+    let o2 = named(c, &mut fresh, "utf-8")?;
+    c.hr(set_output(w, o2), S_OK)?;
+    c.hr(start_element(w, None, Some("q"), None), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "revived", &fresh, b"<q />")?;
+    doc(c, "revived-old-stream", &out, b"<r")?;
+    c.eq(u64::from(release(o)), 0)?;
+    c.eq(u64::from(release(o2)), 0)
+}
+
+/// An encoding XmlLite does not know. Nothing says so until a write is
+/// asked for, and then every write says it; the properties are never
+/// locked, because nothing was ever written; and a good output puts the
+/// writer back to work.
+fn output_unknown(c: &mut Checks) -> Result<(), u32> {
+    for (label, name, page) in [
+        ("a name nothing knows", Some("bogus"), None),
+        ("an empty name", Some(""), None),
+        ("utf8", Some("utf8"), None),
+        ("cp1252", Some("cp1252"), None),
+        ("1252", Some("1252"), None),
+        ("ANSI", Some("ANSI"), None),
+        ("latin1", Some("latin1"), None),
+        ("iso-8859-15", Some("iso-8859-15"), None),
+        ("x-cp1250", Some("x-cp1250"), None),
+        ("utf-16be", Some("utf-16be"), None),
+        ("utf-16le", Some("utf-16le"), None),
+        ("ucs-4le", Some("ucs-4le"), None),
+        ("utf-32", Some("utf-32"), None),
+        ("csUnicode", Some("csUnicode"), None),
+        ("a leading space", Some(" utf-8"), None),
+        ("code page 0", None, Some(0u32)),
+        ("code page 1", None, Some(1)),
+        ("code page 437", None, Some(437)),
+        ("code page 932", None, Some(932)),
+        ("code page 1201", None, Some(1201)),
+        ("code page 65000", None, Some(65000)),
+        ("code page 99999", None, Some(99999)),
+    ] {
+        let mut out = Out::new();
+        let o = match name {
+            Some(n) => named(c, &mut out, n)?,
+            None => by_page(c, &mut out, page.unwrap_or(0))?,
+        };
+        c.eq(out.refs as u64, 2)?;
+        let w = writing_obj(c, &[], o)?;
+        // The stream is asked what it is all the same.
+        c.ok(out.used & used::STREAM_IID != 0, u64::from(out.used))?;
+        c.hr(start_document(w, STANDALONE_OMIT), MX_E_ENCODING)?;
+        c.hr(start_element(w, None, Some("r"), None), MX_E_ENCODING)?;
+        c.hr(string(w, Some("x")), MX_E_ENCODING)?;
+        c.hr(end_document(w), MX_E_ENCODING)?;
+        c.hr(flush(w), S_OK)?;
+        c.eq(out.len as u64, 0)?;
+        // Nothing was written, so the properties are still open, where an
+        // encoding that works locks them with its first byte.
+        let (hr, v) = get_prop(w, PROP_BYTE_ORDER_MARK);
+        c.hr(hr, S_OK)?;
+        c.eq(v as u64, 1)?;
+        c.hr(set_prop(w, PROP_INDENT, 1), S_OK)?;
+        // And a good output is all the writer needs.
+        let mut fresh = Out::new();
+        let o2 = named(c, &mut fresh, "utf-8")?;
+        c.hr(set_output(w, o2), S_OK)?;
+        c.hr(start_element(w, None, Some("q"), None), S_OK)?;
+        c.hr(end_document(w), S_OK)?;
+        c.hr(flush(w), S_OK)?;
+        c.eq(u64::from(release(w)), 0)?;
+        doc(c, label, &fresh, b"<q />")?;
+        c.eq(out.len as u64, 0)?;
+        c.eq(u64::from(release(o)), 0)?;
+        c.eq(u64::from(release(o2)), 0)?;
+    }
+
+    // An encoding that works does lock them: the first write is what
+    // locks a writer's properties, and here it is a byte on the stream.
+    let mut out = Out::new();
+    let o = named(c, &mut out, "utf-8")?;
+    let w = writing_obj(c, &[], o)?;
+    c.hr(start_document(w, STANDALONE_OMIT), S_OK)?;
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.hr(end_document(w), S_OK)?;
+    c.hr(flush(w), S_OK)?;
+    c.hr(set_prop(w, PROP_INDENT, 1), E_ACCESSDENIED)?;
+    c.eq(u64::from(release(w)), 0)?;
+    doc(c, "locked", &out, b"<?xml version=\"1.0\" encoding=\"utf-8\"?><r />")?;
+    c.eq(u64::from(release(o)), 0)
+}
+
+/// One output, two writers. Nothing in an output is one writer's own:
+/// both write to the same stream, one after the other, and the second
+/// one's SetOutput writes a mark of its own in the middle.
+fn output_sharing(c: &mut Checks) -> Result<(), u32> {
+    let mut out = Out::new();
+    let o = named(c, &mut out, "utf-16")?;
+    let first = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    c.hr(start_element(first, None, Some("a"), None), S_OK)?;
+    c.hr(end_document(first), S_OK)?;
+    c.hr(flush(first), S_OK)?;
+    let second = writing_obj(c, &[(PROP_OMIT_XML_DECLARATION, 1)], o)?;
+    Line::new()
+        .s(NAME.as_bytes())
+        .s(b": out refs with two writers ")
+        .dec(out.refs as u64)
+        .s(b"\r\n")
+        .print();
+    c.ok(out.refs > 2, out.refs as u64)?;
+    c.hr(start_element(second, None, Some("b"), None), S_OK)?;
+    c.hr(end_document(second), S_OK)?;
+    c.hr(flush(second), S_OK)?;
+    doc(
+        c,
+        "shared-output",
+        &out,
+        b"\xff\xfe<\x00a\x00 \x00/\x00>\x00\xff\xfe<\x00b\x00 \x00/\x00>\x00",
+    )?;
+    // The first writer is where it was: its document is finished, which
+    // is why it will not start another element, and the second writer
+    // taking the output is not what did that.
+    c.hr(start_element(first, None, Some("c"), None), WR_E_INVALIDACTION)?;
+    c.hr(flush(first), S_OK)?;
+    c.eq(u64::from(release(first)), 0)?;
+    c.eq(u64::from(release(second)), 0)?;
+    c.eq(out.refs as u64, 2)?;
+    c.eq(u64::from(release(o)), 0)?;
+    c.eq(out.refs as u64, 1)
+}
+
 /// Every case, in the order they are written above.
 pub fn check(c: &mut Checks) -> Result<(), u32> {
     object(c)?;
@@ -1125,6 +2052,12 @@ pub fn check(c: &mut Checks) -> Result<(), u32> {
     entities(c)?;
     poison(c)?;
     outputs(c)?;
+    output_object(c)?;
+    output_declaration(c)?;
+    output_marks(c)?;
+    output_limits(c)?;
+    output_unknown(c)?;
+    output_sharing(c)?;
     release_flushes(c)?;
     long(c)?;
     more(c)
