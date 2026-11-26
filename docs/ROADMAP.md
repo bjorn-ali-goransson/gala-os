@@ -726,11 +726,21 @@ a centred translucent taskbar, a centred start menu, the clock's
 format), Selawik text baked by xtask, the owner's fortress SVGs (start
 button, boot splash, wallpaper mark), four generated wallpapers chosen
 per boot, maximize/restore; proportional Selawik in gdi32 with
-Windows' metrics (`gdi32_test`).
+Windows' metrics (`gdi32_test`); the font families a program finds --
+35 of them, each with the faces and weights it answers for, measured on
+real Windows -- from the one table both the realizer and
+EnumFontFamiliesExW read, so the face a program is given is always a
+face it can enumerate (`gdi32_test`'s `font_families`).
 
 **Next**:
 1. Step 3: uxtheme with themes on and Windows 11-style control drawing.
-2. Later: resizing windows by the frame, keyboard focus per window
+2. The fixed-pitch families (Courier New, Consolas, Lucida Console,
+   Lucida Sans Typewriter) are Noto Sans Mono bitmaps, so they enumerate
+   as raster faces and have no file for GetFontData; a mono TrueType
+   embedded beside Selawik would make them scalable faces like the rest,
+   and is what a program laying out a monospaced run at a size between
+   the baked ones wants.
+3. Later: resizing windows by the frame, keyboard focus per window
    (SH's step 1 needs it); the shell itself leaves the kernel in item SH.
 
 **Design**: ARCHITECTURE "Windows on the screen".

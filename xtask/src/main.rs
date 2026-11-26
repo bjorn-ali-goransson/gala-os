@@ -10312,7 +10312,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
         name: "gdi32_test",
         cmdline: "qemu_exit run=gdi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["gdi32_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "gdi32_test: ok",
+            // The font table answering for itself: every family it has,
+            // the substitution a name it has not takes, and the character
+            // set it cannot enumerate (user/gdi32/src/font.rs).
+            r#"ledger: {"service":"gdi32.dll!EnumFontFamiliesExW(*)","what":"reached""#,
+            r#"ledger: {"service":"gdi32.dll!font(No Such Font Family -> Arial)","what":"reached""#,
+            r#"ledger: {"service":"gdi32.dll!EnumFontFamiliesExW(charset 002)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // W3: gala's comctl32 (image lists) against documented behaviour,

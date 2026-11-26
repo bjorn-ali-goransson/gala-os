@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::font::{self, LogFont, TextMetricW};
 use super::{Dc, Handle, Object, slot_of, with_dc};
@@ -20,16 +20,6 @@ use super::{Dc, Handle, Object, slot_of, with_dc};
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn MultiByteToWideChar(cp: u32, flags: u32, s: *const u8, n: i32, w: *mut u16, m: i32) -> i32;
-    fn WideCharToMultiByte(
-        cp: u32,
-        flags: u32,
-        w: *const u16,
-        n: i32,
-        s: *mut u8,
-        m: i32,
-        default: *const u8,
-        used: *mut i32,
-    ) -> i32;
 }
 
 const CLR_INVALID: u32 = 0xffff_ffff;
@@ -243,38 +233,36 @@ fn font_of(dc: &Dc, slots: &[Object]) -> LogFont {
     }
 }
 
-/// GetTextFaceA: the selected font's face name in the ANSI code page; the
-/// bytes copied with the NUL (the size needed when `buf` is NULL).
+/// GetTextFaceA: the name of the family the selected font realized with
+/// (GetTextFaceW's name; every family's name is ASCII, which no ANSI code
+/// page changes). It copies at most `n` bytes and always terminates what
+/// it copied, and answers with the bytes it wrote **without** counting
+/// the terminator -- where GetTextFaceW counts it. With no buffer it
+/// answers the whole length with the terminator, as the wide call does,
+/// and with no room (`n` <= 0) it writes nothing and answers 0. All
+/// measured on Windows 11 24H2: "Arial" answers 5 into a buffer, 6 with
+/// none, and 3 into a buffer of 4.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetTextFaceA(hdc: Handle, n: i32, buf: *mut u8) -> i32 {
     with_dc(hdc, |dc, slots| {
         let f = font_of(dc, slots);
-        let len = f.face.iter().position(|&c| c == 0).unwrap_or(f.face.len());
+        let name = font::family_of(&f).name.as_bytes();
         let mut ansi = [0u8; 64];
-        // SAFETY: `len` units in, our buffer out (CP_ACP).
-        let k = unsafe {
-            WideCharToMultiByte(
-                0,
-                0,
-                f.face.as_ptr(),
-                len as i32,
-                ansi.as_mut_ptr(),
-                63,
-                core::ptr::null(),
-                core::ptr::null_mut(),
-            )
-        }
-        .max(0) as usize;
+        let k = name.len().min(63);
+        ansi[..k].copy_from_slice(&name[..k]);
         if buf.is_null() {
             return k as i32 + 1;
         }
-        let k = k.min((n.max(1) - 1) as usize);
+        if n <= 0 {
+            return 0;
+        }
+        let k = k.min((n - 1) as usize);
         // SAFETY: the caller's buffer of `n` bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(ansi.as_ptr(), buf, k);
             *buf.add(k) = 0;
         }
-        k as i32 + 1
+        k as i32
     })
     .unwrap_or(0)
 }
@@ -386,8 +374,10 @@ type FontEnumProcW =
     extern "system" fn(*const EnumLogFontExW, *const NewTextMetricExW, u32, isize) -> i32;
 
 const TRUETYPE_FONTTYPE: u32 = 4;
+const RASTER_FONTTYPE: u32 = 1;
 const NTM_REGULAR: u32 = 0x40;
 const NTM_BOLD: u32 = 0x20;
+const NTM_ITALIC: u32 = 0x01;
 
 fn put_str(out: &mut [u16], parts: &[&str]) {
     let room = out.len().saturating_sub(1);
@@ -438,11 +428,89 @@ pub extern "system" fn EnumFontsW(
     EnumFontFamiliesExW(hdc, &filter, callback, param, 0)
 }
 
-/// EnumFontFamiliesExW: the installed families matching the LOGFONTW's
-/// face name and character set. gala has one, Selawik (in four weights):
-/// an empty name enumerates it once (its Regular face), "Selawik" each of
-/// its faces; other names have no fonts (no callback). Selawik covers
-/// ANSI_CHARSET; DEFAULT_CHARSET means any. The last callback's value,
+/// The style name a face enumerates with: the weight's own name where
+/// the family has faces of several weights, else "Regular" -- the family
+/// name carries the weight for the families that have one face, as
+/// "Segoe UI Semibold" and "Arial Black" do.
+fn weight_name(family: &font::Family, weight: i32) -> &'static str {
+    if family.weights.len() < 2 {
+        return "Regular";
+    }
+    match weight {
+        ..=300 => "Light",
+        301..=350 => "Semilight",
+        351..=500 => "Regular",
+        501..=600 => "Semibold",
+        601..=800 => "Bold",
+        _ => "Black",
+    }
+}
+
+/// A row saying what a program enumerated and how many faces it was
+/// given: the filter's face name ("*" for the empty name that asks for
+/// every family) and the count. First seen only, by a hash of the name
+/// over 64 buckets. Read it to see which families a program looked for
+/// before it laid text out -- and a count of 0 is a family it wanted and
+/// gala has not got.
+fn note_enum(name: &[u16], faces: u32) {
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &c in name {
+        hash = (hash ^ u64::from(c)).wrapping_mul(0x100_0000_01b3);
+    }
+    let mask = 1u64 << (hash % 64);
+    if SEEN.fetch_or(mask, Ordering::Relaxed) & mask != 0 {
+        return;
+    }
+    let mut what = [0u8; 80];
+    let mut n = 0;
+    {
+        let mut put = |bytes: &[u8]| {
+            for &b in bytes {
+                if n < what.len() {
+                    what[n] = b;
+                    n += 1;
+                }
+            }
+        };
+        put(b"gdi32.dll!EnumFontFamiliesExW(");
+        if name.is_empty() {
+            put(b"*");
+        }
+        for &c in name.iter().take(32) {
+            put(&[if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' }]);
+        }
+        put(b")");
+    }
+    crate::reached(&what[..n], u64::from(faces));
+}
+
+/// A row for a character set gala's faces do not cover, which matches no
+/// family: a program asking for one is a program that will find no font
+/// at all, which is worth a row of its own. First seen per character set.
+fn note_charset(char_set: u8) {
+    static SEEN: [AtomicU64; 4] =
+        [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    let (word, mask) = ((char_set / 64) as usize, 1u64 << (char_set % 64));
+    if SEEN[word].fetch_or(mask, Ordering::Relaxed) & mask != 0 {
+        return;
+    }
+    let mut what = *b"gdi32.dll!EnumFontFamiliesExW(charset NNN)";
+    let digits = [char_set / 100 + b'0', char_set / 10 % 10 + b'0', char_set % 10 + b'0'];
+    what[38..41].copy_from_slice(&digits);
+    crate::unsupported(&what, u64::from(char_set));
+}
+
+/// EnumFontFamiliesExW: the families matching the LOGFONTW's face name
+/// and character set, from `font::FAMILIES` -- the same table the font
+/// mapper realizes a LOGFONT through, so every face a program is given
+/// is a face it can also find here. An empty name enumerates every
+/// family once, with its lightest upright face, as Windows answers with
+/// each family's Regular; a family's own name enumerates each of its
+/// faces, its upright weights first and then its italics where it has
+/// them (GDI promises no order). A name no family has matches nothing
+/// (no callback), and so does any character set but ANSI_CHARSET or
+/// DEFAULT_CHARSET, gala's faces being Latin. The last callback's value,
 /// or 1 when there was none.
 #[unsafe(no_mangle)]
 pub extern "system" fn EnumFontFamiliesExW(
@@ -459,54 +527,105 @@ pub extern "system" fn EnumFontFamiliesExW(
     // SAFETY: the caller's LOGFONTW.
     let filter = unsafe { &*filter };
     if !matches!(filter.char_set, 0 | 1) {
+        note_charset(filter.char_set);
         return 1;
     }
-    let len = filter.face.iter().position(|&c| c == 0).unwrap_or(32);
-    let name = &filter.face[..len];
-    let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 0x20 } else { c };
-    let is_selawik =
-        name.len() == 7 && name.iter().zip(b"selawik").all(|(&a, &b)| lower(a) == u16::from(b));
-    if !name.is_empty() && !is_selawik {
-        return 1;
-    }
+    let name = filter.name();
+    let one = if name.is_empty() {
+        None
+    } else {
+        match font::family_named(name) {
+            Some(family) => Some(family),
+            None => {
+                note_enum(name, 0);
+                return 1;
+            }
+        }
+    };
     let mut result = 1;
-    for (file, style, weight) in font::selawik_faces() {
-        // head's unitsPerEm (at 18).
-        let em = table(file, u32::from_le_bytes(*b"head"))
-            .and_then(|h| Some(u32::from(u16::from_be_bytes([*h.get(18)?, *h.get(19)?]))))
-            .unwrap_or(2048);
-        if name.is_empty() && weight != 400 {
+    let mut faces = 0;
+    for family in font::FAMILIES {
+        if one.is_some_and(|o| !core::ptr::eq(family, o)) {
             continue;
         }
-        let mut face = [0u16; 32];
-        put_str(&mut face, &["Selawik"]);
-        let mut lf = LogFont { weight, char_set: 0, pitch_and_family: 0x22, face, ..*filter };
-        lf.height = -12;
-        lf.width = 0;
-        lf.italic = 0;
-        lf.quality = 0;
-        let mut e =
-            EnumLogFontExW { font: lf, full_name: [0; 64], style: [0; 32], script: [0; 32] };
-        if weight == 400 {
-            put_str(&mut e.full_name, &["Selawik"]);
-        } else {
-            put_str(&mut e.full_name, &["Selawik ", style]);
-        }
-        put_str(&mut e.style, &[style]);
-        put_str(&mut e.script, &["Western"]);
-        let metric = font::text_metrics(&lf);
-        let m = NewTextMetricExW {
-            avg_width: metric.ave_char_width as u32,
-            cell_height: metric.height as u32,
-            metric,
-            flags: if weight >= 700 { NTM_BOLD } else { NTM_REGULAR },
-            size_em: em,
-            signature: font::LATIN_SIGNATURE,
-        };
-        result = callback(&e, &m, TRUETYPE_FONTTYPE, param);
-        if result == 0 {
-            break;
+        for italic in [false, true] {
+            // Only a named family enumerates its styles; an empty name
+            // asks for one face of each family.
+            if italic && (one.is_none() || !family.italic) {
+                continue;
+            }
+            for &weight in family.weights {
+                if one.is_none() && weight != family.weights[0] {
+                    continue;
+                }
+                let mut face = [0u16; 32];
+                put_str(&mut face, &[family.name]);
+                let mut lf = LogFont {
+                    weight,
+                    char_set: 0,
+                    pitch_and_family: if family.fixed { 0x31 } else { 0x22 },
+                    face,
+                    ..*filter
+                };
+                lf.height = -12;
+                lf.width = 0;
+                lf.italic = u8::from(italic);
+                lf.quality = 0;
+                let mut e = EnumLogFontExW {
+                    font: lf,
+                    full_name: [0; 64],
+                    style: [0; 32],
+                    script: [0; 32],
+                };
+                let style = weight_name(family, weight);
+                match (style == "Regular", italic) {
+                    (true, false) => {
+                        put_str(&mut e.style, &["Regular"]);
+                        put_str(&mut e.full_name, &[family.name]);
+                    }
+                    (true, true) => {
+                        put_str(&mut e.style, &["Italic"]);
+                        put_str(&mut e.full_name, &[family.name, " Italic"]);
+                    }
+                    (false, false) => {
+                        put_str(&mut e.style, &[style]);
+                        put_str(&mut e.full_name, &[family.name, " ", style]);
+                    }
+                    (false, true) => {
+                        put_str(&mut e.style, &[style, " Italic"]);
+                        put_str(&mut e.full_name, &[family.name, " ", style, " Italic"]);
+                    }
+                }
+                put_str(&mut e.script, &["Western"]);
+                // head's unitsPerEm (at 18); a bitmap face has no em.
+                let em = font::file(&lf)
+                    .and_then(|file| table(file, u32::from_le_bytes(*b"head")))
+                    .and_then(|h| Some(u32::from(u16::from_be_bytes([*h.get(18)?, *h.get(19)?]))))
+                    .unwrap_or(if family.fixed { 0 } else { 2048 });
+                let metric = font::text_metrics(&lf);
+                let m = NewTextMetricExW {
+                    avg_width: metric.ave_char_width as u32,
+                    cell_height: metric.height as u32,
+                    metric,
+                    flags: (if weight >= 700 { NTM_BOLD } else { NTM_REGULAR })
+                        | if italic { NTM_ITALIC } else { 0 },
+                    size_em: em,
+                    signature: font::LATIN_SIGNATURE,
+                };
+                // A fixed-pitch family's faces are Noto Sans Mono's
+                // bitmaps, which is what their metrics say too
+                // (FF_MODERN, no TMPF_TRUETYPE): a raster font, not a
+                // TrueType one whose outlines GetFontData could hand out.
+                let kind = if family.fixed { RASTER_FONTTYPE } else { TRUETYPE_FONTTYPE };
+                faces += 1;
+                result = callback(&e, &m, kind, param);
+                if result == 0 {
+                    note_enum(name, faces);
+                    return result;
+                }
+            }
         }
     }
+    note_enum(name, faces);
     result
 }

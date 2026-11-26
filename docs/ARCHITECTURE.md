@@ -10506,9 +10506,34 @@ then riched20.dll).
   (rectangles by both corners), but sizes such as pen widths, fonts and
   blit sizes are not scaled yet. Drawing clips to the surface and the
   DC's clip.
-- **Text** (`font.rs`), two families:
-  - Proportional faces (Segoe UI, MS Shell Dlg, the default, any face
-    not known to be fixed pitch) are Selawik (Segoe UI's metrics; four
+- **Text** (`font.rs`): a table, `FAMILIES`, decides which font
+  families exist here -- 35 of them, each with the weights and styles it
+  answers for, measured on Windows 11 24H2 (`gdi32_test`'s
+  `font_families`) -- and two fonts draw them all. The table is what both
+  the realizer (`family_of`, which `metrics` reads) and the enumerator
+  (`EnumFontFamiliesExW` in `state.rs`) answer from, so **the face a
+  program is given is always a face the system enumerates**; keeping
+  those two apart is what left a program laying text out in a face it
+  could not then find. A family answers an asked weight with the nearest
+  of its own faces' weights, the lighter where two are equally near
+  (`snap_weight`: Segoe UI, whose faces are 400 and 700, answers 350 with
+  400 and 600 with 700, the weights between being the Semilight and
+  Semibold families' own). A name no family has is substituted, as
+  Windows substitutes a name it has no font for: "Courier New" where the
+  request asks for fixed pitch (FIXED_PITCH, FF_MODERN, or the name of a
+  fixed-pitch family gala does not enumerate -- Courier, Terminal,
+  Fixedsys, Cascadia Mono, Cascadia Code), "Arial" otherwise, both
+  measured. Every substitution leaves a "reached" row naming both,
+  `gdi32.dll!font(<asked> -> <family>)`, which is what to read when a
+  program lays text out in the wrong face or cannot find the face it was
+  given (first seen only, by a hash of the name over 64 buckets: a
+  collision drops a row, never the answer). Windows has
+  families besides these which it does not enumerate for ANSI_CHARSET
+  either -- its raster Courier, Terminal, Fixedsys, MS Sans Serif, MS
+  Serif and System, whose faces are OEM -- and gala, whose faces are
+  Latin, has none of them. The two fonts:
+  - Proportional families (Segoe UI, MS Shell Dlg, Arial, the default,
+    every family not marked fixed pitch) are Selawik (Segoe UI's metrics; four
     weights embedded in gdi32.dll), rasterized at the font's em by
     fontdue (`no_std` + `alloc` over `gala_heap`) and kept in a glyph
     cache (256 buckets of 16, its own spin lock; **lock order: taken
@@ -10526,16 +10551,18 @@ then riched20.dll).
     hyphen) has no width and draws nothing, as Segoe UI's zero-width
     glyphs on Windows (`gdi32_test`; ODT's setup.exe wraps its texts in
     U+202A/U+202C); any other missing glyph is drawn as `?`.
-  - Fixed-pitch faces (Courier New, Consolas, Lucida Console, other
-    known fixed faces, FIXED_PITCH, or FF_MODERN without a name) are
-    Noto Sans Mono's bitmaps (16/20/24/32 px, regular and bold) scaled
-    to the cell (4/3 of the em) with four samples per pixel, one advance.
+  - Fixed-pitch families (Courier New, Consolas, Lucida Console, Lucida
+    Sans Typewriter) are Noto Sans Mono's bitmaps (16/20/24/32 px,
+    regular and bold) scaled to the cell (4/3 of the em) with four
+    samples per pixel, one advance. Being bitmaps, they enumerate as
+    RASTER_FONTTYPE and have no file for GetFontData; a mono TrueType
+    would make them scalable faces like the rest (ROADMAP).
   - Both: italic slant, underline, strike-out; TextOut alignment
     (TA_RIGHT/CENTER, TA_BOTTOM/BASELINE) and OPAQUE backgrounds;
     ExtTextOutW (ETO_OPAQUE, ETO_CLIPPED, lpDx); GetTextMetricsW,
     GetTextExtentPoint32W, GetTextExtentExPointW (fit and partial
-    widths, with lpnFit only those of what fits, as documented) and
-    GetTextFaceW from the same metrics. GetTextCharsetInfo,
+    widths, with lpnFit only those of what fits, as documented) from the
+    same metrics (GetTextFaceW is below, with the family table it reads). GetTextCharsetInfo,
     GetTextCharset and GetTextMetricsW's tmCharSet report the character
     set the font is *realized* with, which is never DEFAULT_CHARSET: a
     LOGFONT asking for that only asks the font mapper to choose, and
@@ -10580,22 +10607,48 @@ then riched20.dll).
   SelectClipRgn/ExtSelectClipRgn, ExcludeClipRect, IntersectClipRect,
   GetClipBox, GetClipRgn; drawing and GetPixel respect it (GetPixel
   outside: CLR_INVALID); FillRgn, PaintRgn, GetRegionData/
-  ExtCreateRegion.
+  ExtCreateRegion. IntersectClipRect and ExcludeClipRect answer
+  COMPLEXREGION whatever the clip ends up being -- even the one rectangle
+  GetClipBox then calls SIMPLEREGION -- as Windows does, batching or no
+  (`gdi32_test`); only SelectClipRgn answers the true complexity.
 - **Palettes** (`palette.rs`) are kept, selected and queried but change
   nothing on the true-colour display (RealizePalette maps 0 entries,
   GetNearestColor is the colour). GdiFlush: nothing is batched.
 - **DC state and font queries** (`state.rs`): SaveDC/RestoreDC keep
   copies of the DC in a list of their own (spin-locked; **lock order:
   taken inside the object table's**), dropped with the DC; the DC brush
-  and pen colours (white and black at first); CreateFontA/IndirectA and
-  GetTextFaceA (CP_ACP); GetCharWidthW/GetCharWidth32W from the same
+  and pen colours (white and black at first); CreateFontA/IndirectA;
+  GetCharWidthW/GetCharWidth32W from the same
   advances as the text functions; GetFontData reads the selected Selawik
   file's tables by tag (table 0: the whole file; GDI_ERROR for the
-  bitmap fixed-pitch font, which has no file); EnumFontFamiliesExW knows
-  one family, Selawik (an empty name enumerates its Regular face, its
-  name each of its four faces; other names nothing); EnumFontsW is it
-  with DEFAULT_CHARSET (ENUMLOGFONTEXW and NEWTEXTMETRICEXW start with
-  what FONTENUMPROCW takes).
+  bitmap fixed-pitch families, which have no file).
+  GetTextFaceA and GetTextFaceW report the family the selected font
+  realized with. Both copy at most `n` units and always terminate what
+  they copied; what they answer is what they wrote, the terminator
+  counted by the wide form and not by the ANSI one ("Arial" answers 6 and
+  5), and with no buffer both answer the whole length, terminator
+  included; `n` <= 0 writes nothing and answers 0. Every family's name is
+  ASCII, which no ANSI code page changes.
+  EnumFontFamiliesExW walks `FAMILIES`: an empty name lists every family
+  once, at its lightest upright face (that is how a program finds the
+  font list); a name lists that family's upright faces by ascending
+  weight, then its italics, with `elfStyle` and `elfFullName` composed
+  from the weight's name and `elfScript` "Western"; a name no family has
+  gives no callback at all, as Windows gives none for a family it does
+  not have. Every enumeration leaves a "reached" row with the name it
+  asked for and the faces it was given as the detail
+  (`gdi32.dll!EnumFontFamiliesExW(<name>)`, `(*)` for the whole table),
+  so a program's idea of the font list is readable and a name that was
+  answered with nothing is a row with detail 0, not a silence. A
+  character set other than ANSI_CHARSET or DEFAULT_CHARSET enumerates
+  nothing and leaves an "unsupported" row
+  (`gdi32.dll!EnumFontFamiliesExW(charset <n>)`): gala's faces are Latin,
+  and Windows would list the faces covering that set. (A named family asked with DEFAULT_CHARSET repeats its faces once
+  per character set it covers on Windows -- Arial 34 times -- which one
+  Latin family does not; a test must ask a named family with
+  ANSI_CHARSET.) EnumFontsW is EnumFontFamiliesExW with DEFAULT_CHARSET
+  (ENUMLOGFONTEXW and NEWTEXTMETRICEXW start with what FONTENUMPROCW
+  takes).
 - **Older calls** (`older.rs`, Delphi's VCL): GetTextExtentPointW is
   GetTextExtentPoint32W, CreatePenIndirect CreatePen, UnrealizeObject
   TRUE for brushes and palettes (nothing realized to reset),

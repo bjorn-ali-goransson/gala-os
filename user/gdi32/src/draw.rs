@@ -802,23 +802,33 @@ pub extern "system" fn GetTextCharset(hdc: Handle) -> u32 {
     GetTextCharsetInfo(hdc, core::ptr::null_mut(), 0)
 }
 
-/// GetTextFaceW(hdc, n, buf): the selected font's face name; the
-/// characters copied with the NUL (the length needed with the NUL when
-/// `buf` is NULL).
+/// GetTextFaceW(hdc, n, buf): the name of the family the selected font
+/// realized with -- not the name it asked for, which may be a name no
+/// family has: a program is told the face it actually got, and that face
+/// is one EnumFontFamiliesExW answers for. The call copies at most `n`
+/// characters and always terminates what it copied, and answers with the
+/// characters it wrote, the terminator counted; with no buffer it answers
+/// the whole length, the terminator counted; with no room (`n` <= 0) it
+/// writes nothing and answers 0. All measured on Windows 11 24H2.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetTextFaceW(hdc: Handle, n: i32, buf: *mut u16) -> i32 {
     with_dc(hdc, |dc, slots| {
         let f = font_of(dc, slots);
-        let len = f.face.iter().position(|&c| c == 0).unwrap_or(f.face.len());
+        let name = crate::font::family_of(&f).name;
+        let len = name.encode_utf16().count();
         if buf.is_null() {
             return len as i32 + 1;
         }
-        let k = len.min((n.max(1) - 1) as usize);
-        // SAFETY: the caller's buffer of `n` characters.
-        unsafe {
-            core::ptr::copy_nonoverlapping(f.face.as_ptr(), buf, k);
-            *buf.add(k) = 0;
+        if n <= 0 {
+            return 0;
         }
+        let k = len.min((n - 1) as usize);
+        for (i, c) in name.encode_utf16().take(k).enumerate() {
+            // SAFETY: the caller's buffer of `n` characters; i < n - 1.
+            unsafe { *buf.add(i) = c };
+        }
+        // SAFETY: the caller's buffer of `n` characters; k <= n - 1.
+        unsafe { *buf.add(k) = 0 };
         k as i32 + 1
     })
     .unwrap_or(0)

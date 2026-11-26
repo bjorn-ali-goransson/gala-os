@@ -112,6 +112,26 @@
  *   unknown family gets no callback. EnumFontsW (Delphi asks it whether
  *   a face is installed): with no face name each family once, with the
  *   callback's last value returned; an unknown face gets no callback.
+ * - Font families (Word lays its window out in the face user32's message
+ *   font names): a family asked for by name answers with the styles it
+ *   has, each face under the name asked for, named in its style and
+ *   TRUETYPE_FONTTYPE -- four for Segoe UI, Arial, Times New Roman,
+ *   Verdana and Georgia (weight 400 and 700, upright and italic), two
+ *   for Tahoma (which has no italic face), Segoe UI Semibold's own
+ *   weight 600 and Segoe UI Semilight's 350; a fixed-pitch family
+ *   (Courier New, Consolas, Lucida Console) answers with the
+ *   TMPF_FIXED_PITCH bit clear where a proportional one has it set.
+ *   An empty name lists every family once, under its own name, and
+ *   lists each of the names above. A name no family has, and a charset
+ *   a text family has no face for, enumerate nothing and still return
+ *   the callback's value. What a program is handed it can enumerate:
+ *   the face GetTextFaceW reports once a name is realized -- a family's
+ *   own name, the substitute for a name that is only an alias (MS Shell
+ *   Dlg), the fallback for a name no family has, user32's message and
+ *   caption fonts, the stock DEFAULT_GUI_FONT -- is a face that
+ *   enumerates under that name. A weight between a family's faces
+ *   realizes as the nearer one (350 as 400, 600 as 700). NUMFONTS is
+ *   0: a display has no device fonts.
  * - Older calls Delphi's VCL makes: GetTextExtentPointW measures as
  *   GetTextExtentPoint32W; CreatePenIndirect makes a pen (OBJ_PEN);
  *   UnrealizeObject is TRUE for a brush; RectVisible: TRUE for a
@@ -664,7 +684,12 @@ static void regions(void) {
     SelectClipRgn(mem, NULL);
     CHECK(GetPixel(mem, 3, 3) == 0 && GetPixel(mem, 8, 8) == RGB(255, 255, 255));
     CHECK(GetClipBox(mem, &box) == SIMPLEREGION && box.right == 32);
-    CHECK(IntersectClipRect(mem, 20, 20, 30, 30) == SIMPLEREGION);
+    /* IntersectClipRect and ExcludeClipRect answer COMPLEXREGION whatever
+     * the clip ends up being - here it is the one rectangle GetClipBox
+     * then calls SIMPLEREGION. Only SelectClipRgn answers the true
+     * complexity. Setting GdiSetBatchLimit(1) changes neither. */
+    CHECK(IntersectClipRect(mem, 20, 20, 30, 30) == COMPLEXREGION);
+    CHECK(GetClipBox(mem, &box) == SIMPLEREGION && box.right == 30);
     PatBlt(mem, 0, 0, 32, 32, BLACKNESS);
     SelectClipRgn(mem, NULL);
     CHECK(GetPixel(mem, 25, 25) == 0 && GetPixel(mem, 3, 3) == 0 && GetPixel(mem, 8, 8) == RGB(255, 255, 255));
@@ -944,12 +969,15 @@ static void msimg(void) {
     DeleteDC(d);
 }
 
-/* EnumFontFamiliesExW's callback: counts calls; stops when asked. */
+/* EnumFontFamiliesExW's callback: counts calls; stops when asked.
+ * A font type of 0 is not an error: a full enumeration lists the legacy
+ * vector families (Modern, Roman, Script) with no type bits set. */
 static int enum_calls, enum_stop;
 static int CALLBACK enum_font(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM param) {
     (void)tm;
+    (void)type;
     enum_calls++;
-    if (param != 0x1234 || lf->lfFaceName[0] == 0 || type == 0) return 0;
+    if (param != 0x1234 || lf->lfFaceName[0] == 0) return 0;
     return enum_stop ? 0 : 7;
 }
 
@@ -988,8 +1016,19 @@ static void dc_state(void) {
     CHECK(font != NULL);
     HGDIOBJ old = SelectObject(dc, font);
     char face[32];
-    CHECK(GetTextFaceA(dc, sizeof face, face) == 6 && strcmp(face, "Arial") == 0);
+    /* Both forms copy at most n units and always terminate what they
+     * copied; the count they return is what they wrote, the terminator
+     * included for GetTextFaceW and excluded for GetTextFaceA. With no
+     * buffer both answer the whole length, terminator included. */
+    CHECK(GetTextFaceA(dc, sizeof face, face) == 5 && strcmp(face, "Arial") == 0);
     CHECK(GetTextFaceA(dc, 0, NULL) == 6);
+    WCHAR wface[32];
+    CHECK(GetTextFaceW(dc, 32, wface) == 6 && wface[0] == 'A' && wface[5] == 0);
+    CHECK(GetTextFaceW(dc, 0, NULL) == 6);
+    CHECK(GetTextFaceA(dc, 0, face) == 0);
+    CHECK(GetTextFaceA(dc, 4, face) == 3 && strcmp(face, "Ari") == 0);
+    CHECK(GetTextFaceW(dc, 4, wface) == 4 && wface[2] == 'i' && wface[3] == 0);
+    CHECK(GetTextFaceW(dc, 5, wface) == 5 && wface[3] == 'a' && wface[4] == 0);
     INT widths[2] = {0, 0};
     SIZE one;
     CHECK(GetCharWidthW(dc, 'A', 'B', widths) && widths[0] > 0 && widths[1] > 0);
@@ -1086,6 +1125,213 @@ static void null_brush(void) {
     DeleteDC(dc);
 }
 
+/* What a family enumeration answers, collected: the styles a program
+ * reads out of a family it asks for by name. */
+#define MAX_FACES 64
+static struct {
+    WCHAR face[LF_FACESIZE];
+    WCHAR style[64];
+    LONG weight;
+    BYTE italic;
+    BYTE pitch;
+    DWORD type;
+} seen[MAX_FACES];
+static int seen_n;
+
+static int CALLBACK collect(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM param) {
+    const ENUMLOGFONTEXW *ex = (const ENUMLOGFONTEXW *)lf;
+    if (param == 0x5a5a && seen_n < MAX_FACES) {
+        lstrcpynW(seen[seen_n].face, lf->lfFaceName, LF_FACESIZE);
+        lstrcpynW(seen[seen_n].style, ex->elfStyle, 64);
+        seen[seen_n].weight = lf->lfWeight;
+        seen[seen_n].italic = lf->lfItalic;
+        seen[seen_n].pitch = tm->tmPitchAndFamily;
+        seen[seen_n].type = type;
+        seen_n++;
+    }
+    return 1;
+}
+
+/* Enumerates one face name (NULL for every family) with one charset;
+ * the answers land in seen, the return is the enumeration's. */
+static int enumerate(HDC dc, const WCHAR *face, BYTE charset) {
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof lf);
+    lf.lfCharSet = charset;
+    if (face) lstrcpynW(lf.lfFaceName, face, LF_FACESIZE);
+    seen_n = 0;
+    return EnumFontFamiliesExW(dc, &lf, collect, 0x5a5a, 0);
+}
+
+/* The four styles a family with Regular, Bold, Italic and Bold Italic
+ * answers with: weight 400 and 700, upright and italic, each once. */
+static int four_styles(void) {
+    int n[2][2] = {{0, 0}, {0, 0}};
+    for (int i = 0; i < seen_n; i++) {
+        int it = seen[i].italic ? 1 : 0;
+        if (seen[i].weight == 400) n[it][0]++;
+        else if (seen[i].weight == 700) n[it][1]++;
+    }
+    return seen_n == 4 && n[0][0] == 1 && n[0][1] == 1 && n[1][0] == 1 && n[1][1] == 1;
+}
+
+/* How often an empty-name enumeration (every family once) lists a
+ * family: a name a program may ask for is a name in that list. */
+static const WCHAR *wanted;
+static int wanted_found;
+static int CALLBACK look_for(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM param) {
+    (void)tm;
+    (void)type;
+    if (param != 0x5a5a) return 0;
+    if (lstrcmpiW(lf->lfFaceName, wanted) == 0) wanted_found++;
+    return 1;
+}
+
+static int listed(HDC dc, const WCHAR *face) {
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof lf);
+    lf.lfCharSet = ANSI_CHARSET;
+    wanted = face;
+    wanted_found = 0;
+    EnumFontFamiliesExW(dc, &lf, look_for, 0x5a5a, 0);
+    return wanted_found;
+}
+
+/* The weight a face realizes at: the family's nearest style, not the
+ * weight asked for. */
+static LONG realized_weight(HDC dc, const WCHAR *face, LONG weight) {
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof lf);
+    lf.lfHeight = -12;
+    lf.lfWeight = weight;
+    lf.lfCharSet = ANSI_CHARSET;
+    lstrcpynW(lf.lfFaceName, face, LF_FACESIZE);
+    HFONT font = CreateFontIndirectW(&lf);
+    HGDIOBJ old = SelectObject(dc, font);
+    TEXTMETRICW tm;
+    memset(&tm, 0, sizeof tm);
+    LONG w = GetTextMetricsW(dc, &tm) ? tm.tmWeight : -1;
+    SelectObject(dc, old);
+    DeleteObject(font);
+    return w;
+}
+
+/* The face a program is handed is a face the system enumerates: the one
+ * it asked for, or the substitute it was given instead. Word asks user32
+ * for the message font and lays its window out in the face that comes
+ * back, so a face gdi32 realizes but will not enumerate stops it. */
+static void enumerates(HDC dc, const WCHAR *ask) {
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof lf);
+    lf.lfHeight = -12;
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lstrcpynW(lf.lfFaceName, ask, LF_FACESIZE);
+    HFONT font = CreateFontIndirectW(&lf);
+    CHECK(font != NULL);
+    HGDIOBJ old = SelectObject(dc, font);
+    WCHAR got[LF_FACESIZE];
+    memset(got, 0, sizeof got);
+    CHECK(GetTextFaceW(dc, LF_FACESIZE, got) > 0 && got[0] != 0);
+    SelectObject(dc, old);
+    DeleteObject(font);
+    CHECK(enumerate(dc, got, ANSI_CHARSET) != 0 && seen_n >= 1);
+    CHECK(lstrcmpiW(seen[0].face, got) == 0);
+}
+
+/* The families a program finds and the styles each answers with. */
+static void font_families(void) {
+    HDC dc = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    CHECK(dc != NULL);
+    CHECK(GetDeviceCaps(dc, NUMFONTS) == 0); /* no device fonts on a display */
+
+    /* A family with all four styles: each face under the name asked
+     * for, named in its style, TrueType and proportional (the
+     * TMPF_FIXED_PITCH bit is set for a variable-pitch face). */
+    static const WCHAR *const four[] = {
+        L"Segoe UI", L"Arial", L"Times New Roman", L"Verdana", L"Georgia",
+    };
+    for (size_t i = 0; i < sizeof four / sizeof *four; i++) {
+        CHECK(enumerate(dc, four[i], ANSI_CHARSET) != 0);
+        CHECK(four_styles());
+        for (int j = 0; j < seen_n; j++) {
+            CHECK(lstrcmpiW(seen[j].face, four[i]) == 0);
+            CHECK(seen[j].style[0] != 0);
+            CHECK(seen[j].type == TRUETYPE_FONTTYPE);
+            CHECK((seen[j].pitch & TMPF_FIXED_PITCH) != 0);
+            CHECK((seen[j].pitch & TMPF_TRUETYPE) != 0);
+        }
+        CHECK(listed(dc, four[i]) == 1);
+    }
+
+    /* A family answers with the styles it has, not with four: Tahoma
+     * has no italic face, and the weights of Segoe UI's own are its
+     * family name's, not a style of Segoe UI. */
+    CHECK(enumerate(dc, L"Tahoma", ANSI_CHARSET) != 0 && seen_n == 2);
+    CHECK(!seen[0].italic && !seen[1].italic);
+    CHECK(seen[0].weight + seen[1].weight == 1100 && seen[0].weight != seen[1].weight);
+    CHECK(listed(dc, L"Tahoma") == 1);
+    CHECK(enumerate(dc, L"Segoe UI Semibold", ANSI_CHARSET) != 0 && seen_n >= 1);
+    CHECK(seen[0].weight == 600 && listed(dc, L"Segoe UI Semibold") == 1);
+    CHECK(enumerate(dc, L"Segoe UI Semilight", ANSI_CHARSET) != 0 && seen_n >= 1);
+    CHECK(seen[0].weight == 350 && listed(dc, L"Segoe UI Semilight") == 1);
+
+    /* A fixed-pitch family: its faces under the name asked for, with
+     * the TMPF_FIXED_PITCH bit clear. */
+    static const WCHAR *const fixed[] = {L"Courier New", L"Consolas", L"Lucida Console"};
+    for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) {
+        CHECK(enumerate(dc, fixed[i], ANSI_CHARSET) != 0 && seen_n >= 1);
+        CHECK(lstrcmpiW(seen[0].face, fixed[i]) == 0);
+        CHECK((seen[0].pitch & TMPF_FIXED_PITCH) == 0);
+        CHECK(listed(dc, fixed[i]) == 1);
+    }
+
+    /* A name no family has, and a charset a text family has no face
+     * for: the enumeration succeeds and says nothing. */
+    CHECK(enumerate(dc, L"No Such Font Family", ANSI_CHARSET) != 0 && seen_n == 0);
+    CHECK(enumerate(dc, L"Segoe UI", SYMBOL_CHARSET) != 0 && seen_n == 0);
+
+    /* An empty name: every family once, under its own name. */
+    CHECK(enumerate(dc, NULL, ANSI_CHARSET) != 0 && seen_n >= 1);
+    for (int i = 0; i < seen_n; i++) {
+        CHECK(seen[i].face[0] != 0);
+        for (int j = 0; j < i; j++) CHECK(lstrcmpiW(seen[i].face, seen[j].face) != 0);
+    }
+
+    /* Whatever a program is handed, it can enumerate: a family it asked
+     * for by name, a substitute for a name that is only an alias, and
+     * the face a name no family has falls back to. */
+    enumerates(dc, L"Segoe UI");
+    enumerates(dc, L"Arial");
+    enumerates(dc, L"Courier New");
+    enumerates(dc, L"MS Shell Dlg");
+    enumerates(dc, L"No Such Font Family");
+
+    /* The font a program lays its window out in (Word asks user32 for
+     * the message font before it draws anything). */
+    NONCLIENTMETRICSW ncm;
+    memset(&ncm, 0, sizeof ncm);
+    ncm.cbSize = sizeof ncm;
+    CHECK(SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0));
+    CHECK(ncm.lfMessageFont.lfFaceName[0] != 0);
+    CHECK(listed(dc, ncm.lfMessageFont.lfFaceName) == 1);
+    enumerates(dc, ncm.lfMessageFont.lfFaceName);
+    enumerates(dc, ncm.lfCaptionFont.lfFaceName);
+    LOGFONTW gui;
+    memset(&gui, 0, sizeof gui);
+    CHECK(GetObjectW(GetStockObject(DEFAULT_GUI_FONT), sizeof gui, &gui) == sizeof gui);
+    CHECK(gui.lfFaceName[0] != 0);
+    enumerates(dc, gui.lfFaceName);
+
+    /* A weight between a family's faces realizes as the nearer one. */
+    CHECK(realized_weight(dc, L"Segoe UI", 400) == 400);
+    CHECK(realized_weight(dc, L"Segoe UI", 700) == 700);
+    CHECK(realized_weight(dc, L"Segoe UI", 350) == 400);
+    CHECK(realized_weight(dc, L"Segoe UI", 600) == 700);
+
+    DeleteDC(dc);
+}
+
 int main(void) {
     CHECK(MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(9, 96, 72) == 12);
     CHECK(MulDiv(1, 1, 0) == -1 && MulDiv(0x7fffffff, 2, 1) == -1 && MulDiv(7, 1, 2) == 4);
@@ -1106,6 +1352,7 @@ int main(void) {
     msimg();
     dc_state();
     null_brush();
+    font_families();
     printf("gdi32_test: ok\n");
     return 0;
 }
