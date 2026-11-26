@@ -26121,6 +26121,19 @@ fn is_test_dll(file: &str) -> bool {
 /// (THIRD_PARTY.md: Mozilla's, as curl.se publishes them), which Schannel
 /// and crypt32's ROOT store read: a full image trusts the public web, as
 /// Windows does.
+/// The fonts a full image ships in `C:\Windows\Fonts`: Selawik, the
+/// metric-compatible face gdi32 embeds (`user/gdi32/src/font.rs`) and
+/// dwrite reads from the file system, because DirectWrite hands a program
+/// the file and its path (`IDWriteFontFile::GetReferenceKey`,
+/// `GetFilePathW`) and an embedded copy would make those a lie. An image
+/// without them leaves DirectWrite with no font at all.
+const FONT_FILES: [&str; 4] = [
+    "fonts/selawik/selawksl.ttf",
+    "fonts/selawik/selawk.ttf",
+    "fonts/selawik/selawksb.ttf",
+    "fonts/selawik/selawkb.ttf",
+];
+
 fn system_modules() -> Vec<(&'static str, &'static str)> {
     let mut modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
@@ -26129,6 +26142,7 @@ fn system_modules() -> Vec<(&'static str, &'static str)> {
         .collect();
     modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
     modules.push(("user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"));
+    modules.extend(FONT_FILES.iter().map(|&f| (f, "Windows/Fonts")));
     modules
 }
 
@@ -26222,8 +26236,8 @@ mod shard_tests {
 mod release_tree_tests {
     use super::*;
 
-    /// A release is the system: gala's DLLs in System32 and the root
-    /// store, no test DLL or program.
+    /// A release is the system: gala's DLLs in System32, the root store
+    /// and the fonts, no test DLL or program.
     #[test]
     fn release_modules_are_the_system() {
         let m = system_modules();
@@ -26231,6 +26245,14 @@ mod release_tree_tests {
             assert!(m.contains(&(dll, "Windows/System32")), "{dll}");
         }
         assert!(m.contains(&("user/roots/public-roots.pem", "Windows/System32/gala/roots")));
+        // DirectWrite reads its fonts from the file system (gdi32 embeds its
+        // copies), so a full image ships them: without them a program that
+        // lays its text out with dwrite has no font at all, which is what
+        // Word's error 47 was.
+        for font in ["selawksl.ttf", "selawk.ttf", "selawksb.ttf", "selawkb.ttf"] {
+            let path = format!("fonts/selawik/{font}");
+            assert!(m.iter().any(|&(f, d)| f == path && d == "Windows/Fonts"), "{font}");
+        }
         for (file, _) in &m {
             assert!(!is_test_dll(file) && !file.ends_with(".exe"), "{file}");
             assert!(!USER_PROGRAMS.iter().any(|p| file.starts_with(p)), "{file}");

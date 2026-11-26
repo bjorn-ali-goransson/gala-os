@@ -13042,7 +13042,17 @@ expected answers are those of `user/d3d10_1_test` run on Windows.
 font manager comes up on its system collection. gala's collection has
 one family, Selawik, in four faces read from
 `C:\Windows\Fonts\selawk*.ttf` (ttf-parser); Segoe UI, Arial, Times New
-Roman, ... are found as Selawik, as in gdi32. Every object reachable from
+Roman, ... are found as Selawik, as in gdi32. The files come from
+`system_modules` (the release tree above), so every full image has them
+and a scenario that is not one ships them itself (`EXTRA_MODULES`).
+They are files and not bytes in the DLL, where gdi32 embeds its four
+copies, because DirectWrite hands a program the font's file and its
+path to open itself (`IDWriteFontFile::GetReferenceKey`,
+`GetFilePathW`, the local file loader), which an embedded copy would
+make a lie. **An image without them leaves DirectWrite with no font at
+all**, and a program that lays its text out with it stops: Word's
+"something went wrong ... (47)" was this, 3 ms after it asked for the
+system collection. Every object reachable from
 it is static (AddRef/Release count nothing): factory, collection, family
 (also the font list), fonts, faces (metrics, glyph indices and design
 metrics, font tables in place), files with the local file loader (paths)
@@ -19921,10 +19931,11 @@ update client will check them with the same `Client`.
   xtask release-tree <dir>`, `release_tree` and `system_modules` in
   xtask): `boot/kernel` (stripped), every DLL of USER_DLLS but the test
   DLLs (`boot/<dll>`, module string `Windows/System32`), the root store
-  (`public-roots.pem`), Limine (`EFI/BOOT/BOOTX64.EFI`,
-  `boot/limine/*`), the sealed `boot/limine/limine.conf` (empty kernel
-  command line, as `cargo xtask build`'s) and `boot/gala.manifest`;
-  about 76 files, 14 MB. Chosen because it is what a machine boots
+  (`public-roots.pem`), the four Selawik files (module string
+  `Windows/Fonts`, which is where DirectWrite reads them), Limine
+  (`EFI/BOOT/BOOTX64.EFI`, `boot/limine/*`), the sealed
+  `boot/limine/limine.conf` (empty kernel command line, as `cargo xtask
+  build`'s) and `boot/gala.manifest`; about 80 files, 14 MB. Chosen because it is what a machine boots
   (steps 2-5 of "Chain of trust" cover exactly these files) and the
   system `cargo xtask iso` ships, minus what only tests use; the
   32-bit DLLs (SysWOW64) are not in it yet, as they are in no full

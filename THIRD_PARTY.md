@@ -117,7 +117,7 @@ Rules for this file:
 
 | Font | Version | Source | License | Use |
 |---|---|---|---|---|
-| Selawik (regular, semilight, semibold, bold) | 1.01 (`Selawik_Release.zip`, SHA-256 `3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423`, measured) | github.com/microsoft/Selawik releases | SIL Open Font License 1.1, Reserved Font Name "Selawik" (`fonts/selawik/LICENSE.txt`) | `fonts/selawik/*.ttf`, unmodified. Embedded in gala's `gdi32.dll` (`user/gdi32/src/font.rs`), which rasterizes them for programs' text. Shipped as `C:\Windows\Fonts\selawk*.ttf` to scenarios using gala's `dwrite.dll` (DirectWrite's system collection). `cargo xtask bake-fonts` rasterizes them into `kernel/assets/ui-*.glyphs` (the desktop's captions, taskbar and start menu). An open replacement metric-compatible with Segoe UI; no Segoe UI file is used. |
+| Selawik (regular, semilight, semibold, bold) | 1.01 (`Selawik_Release.zip`, SHA-256 `3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423`, measured) | github.com/microsoft/Selawik releases | SIL Open Font License 1.1, Reserved Font Name "Selawik" (`fonts/selawik/LICENSE.txt`) | `fonts/selawik/*.ttf`, unmodified. Embedded in gala's `gdi32.dll` (`user/gdi32/src/font.rs`), which rasterizes them for programs' text. Shipped as `C:\Windows\Fonts\selawk*.ttf` in every full image and the release tree (`system_modules` in xtask), and by its own row to a scenario that is not one: DirectWrite's system collection reads the files, not an embedded copy. `cargo xtask bake-fonts` rasterizes them into `kernel/assets/ui-*.glyphs` (the desktop's captions, taskbar and start menu). An open replacement metric-compatible with Segoe UI; no Segoe UI file is used. |
 
 ## Artwork
 
