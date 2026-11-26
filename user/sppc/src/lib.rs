@@ -35,7 +35,20 @@
 //! No plugin can be registered either -- there is no service to
 //! register one with -- so SLRegisterPlugin and SLUnregisterPlugin
 //! refuse every caller with SL_E_LUA_ACCESSDENIED, the answer Windows
-//! gives the standard user Office's licensing runs as.
+//! gives the standard user Office's licensing runs as. Offline
+//! activation reaches the store and stops there:
+//! SLGenerateOfflineInstallationId and SLDepositOfflineConfirmationId
+//! (with their Ex forms) answer a SKU the store does not hold what
+//! Windows answers, and one it holds SL_E_PKEY_NOT_INSTALLED, there
+//! being no product key to make an installation id from or deposit a
+//! confirmation against.
+//!
+//! A handle no SLOpen gave -- never opened, or closed -- is
+//! RPC_NT_SS_CONTEXT_MISMATCH from every call that takes one, never
+//! E_INVALIDARG, which is a NULL handle or a NULL required argument;
+//! the arguments are looked at first. Windows' handles are RPC context
+//! handles, so that is what its sppc.dll answers (measured for every
+//! call gala exports), and Office's licensing reads the two apart.
 //!
 //! Observability: every call is recorded in the ledger as
 //! `sppc.dll!<function>(<case>)`, "other", with the HRESULT returned as
@@ -144,7 +157,11 @@ const SL_E_APPLICATION_POLICIES_MISSING: i32 = 0xc004_f072_u32 as i32;
 const SL_E_APPLICATION_POLICIES_NOT_LOADED: i32 = 0xc004_f073_u32 as i32;
 const SL_E_PKEY_NOT_INSTALLED: i32 = 0xc004_f014_u32 as i32;
 const SL_E_INVALID_PRODUCT_KEY: i32 = 0xc004_f050_u32 as i32;
-const SL_E_PRODUCT_SKU_NOT_INSTALLED: i32 = 0xc004_f069_u32 as i32;
+/// SL_E_PRODUCT_SKU_NOT_INSTALLED (slerror.h): the store holds no such
+/// SKU. 0xC004F069, which gala answered before this was measured, is
+/// that header's SL_E_MISMATCHED_PRODUCT_SKU -- another answer
+/// entirely, and one no caller here means.
+const SL_E_PRODUCT_SKU_NOT_INSTALLED: i32 = 0xc004_f015_u32 as i32;
 /// SL_E_LUA_ACCESSDENIED (slerror.h): the caller is not elevated.
 const SL_E_LUA_ACCESSDENIED: i32 = 0xc004_f025_u32 as i32;
 /// RPC_NT_SS_CONTEXT_MISMATCH (ntstatus.h): what Windows' sppc.dll
@@ -522,6 +539,23 @@ fn valid(h: usize) -> bool {
     h != 0 && h.is_multiple_of(8) && unsafe { *(h as *const u64) } == HANDLE_TAG
 }
 
+/// What a call answers for a handle that is not one, once its other
+/// arguments have been looked at: a NULL handle is an invalid argument,
+/// and a handle no SLOpen gave (never opened, or closed) is
+/// RPC_NT_SS_CONTEXT_MISMATCH -- Windows' handles being RPC context
+/// handles kept by sppsvc. Measured on Windows' own sppc.dll (build
+/// 26100) for every call gala exports that takes one; `None` means the
+/// handle is ours and the call goes on.
+fn bad_handle(f: &str, handle: usize) -> Option<i32> {
+    if handle == 0 {
+        return Some(record(f, "invalid argument", E_INVALIDARG));
+    }
+    if !valid(handle) {
+        return Some(record(f, "not a handle", RPC_NT_SS_CONTEXT_MISMATCH));
+    }
+    None
+}
+
 /// SLOpen(*phSLC): a handle to the store.
 #[unsafe(no_mangle)]
 pub extern "system" fn SLOpen(handle: *mut usize) -> i32 {
@@ -544,8 +578,8 @@ pub extern "system" fn SLOpen(handle: *mut usize) -> i32 {
 /// SLClose(hSLC).
 #[unsafe(no_mangle)]
 pub extern "system" fn SLClose(handle: usize) -> i32 {
-    if !valid(handle) {
-        return record("SLClose", "not a handle", E_INVALIDARG);
+    if let Some(hr) = bad_handle("SLClose", handle) {
+        return hr;
     }
     // SAFETY: our block, untagged before it goes.
     unsafe {
@@ -564,8 +598,11 @@ pub extern "system" fn SLInstallLicense(
     file_id: *mut Slid,
 ) -> i32 {
     const F: &str = "SLInstallLicense";
-    if !valid(handle) || blob.is_null() || size == 0 || file_id.is_null() {
+    if blob.is_null() || size == 0 || file_id.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     if size as usize > MAX_LICENSE {
         return record(F, "too large", E_INVALID_DATA);
@@ -591,8 +628,11 @@ pub extern "system" fn SLInstallLicense(
 #[unsafe(no_mangle)]
 pub extern "system" fn SLUninstallLicense(handle: usize, file_id: *const Slid) -> i32 {
     const F: &str = "SLUninstallLicense";
-    if !valid(handle) || file_id.is_null() {
+    if file_id.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     // SAFETY: the caller's identifier.
     let path = license_path(unsafe { &*file_id });
@@ -653,8 +693,11 @@ pub extern "system" fn SLGetSLIDList(
     }
     let case = core::str::from_utf8(&case[..n]).unwrap_or("?");
     let all = matches!(query_type, SL_ID_ALL_LICENSES | SL_ID_ALL_LICENSE_FILES);
-    if !valid(handle) || count.is_null() || ids.is_null() || (!all && query.is_null()) {
+    if count.is_null() || ids.is_null() || (!all && query.is_null()) {
         return record(F, case, E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     // SAFETY: the caller's outputs.
     unsafe {
@@ -724,8 +767,11 @@ pub extern "system" fn SLGetLicenseInformation(
     let Some(name) = from_wide(name) else {
         return record(F, "invalid argument", E_INVALIDARG);
     };
-    if !valid(handle) || license.is_null() || size.is_null() || value.is_null() {
+    if license.is_null() || size.is_null() || value.is_null() {
         return record(F, &name, E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     // SAFETY: the caller's identifier.
     let id = unsafe { *license };
@@ -788,8 +834,11 @@ pub extern "system" fn SLGetProductSkuInformation(
     let Some(name) = from_wide(name) else {
         return record(F, "invalid argument", E_INVALIDARG);
     };
-    if !valid(handle) || sku.is_null() || size.is_null() || value.is_null() {
+    if sku.is_null() || size.is_null() || value.is_null() {
         return record(F, &name, E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     // SAFETY: the caller's identifier.
     let id = unsafe { *sku };
@@ -860,7 +909,10 @@ fn skus(app: *const Slid, sku: *const Slid) -> Result<Vec<Slid>, i32> {
 /// SLGetLicensingStatusInformation(hSLC, pAppID, pProductSkuId,
 /// pwszRightName, *pnStatusCount, **ppLicensingStatus): each installed
 /// SKU of the application (or the one asked), unlicensed: no product key
-/// is installed.
+/// is installed. The application identifier is required, as it is of
+/// SLConsumeRight -- a NULL one with a SKU is E_INVALIDARG on Windows
+/// (measured), where a NULL SKU is not -- and a SKU the store does not
+/// hold is SL_E_PRODUCT_SKU_NOT_INSTALLED.
 #[unsafe(no_mangle)]
 pub extern "system" fn SLGetLicensingStatusInformation(
     handle: usize,
@@ -871,8 +923,11 @@ pub extern "system" fn SLGetLicensingStatusInformation(
     status: *mut *mut LicensingStatus,
 ) -> i32 {
     const F: &str = "SLGetLicensingStatusInformation";
-    if !valid(handle) || (app.is_null() && sku.is_null()) || count.is_null() || status.is_null() {
+    if app.is_null() || count.is_null() || status.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     let found = match skus(app, sku) {
         Ok(s) => s,
@@ -912,13 +967,164 @@ pub extern "system" fn SLConsumeRight(
     _reserved: usize,
 ) -> i32 {
     const F: &str = "SLConsumeRight";
-    if !valid(handle) || app.is_null() {
+    if app.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     match skus(app, sku) {
         Ok(_) => record(F, "no product key", SL_E_RIGHT_NOT_GRANTED),
         Err(hr) => record(F, "no SKU", hr),
     }
+}
+
+/// What SLGenerateOfflineInstallationId and its Ex form answer. The two
+/// ask for the Installation ID a telephone or web activation is done
+/// with, which Windows derives from the configuration of an installed
+/// product key; gala installs none (SLInstallProofOfPurchase refuses
+/// every key), so there is nothing to derive one from.
+///
+/// Measured on Windows' own sppc.dll (build 26100), with the shapes the
+/// public SDK header slpublic.h declares:
+///
+/// - a NULL SKU or a NULL output is E_INVALIDARG, and no failure
+///   touches the output: a sentinel written into it is still there
+///   afterwards;
+/// - a SKU the store does not hold is SL_E_VALUE_NOT_FOUND -- neither
+///   the SL_E_PKEY_NOT_INSTALLED Microsoft's documentation names, nor
+///   the SL_E_PRODUCT_SKU_NOT_INSTALLED the deposit sibling answers for
+///   that same SKU;
+/// - the Ex form refuses every activation info that is not NULL with
+///   E_INVALIDARG -- a default header, a well-formed
+///   SL_AD_ACTIVATION_INFO, a wrong cbSize and zeroed bytes alike --
+///   this machine belonging to no Active Directory with an activation
+///   object; what it answers where one is configured is not measured,
+///   and gala refuses the same way.
+///
+/// For a SKU the store does hold, gala answers SL_E_PKEY_NOT_INSTALLED,
+/// what its empty product key store answers everywhere else (the
+/// licensing status' reason, SLGetPKeyId,
+/// SLGetInstalledProductKeyIds). Windows' answer there is not measured:
+/// asking it about an installed SKU would make an Installation ID out
+/// of this machine's product key.
+fn offline_installation_id(
+    f: &str,
+    handle: usize,
+    sku: *const Slid,
+    activation: *const u8,
+    out: *mut *mut u16,
+) -> i32 {
+    if sku.is_null() || out.is_null() || !activation.is_null() {
+        return record(f, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(f, handle) {
+        return hr;
+    }
+    let licenses = load();
+    // SAFETY: the caller's identifier (checked non-NULL).
+    if sku_license(&licenses, unsafe { *sku }).is_none() {
+        return record(f, "SKU not installed", SL_E_VALUE_NOT_FOUND);
+    }
+    record(f, "no product key", SL_E_PKEY_NOT_INSTALLED)
+}
+
+/// SLGenerateOfflineInstallationId(hSLC, pProductSkuId,
+/// **ppwszInstallationId): see `offline_installation_id`. This name
+/// missing is where Word stopped once the plugin registration was
+/// there, its licensing reaching it through the same delay load
+/// (ROADMAP OF).
+#[unsafe(no_mangle)]
+pub extern "system" fn SLGenerateOfflineInstallationId(
+    handle: usize,
+    sku: *const Slid,
+    out: *mut *mut u16,
+) -> i32 {
+    const F: &str = "SLGenerateOfflineInstallationId";
+    offline_installation_id(F, handle, sku, core::ptr::null(), out)
+}
+
+/// SLGenerateOfflineInstallationIdEx(hSLC, pProductSkuId,
+/// pActivationInfo, **ppwszInstallationId): the same, for an Active
+/// Directory activation object.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLGenerateOfflineInstallationIdEx(
+    handle: usize,
+    sku: *const Slid,
+    activation: *const u8,
+    out: *mut *mut u16,
+) -> i32 {
+    const F: &str = "SLGenerateOfflineInstallationIdEx";
+    offline_installation_id(F, handle, sku, activation, out)
+}
+
+/// What SLDepositOfflineConfirmationId and its Ex form answer. The two
+/// hand back the Confirmation ID an activation answered with, against
+/// the Installation ID it was asked for; gala issues no installation
+/// id, so there is nothing for a confirmation to belong to.
+///
+/// Measured as its sibling was:
+///
+/// - a NULL SKU, installation id or confirmation id is E_INVALIDARG;
+/// - a SKU the store does not hold is SL_E_PRODUCT_SKU_NOT_INSTALLED,
+///   and that is answered before either string is read: two empty
+///   strings are answered the same;
+/// - the Ex form refuses every activation info that is not NULL with
+///   E_INVALIDARG, as its sibling does.
+///
+/// For a SKU the store does hold, gala answers SL_E_PKEY_NOT_INSTALLED:
+/// a confirmation belongs to an installed product key and there is
+/// none. Not one of the SL_E_CIDIID_* codes -- gala does not read the
+/// strings at all, and will not claim it checked their digits.
+fn deposit_confirmation_id(
+    f: &str,
+    handle: usize,
+    sku: *const Slid,
+    activation: *const u8,
+    installation: *const u16,
+    confirmation: *const u16,
+) -> i32 {
+    if sku.is_null() || installation.is_null() || confirmation.is_null() || !activation.is_null() {
+        return record(f, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(f, handle) {
+        return hr;
+    }
+    let licenses = load();
+    // SAFETY: the caller's identifier (checked non-NULL).
+    if sku_license(&licenses, unsafe { *sku }).is_none() {
+        return record(f, "SKU not installed", SL_E_PRODUCT_SKU_NOT_INSTALLED);
+    }
+    record(f, "no product key", SL_E_PKEY_NOT_INSTALLED)
+}
+
+/// SLDepositOfflineConfirmationId(hSLC, pProductSkuId,
+/// pwszInstallationId, pwszConfirmationId): see
+/// `deposit_confirmation_id`.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLDepositOfflineConfirmationId(
+    handle: usize,
+    sku: *const Slid,
+    installation: *const u16,
+    confirmation: *const u16,
+) -> i32 {
+    const F: &str = "SLDepositOfflineConfirmationId";
+    deposit_confirmation_id(F, handle, sku, core::ptr::null(), installation, confirmation)
+}
+
+/// SLDepositOfflineConfirmationIdEx(hSLC, pProductSkuId,
+/// pActivationInfo, pwszInstallationId, pwszConfirmationId): the same,
+/// for an Active Directory activation object.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLDepositOfflineConfirmationIdEx(
+    handle: usize,
+    sku: *const Slid,
+    activation: *const u8,
+    installation: *const u16,
+    confirmation: *const u16,
+) -> i32 {
+    const F: &str = "SLDepositOfflineConfirmationIdEx";
+    deposit_confirmation_id(F, handle, sku, activation, installation, confirmation)
 }
 
 /// SLGetPolicyInformation(hSLC, pwszValueName, *peDataType, *pcbValue,
@@ -938,8 +1144,11 @@ pub extern "system" fn SLGetPolicyInformation(
     let Some(name) = from_wide(name) else {
         return record(F, "invalid argument", E_INVALIDARG);
     };
-    if !valid(handle) || size.is_null() || value.is_null() {
+    if size.is_null() || value.is_null() {
         return record(F, &name, E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     record(F, &name, SL_E_RIGHT_NOT_GRANTED)
 }
@@ -956,8 +1165,11 @@ pub extern "system" fn SLGetPolicyInformationDWORD(
     let Some(name) = from_wide(name) else {
         return record(F, "invalid argument", E_INVALIDARG);
     };
-    if !valid(handle) || value.is_null() {
+    if value.is_null() {
         return record(F, &name, E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     record(F, &name, SL_E_RIGHT_NOT_GRANTED)
 }
@@ -1048,8 +1260,11 @@ pub extern "system" fn SLInstallProofOfPurchase(
     pkey: *mut Slid,
 ) -> i32 {
     const F: &str = "SLInstallProofOfPurchase";
-    if !valid(handle) || algorithm.is_null() || key.is_null() || pkey.is_null() {
+    if algorithm.is_null() || key.is_null() || pkey.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     let algorithm = from_wide(algorithm).unwrap_or_default();
     let _ = record(F, &algorithm, 0);
@@ -1073,8 +1288,11 @@ pub extern "system" fn SLGetPKeyId(
     pkey: *mut Slid,
 ) -> i32 {
     const F: &str = "SLGetPKeyId";
-    if !valid(handle) || algorithm.is_null() || key.is_null() || pkey.is_null() {
+    if algorithm.is_null() || key.is_null() || pkey.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     let algorithm = from_wide(algorithm).unwrap_or_default();
     record(F, &algorithm, SL_E_PKEY_NOT_INSTALLED)
@@ -1084,8 +1302,11 @@ pub extern "system" fn SLGetPKeyId(
 #[unsafe(no_mangle)]
 pub extern "system" fn SLUninstallProofOfPurchase(handle: usize, pkey: *const Slid) -> i32 {
     const F: &str = "SLUninstallProofOfPurchase";
-    if !valid(handle) || pkey.is_null() {
+    if pkey.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     record(F, "not installed", SL_E_PKEY_NOT_INSTALLED)
 }
@@ -1100,8 +1321,11 @@ pub extern "system" fn SLGetInstalledProductKeyIds(
     ids: *mut *mut Slid,
 ) -> i32 {
     const F: &str = "SLGetInstalledProductKeyIds";
-    if !valid(handle) || count.is_null() || ids.is_null() {
+    if count.is_null() || ids.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     // SAFETY: the caller's outputs.
     unsafe {
@@ -1124,8 +1348,11 @@ pub extern "system" fn SLGetPKeyInformation(
 ) -> i32 {
     const F: &str = "SLGetPKeyInformation";
     let name = from_wide(name).unwrap_or_default();
-    if !valid(handle) || pkey.is_null() || size.is_null() || value.is_null() {
+    if pkey.is_null() || size.is_null() || value.is_null() {
         return record(F, &name, E_INVALIDARG);
+    }
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     record(F, &name, SL_E_PKEY_NOT_INSTALLED)
 }
@@ -1159,11 +1386,11 @@ pub extern "system" fn SLGetPKeyInformation(
 #[unsafe(no_mangle)]
 pub extern "system" fn SLRegisterPlugin(handle: usize, plugin: *const u8, out: *mut u8) -> i32 {
     const F: &str = "SLRegisterPlugin";
-    if plugin.is_null() || out.is_null() || handle == 0 {
+    if plugin.is_null() || out.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
     }
-    if !valid(handle) {
-        return record(F, "not a handle", RPC_NT_SS_CONTEXT_MISMATCH);
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     record(F, "no plugin is registered", SL_E_LUA_ACCESSDENIED)
 }
@@ -1174,11 +1401,11 @@ pub extern "system" fn SLRegisterPlugin(handle: usize, plugin: *const u8, out: *
 #[unsafe(no_mangle)]
 pub extern "system" fn SLUnregisterPlugin(handle: usize, plugin: *const u8) -> i32 {
     const F: &str = "SLUnregisterPlugin";
-    if plugin.is_null() || handle == 0 {
+    if plugin.is_null() {
         return record(F, "invalid argument", E_INVALIDARG);
     }
-    if !valid(handle) {
-        return record(F, "not a handle", RPC_NT_SS_CONTEXT_MISMATCH);
+    if let Some(hr) = bad_handle(F, handle) {
+        return hr;
     }
     record(F, "no plugin is registered", SL_E_LUA_ACCESSDENIED)
 }
