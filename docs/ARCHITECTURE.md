@@ -12724,7 +12724,11 @@ methods go when one is implemented. Its GDI interop object (`GetGdiInterop`, one
 Windows, so one static object here), which bridges a font and a
 LOGFONT, answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself;
 none of its methods is built, each recording its own name, so the run of
-a program that wants one names it. Test: `dwrite_test` step 11.
+a program that wants one names it. Test: `dwrite_test` step 11, which
+takes either answer for a revision -- Windows' object or gala's refusal
+-- because that program runs on Windows too (`user/windows/ci-passing.txt`);
+the refusal itself is pinned by the `dwrite_test` scenario, which expects
+the ledger row with the IID in it.
 
 Custom font files and collections (the renderer's font proxy: its
 collection loader enumerates the browser's handles to the system's font

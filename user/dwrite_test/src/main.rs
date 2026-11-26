@@ -49,7 +49,9 @@
 //!     revision it would like and takes a fallback when it is refused
 //!     (Chromium, measured: with IDWriteFactory2 answered, its first
 //!     call to it ends the browser on a CHECK). The refusal records the
-//!     whole IID, so a run says which revision was wanted;
+//!     whole IID, so a run says which revision was wanted. This
+//!     program runs on Windows too, so it takes either answer here and
+//!     the `dwrite_test` scenario pins gala's;
 
 #![no_std]
 #![no_main]
@@ -924,17 +926,34 @@ fn tests() {
         // 11. The later factory revisions: Windows answers every one of
         // them with this same factory object, by either route; gala
         // refuses each until that revision's methods exist, and says so
-        // with the whole IID (the DLL's FACTORY_IIDS explains why, and
-        // this assertion turns into the Windows answer with the first
-        // revision implemented).
+        // with the whole IID (the DLL's FACTORY_IIDS explains why). This
+        // program is the parity test and runs on Windows as well
+        // (user/windows/ci-passing.txt), so it takes either answer and
+        // insists only that each route wrote the slot; which one gala
+        // gives is pinned by the dwrite_test scenario instead, on the
+        // refusal's own ledger row.
         const E_NOINTERFACE: HResult = 0x8000_4002_u32 as i32;
         let factory_qi: extern "system" fn(*mut c_void, *const Iid, *mut *mut c_void) -> HResult =
             method(factory, 0);
         for iid in IID_FACTORY_REVISIONS {
-            let mut same: *mut c_void = factory;
-            check(factory_qi(factory, &iid, &mut same) == E_NOINTERFACE && same.is_null(), 11);
-            let mut made: *mut c_void = factory;
-            check(DWriteCreateFactory(0, &iid, &mut made) == E_NOINTERFACE && made.is_null(), 11);
+            for route in 0..2 {
+                // A pointer that is neither answer, so either branch
+                // proves the call wrote it.
+                let mut got: *mut c_void = collection;
+                let hr = if route == 0 {
+                    factory_qi(factory, &iid, &mut got)
+                } else {
+                    DWriteCreateFactory(0, &iid, &mut got)
+                };
+                if hr == 0 {
+                    // Windows: this same factory, one reference more.
+                    check(got == factory, 11);
+                    let release: GetU32 = method(got, 2);
+                    release(got);
+                } else {
+                    check(hr == E_NOINTERFACE && got.is_null(), 11);
+                }
+            }
         }
         // IDWriteFactory::GetGdiInterop (17): the factory's own object,
         // the same one on a second call, which answers both GDI interop

@@ -8499,10 +8499,18 @@ const BASE_SCENARIOS: &[Scenario] = &[
     Scenario {
         // BR stage 1: DirectWrite's system font collection (gala's
         // dwrite.dll over Selawik), as Chromium's browser and Skia use it.
+        // The refusal of IDWriteFactory1 is expected here because the
+        // test program itself cannot be: it runs on Windows as well,
+        // where every revision is answered, so gala's side of that one
+        // deliberate divergence is pinned by this row.
         name: "dwrite_test",
         cmdline: "qemu_exit run=dwrite_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["dwrite_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "dwrite.dll!QueryInterface({30572F99-DAC6-41DB-A16E-0486307E606A}): refused",
+            "dwrite_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // Pseudo consoles (ConPTY): conpty_test plays a terminal for a
