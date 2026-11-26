@@ -32,6 +32,10 @@
 //! SLLoadApplicationPolicies answers SL_E_APPLICATION_POLICIES_MISSING
 //! and hands out no context, leaving SLGetApplicationPolicy and
 //! SLUnloadApplicationPolicies at SL_E_APPLICATION_POLICIES_NOT_LOADED.
+//! No plugin can be registered either -- there is no service to
+//! register one with -- so SLRegisterPlugin and SLUnregisterPlugin
+//! refuse every caller with SL_E_LUA_ACCESSDENIED, the answer Windows
+//! gives the standard user Office's licensing runs as.
 //!
 //! Observability: every call is recorded in the ledger as
 //! `sppc.dll!<function>(<case>)`, "other", with the HRESULT returned as
@@ -141,6 +145,12 @@ const SL_E_APPLICATION_POLICIES_NOT_LOADED: i32 = 0xc004_f073_u32 as i32;
 const SL_E_PKEY_NOT_INSTALLED: i32 = 0xc004_f014_u32 as i32;
 const SL_E_INVALID_PRODUCT_KEY: i32 = 0xc004_f050_u32 as i32;
 const SL_E_PRODUCT_SKU_NOT_INSTALLED: i32 = 0xc004_f069_u32 as i32;
+/// SL_E_LUA_ACCESSDENIED (slerror.h): the caller is not elevated.
+const SL_E_LUA_ACCESSDENIED: i32 = 0xc004_f025_u32 as i32;
+/// RPC_NT_SS_CONTEXT_MISMATCH (ntstatus.h): what Windows' sppc.dll
+/// answers for a handle its service never handed out, since its
+/// handles are RPC context handles.
+const RPC_NT_SS_CONTEXT_MISMATCH: i32 = 0xc003_0005_u32 as i32;
 
 /// SLIDTYPE.
 const SL_ID_APPLICATION: u32 = 0;
@@ -1118,6 +1128,59 @@ pub extern "system" fn SLGetPKeyInformation(
         return record(F, &name, E_INVALIDARG);
     }
     record(F, &name, SL_E_PKEY_NOT_INSTALLED)
+}
+
+/// SLRegisterPlugin(hSLC, <a pointer>, <a pointer>): the plugin
+/// registration Office's licensing asks for. No public header declares
+/// it, so what it takes and answers was measured by calling Windows'
+/// own export (build 26100), never by reading its code:
+///
+/// - a NULL handle, or either pointer NULL, is E_INVALIDARG, and the
+///   pointers are looked at before the handle -- a handle that is not
+///   one, with a NULL pointer, is still E_INVALIDARG;
+/// - a handle that is not one (never opened, or closed), with both
+///   pointers, is RPC_NT_SS_CONTEXT_MISMATCH, from the RPC context
+///   handle sppsvc keeps;
+/// - a handle SLOpen gave, with both pointers, is
+///   SL_E_LUA_ACCESSDENIED for a caller that is not elevated, which
+///   Office's licensing is not: that is the answer it sees on Windows;
+/// - nothing past the third argument changes any of it, and what the
+///   second points at is never looked into (an empty string does as
+///   well as a name), so three arguments is what gala takes.
+///
+/// The name missing is what stopped Word: the licensing stack reaches
+/// it through a delay load, a delay load that resolves to nothing is
+/// ERROR_PROC_NOT_FOUND (0x8007007F), and that is the HRESULT
+/// Office.Licensing.FullValidation reported before Word's "Sorry,
+/// something went wrong and Word was unable to start. (6)" (ROADMAP
+/// OF). gala has no Software Protection service for a plugin to be
+/// registered with, so every caller is answered the refusal Windows
+/// gives Office.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLRegisterPlugin(handle: usize, plugin: *const u8, out: *mut u8) -> i32 {
+    const F: &str = "SLRegisterPlugin";
+    if plugin.is_null() || out.is_null() || handle == 0 {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if !valid(handle) {
+        return record(F, "not a handle", RPC_NT_SS_CONTEXT_MISMATCH);
+    }
+    record(F, "no plugin is registered", SL_E_LUA_ACCESSDENIED)
+}
+
+/// SLUnregisterPlugin(hSLC, <a pointer>): the other half, measured the
+/// same way and answering the same, with two arguments -- nothing past
+/// the second changes its answer.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLUnregisterPlugin(handle: usize, plugin: *const u8) -> i32 {
+    const F: &str = "SLUnregisterPlugin";
+    if plugin.is_null() || handle == 0 {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if !valid(handle) {
+        return record(F, "not a handle", RPC_NT_SS_CONTEXT_MISMATCH);
+    }
+    record(F, "no plugin is registered", SL_E_LUA_ACCESSDENIED)
 }
 
 /// DllMain (the entry point our link flags name).

@@ -12093,7 +12093,21 @@ stations and desktops a program creates are refused until stage 3).
   check in: a NULL context, value name or required output is
   E_INVALIDARG before the context is looked up, while
   SLGetApplicationPolicy's data type stays optional;
-  SLPersistRTSPayloadOverride, undocumented, is E_NOTIMPL. XrML
+  SLPersistRTSPayloadOverride, undocumented, is E_NOTIMPL. No plugin
+  can be registered, there being no service to register one with:
+  SLRegisterPlugin and SLUnregisterPlugin, which no public header
+  declares and Office's licensing reaches through a delay load, answer
+  SL_E_LUA_ACCESSDENIED once their pointers and handle are good -- what
+  Windows answers a caller that is not elevated, which Office is not --
+  with E_INVALIDARG for a NULL handle or a NULL pointer, the pointers
+  looked at first, and RPC_NT_SS_CONTEXT_MISMATCH for a handle that is
+  not one, Windows' handles being RPC context handles (measured by
+  calling the exports: nothing past the third argument of the one or
+  the second of the other changes an answer, and what the plugin
+  pointer points at is never looked into). The name missing was what
+  stopped Word: a delay load that resolves to nothing is
+  ERROR_PROC_NOT_FOUND, the 0x8007007F
+  Office.Licensing.FullValidation reported before Word's "(6)" box. XrML
   signatures are not verified, where Windows refuses a license that is
   not signed (`sppc_test` runs its round trip only where its unsigned
   license is taken). A license file's id is a hash of its bytes (what
