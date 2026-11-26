@@ -1,15 +1,18 @@
-//! Networking: a virtio-net card, a loopback device and the smoltcp TCP/IP
+//! Networking: a virtio-net card or a USB Ethernet adapter (`card`), a
+//! loopback device and the smoltcp TCP/IP
 //! stack (0BSD, see THIRD_PARTY.md), with the static address QEMU's
 //! user-mode network expects (10.0.2.15/24, gateway 10.0.2.2). `tcp` is
 //! the kernel's socket API; `nt::afd` builds Windows sockets on it.
 //! Design: docs/ARCHITECTURE.md, "Networking".
 
+pub mod card;
 pub mod loopback;
 pub mod tcp;
 pub mod udp;
 pub mod virtio_net;
 
 use crate::{sched, time};
+use card::{Card, UsbNet};
 use core::sync::atomic::Ordering;
 use smoltcp::wire::Ipv4Address;
 use tcp::{Addr, NetError};
@@ -163,7 +166,8 @@ pub fn has_card() -> bool {
 const ECHO_PORT: u16 = 7;
 const ECHO_TIMEOUT_NS: u64 = 60_000_000_000;
 
-/// Finds the card (if any) and starts the stack and the `net` thread.
+/// Finds the card (if any: a virtio-net card first, else the USB
+/// adapter `usb::init` set up) and starts the stack and the `net` thread.
 pub fn init() {
     let card = match VirtioNet::probe() {
         Ok(dev) => {
@@ -173,7 +177,7 @@ pub fn init() {
                  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 dev.at, dev.device_id, m[0], m[1], m[2], m[3], m[4], m[5]
             );
-            Some(dev)
+            Some(Card::Virtio(dev))
         }
         Err(virtio_net::Error::NotFound) => None,
         Err(e) => {
@@ -181,6 +185,20 @@ pub fn init() {
             None
         }
     };
+    let card = card.or_else(|| {
+        let (m, model) = crate::usb::net_mac()?;
+        info!(
+            "net: usb {} adapter, mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            model.name(),
+            m[0],
+            m[1],
+            m[2],
+            m[3],
+            m[4],
+            m[5]
+        );
+        Some(Card::Usb(UsbNet { mac: m }))
+    });
     let has_card = card.is_some();
     CARD.store(has_card, core::sync::atomic::Ordering::Relaxed);
     match tcp::start(card) {
@@ -243,9 +261,9 @@ pub fn log_stats() {
     let (polls, lo_packets, lo_dropped, sockets) = tcp::stats();
     info!(
         "net: {} frames received, {} sent, {} dropped (transmit queue full); loopback {} packets, {} dropped; {} polls, {} sockets open",
-        virtio_net::RX_FRAMES.load(Ordering::Relaxed),
-        virtio_net::TX_FRAMES.load(Ordering::Relaxed),
-        virtio_net::TX_FULL.load(Ordering::Relaxed),
+        card::RX_FRAMES.load(Ordering::Relaxed),
+        card::TX_FRAMES.load(Ordering::Relaxed),
+        card::TX_FULL.load(Ordering::Relaxed),
         lo_packets,
         lo_dropped,
         polls,

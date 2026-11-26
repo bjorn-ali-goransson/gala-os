@@ -1,6 +1,8 @@
-//! USB: an xHCI host controller driver (`xhci`) and the HID boot
-//! keyboard and report-descriptor mouse it reads (`hid`); the input
-//! thread polls it (`poll`). ARCHITECTURE "USB".
+//! USB: an xHCI host controller driver (`xhci`), the HID boot keyboard
+//! and report-descriptor mouse it reads (`hid`), and the CDC-ECM/NCM
+//! Ethernet adapter it drives (`cdc`); the input thread polls the HID
+//! devices (`poll`), the network stack sends and receives frames
+//! (`net_send`, `net_receive`). ARCHITECTURE "USB".
 
 macro_rules! log {
     ($level:ident, $($arg:tt)*) => {{
@@ -11,11 +13,12 @@ macro_rules! log {
     }};
 }
 
+pub mod cdc;
 pub mod hid;
 pub mod xhci;
 
 #[cfg(not(test))]
-pub use kernel::{init, poll, present, stats};
+pub use kernel::{init, net_mac, net_receive, net_send, poll, present, stats};
 
 /// The host tests drive the controller model directly.
 #[cfg(test)]
@@ -31,10 +34,25 @@ pub fn poll(_: impl FnMut(hid::Event)) -> (u64, u64) {
     (0, 0)
 }
 
+#[cfg(test)]
+pub fn net_mac() -> Option<([u8; 6], cdc::Model)> {
+    None
+}
+
+#[cfg(test)]
+pub fn net_send(_: &[u8]) -> bool {
+    false
+}
+
+#[cfg(test)]
+pub fn net_receive(_: &mut [u8]) -> Option<usize> {
+    None
+}
+
 #[cfg(not(test))]
 mod kernel {
-    use super::hid;
     use super::xhci::{Stats, Xhci};
+    use super::{cdc, hid};
     use crate::arch::mmio::Mmio;
     use crate::arch::pci::{self, Function};
     use crate::disk::hw::KernelPlatform;
@@ -91,13 +109,16 @@ mod kernel {
         info!("usb: xhci at {}, registers at {phys:#x} ({len:#x} bytes)", f.address);
         match Xhci::start(KernelPlatform::new(regs), len) {
             Ok(dev) => {
-                let mut n = 0;
+                let (mut n, mut hid) = (0, 0);
                 for (port, name) in dev.devices() {
                     info!("usb: port {port}: read as a {name}");
                     n += 1;
+                    if matches!(name, "keyboard" | "mouse") {
+                        hid += 1;
+                    }
                 }
                 info!("usb: {n} device(s) in use");
-                PRESENT.store(n > 0, Ordering::Release);
+                PRESENT.store(hid > 0, Ordering::Release);
                 *USB.lock() = Some(dev);
             }
             Err(e) => warn!("usb: xhci at {} not usable: {e}", f.address),
@@ -147,6 +168,23 @@ mod kernel {
             }
         }
         total
+    }
+
+    /// The first USB Ethernet adapter in use: its MAC address and model.
+    pub fn net_mac() -> Option<([u8; 6], cdc::Model)> {
+        USB.lock().as_ref().and_then(Xhci::net_mac)
+    }
+
+    /// Sends one Ethernet frame on the adapter; false if it was not
+    /// taken (gone, or every transfer slot in flight).
+    pub fn net_send(frame: &[u8]) -> bool {
+        USB.lock().as_mut().is_some_and(|dev| dev.net_send(frame))
+    }
+
+    /// The next frame the adapter received, copied into `out`; its
+    /// length.
+    pub fn net_receive(out: &mut [u8]) -> Option<usize> {
+        USB.lock().as_mut().and_then(|dev| dev.net_receive(out))
     }
 
     /// The counters and the events no one asked for.

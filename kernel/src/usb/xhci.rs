@@ -3,21 +3,26 @@
 //! THIRD_PARTY.md): the devices on its root ports at boot, each set up
 //! through its first HID interface (a keyboard in the boot protocol, a
 //! mouse in the report protocol as its report descriptor describes it),
-//! then read through that interface's interrupt IN endpoint.
+//! then read through that interface's interrupt IN endpoint; or, with no
+//! HID interface in any of its configurations, through a CDC-ECM or
+//! CDC-NCM Ethernet function (`cdc`) and its two bulk endpoints.
 //!
-//! Polled: no interrupter is enabled; `Xhci::poll` reads the event ring.
-//! One command ring, one event ring (one segment), a transfer ring for
-//! each device's endpoint 0 and one for its interrupt endpoint, each a
-//! page of 256 TRBs ending in a Link TRB back to the start. Control
-//! transfers move at most `DATA_LEN` bytes, in to the host or none.
-//! Limits: root ports only (no hubs), no hotplug (devices present when
-//! the controller is started), the first HID interface of a device, the
-//! default port speed IDs. Design: docs/ARCHITECTURE.md, "USB".
+//! Polled: no interrupter is enabled; `Xhci::poll` and the network calls
+//! read the event ring (`drain`), which stashes the HID devices' events
+//! for `poll` and keeps the Ethernet function's itself. One command
+//! ring, one event ring (one segment), a transfer ring for each device's
+//! endpoint 0 and one for each other endpoint it uses, each a page of
+//! 256 TRBs ending in a Link TRB back to the start. Control transfers
+//! move at most `DATA_LEN` bytes, either way. Limits: root ports only
+//! (no hubs), no hotplug (devices present when the controller is
+//! started), the first HID interface (or Ethernet function) of a device,
+//! one Ethernet function in use, the default port speed IDs. Design:
+//! docs/ARCHITECTURE.md, "USB".
 //!
 //! The driver is generic over `hw::Platform` so that its logic runs on
 //! the host against a model of a controller (`tests`).
 
-use super::hid;
+use super::{cdc, hid};
 use crate::disk::hw::{self, MS, Mem, Platform, SECOND};
 
 // Capability registers.
@@ -71,6 +76,8 @@ const TRB_ENABLE_SLOT: u32 = 9;
 const TRB_ADDRESS_DEVICE: u32 = 11;
 const TRB_CONFIGURE_ENDPOINT: u32 = 12;
 const TRB_EVALUATE_CONTEXT: u32 = 13;
+const TRB_RESET_ENDPOINT: u32 = 14;
+const TRB_SET_TR_DEQUEUE: u32 = 16;
 const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_COMMAND_COMPLETION: u32 = 33;
 const TRB_PORT_STATUS_CHANGE: u32 = 34;
@@ -100,6 +107,13 @@ const INTERRUPT_TRBS: usize = 16;
 const DATA_AT: usize = PAGE / 2;
 pub const DATA_LEN: usize = PAGE / 2;
 
+/// An Ethernet function's transfers: slots of a frame (ECM) or a block
+/// (NCM) each, received and sent.
+const NET_SLOT: usize = 2048;
+const NET_SLOTS: usize = 8;
+/// HID transfer events read by `drain` and not yet by `poll`.
+const PENDING: usize = MAX_DEVICES * INTERRUPT_TRBS;
+
 // Port speed IDs (the default Protocol Speed ID mapping).
 const SPEED_FULL: u32 = 1;
 const SPEED_LOW: u32 = 2;
@@ -124,7 +138,7 @@ pub enum Error {
     /// A descriptor that does not say what it should.
     Descriptor(&'static str),
     /// No interface this driver reads.
-    NotHid,
+    NoInterface,
     NoSlot,
 }
 
@@ -140,7 +154,9 @@ impl core::fmt::Display for Error {
             Error::Transfer(cc) => write!(f, "transfer failed (completion code {cc})"),
             Error::NoEvent(what) => write!(f, "no completion for {what}"),
             Error::Descriptor(what) => write!(f, "bad descriptor: {what}"),
-            Error::NotHid => f.write_str("no HID keyboard or mouse interface"),
+            Error::NoInterface => {
+                f.write_str("no HID keyboard or mouse interface, nor a CDC Ethernet function")
+            }
             Error::NoSlot => f.write_str("no device slot left"),
         }
     }
@@ -219,6 +235,8 @@ fn param(trb: &[u32; 4]) -> u64 {
 pub enum Kind {
     Keyboard(hid::Keyboard),
     Mouse(hid::MouseLayout),
+    /// An Ethernet adapter (`Xhci::net_send`, `net_receive`).
+    Net(cdc::Model),
 }
 
 impl Kind {
@@ -226,6 +244,7 @@ impl Kind {
         match self {
             Kind::Keyboard(_) => "keyboard",
             Kind::Mouse(_) => "mouse",
+            Kind::Net(model) => model.name(),
         }
     }
 }
@@ -246,10 +265,39 @@ struct Device<M> {
     intr: Option<Ring<M>>,
     intr_mps: usize,
     kind: Option<Kind>,
-    /// A transfer on its interrupt endpoint failed; it is not read.
+    /// A transfer on its interrupt (or bulk) endpoint failed; it is not
+    /// read.
     dead: bool,
     vendor: u16,
     product: u16,
+    /// bNumConfigurations.
+    configurations: u8,
+    net: Option<Net<M>>,
+}
+
+/// An Ethernet function's bulk endpoints and their buffers.
+struct Net<M> {
+    function: cdc::Function,
+    mac: [u8; 6],
+    in_dci: u8,
+    out_dci: u8,
+    rx_ring: Ring<M>,
+    tx_ring: Ring<M>,
+    /// `NET_SLOTS` slots of `NET_SLOT` bytes each way.
+    rx: M,
+    tx: M,
+    /// The bytes received into each rx slot, once its transfer is done.
+    rx_len: [Option<u16>; NET_SLOTS],
+    /// The rx slot read next (they complete in order).
+    rx_next: usize,
+    /// NCM: the datagram of the block in `rx_next` read next.
+    ncm_at: usize,
+    tx_next: usize,
+    /// Transfers queued on the OUT endpoint not yet completed.
+    tx_busy: usize,
+    /// NCM: the next block's wSequence, and the largest block out.
+    sequence: u16,
+    ntb_out_max: usize,
 }
 
 /// A HID interface of a configuration descriptor.
@@ -458,36 +506,29 @@ impl<P: Platform> Hc<P> {
         }
     }
 
-    /// A control transfer on a device's endpoint 0, with `len` bytes (at
-    /// most `DATA_LEN`) in to the host at `buf[DATA_AT..]`, or none.
-    fn control(
+    /// A control transfer on a device's endpoint 0: `setup` is the setup
+    /// packet; its wLength bytes (at most `DATA_LEN`) go in or out at
+    /// `buf[DATA_AT..]`.
+    fn transfer(
         &mut self,
         dev: &mut Device<P::Mem>,
-        request_type: u8,
-        request: u8,
-        value: u16,
-        index: u16,
-        len: u16,
+        setup: [u32; 2],
+        data_in: bool,
     ) -> Result<(), Error> {
-        let len = len.min(DATA_LEN as u16);
-        dev.buf.zero(DATA_AT, DATA_LEN);
-        let transfer_type = if len == 0 { 0 } else { 3 };
-        dev.ep0.push([
-            u32::from(request_type) | u32::from(request) << 8 | u32::from(value) << 16,
-            u32::from(index) | u32::from(len) << 16,
-            8,
-            TRB_SETUP << 10 | TRB_IDT | transfer_type << 16,
-        ]);
+        let len = setup[1] >> 16;
+        let transfer_type = match (len, data_in) {
+            (0, _) => 0,
+            (_, true) => 3,
+            (_, false) => 2,
+        };
+        dev.ep0.push([setup[0], setup[1], 8, TRB_SETUP << 10 | TRB_IDT | transfer_type << 16]);
         if len != 0 {
             let data = dev.buf.phys() + DATA_AT as u64;
-            dev.ep0.push([
-                data as u32,
-                (data >> 32) as u32,
-                u32::from(len),
-                TRB_DATA << 10 | TRB_DIR_IN,
-            ]);
+            let dir = if data_in { TRB_DIR_IN } else { 0 };
+            dev.ep0.push([data as u32, (data >> 32) as u32, len, TRB_DATA << 10 | dir]);
         }
-        let status_dir = if len == 0 { TRB_DIR_IN } else { 0 };
+        // The status stage goes the other way from the data (IN if none).
+        let status_dir = if len != 0 && data_in { 0 } else { TRB_DIR_IN };
         let status = dev.ep0.push([0, 0, 0, TRB_STATUS << 10 | TRB_IOC | status_dir]);
         let slot = dev.slot;
         self.ring(slot, 1);
@@ -500,6 +541,62 @@ impl<P: Platform> Hc<P> {
             CC_SUCCESS | CC_SHORT_PACKET => Ok(()),
             cc => Err(Error::Transfer(cc)),
         }
+    }
+
+    /// A control transfer with `len` bytes (at most `DATA_LEN`) in to the
+    /// host at `buf[DATA_AT..]`, or none.
+    fn control(
+        &mut self,
+        dev: &mut Device<P::Mem>,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        len: u16,
+    ) -> Result<(), Error> {
+        let len = len.min(DATA_LEN as u16);
+        dev.buf.zero(DATA_AT, DATA_LEN);
+        let setup = [
+            u32::from(request_type) | u32::from(request) << 8 | u32::from(value) << 16,
+            u32::from(index) | u32::from(len) << 16,
+        ];
+        self.transfer(dev, setup, true)
+    }
+
+    /// A control transfer with `data` (at most `DATA_LEN` bytes) out to
+    /// the device.
+    fn control_out(
+        &mut self,
+        dev: &mut Device<P::Mem>,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        data: &[u8],
+    ) -> Result<(), Error> {
+        let data = &data[..data.len().min(DATA_LEN)];
+        dev.buf.copy_in(DATA_AT, data);
+        let setup = [
+            u32::from(request_type) | u32::from(request) << 8 | u32::from(value) << 16,
+            u32::from(index) | (data.len() as u32) << 16,
+        ];
+        self.transfer(dev, setup, false)
+    }
+
+    /// Endpoint 0 again after a request the device stalled (a stall
+    /// halts the endpoint): Reset Endpoint, then its dequeue pointer set
+    /// past the stalled transfer (xHCI 1.2, 4.6.8 and 4.6.10).
+    fn recover_ep0(&mut self, dev: &mut Device<P::Mem>) -> Result<(), Error> {
+        let slot = u32::from(dev.slot) << 24;
+        self.command([0, 0, 0, TRB_RESET_ENDPOINT << 10 | slot | 1 << 16])?;
+        let deq = (dev.ep0.mem.phys() + (dev.ep0.enq * 16) as u64) | u64::from(dev.ep0.cycle);
+        self.command([
+            deq as u32,
+            (deq >> 32) as u32,
+            0,
+            TRB_SET_TR_DEQUEUE << 10 | slot | 1 << 16,
+        ])?;
+        Ok(())
     }
 
     fn get_descriptor(
@@ -566,6 +663,8 @@ impl<P: Platform> Hc<P> {
             dead: false,
             vendor: 0,
             product: 0,
+            configurations: 0,
+            net: None,
         };
         let out = dev._output.phys();
         self.dcbaa.write32(usize::from(slot) * 8, out as u32);
@@ -605,25 +704,51 @@ impl<P: Platform> Hc<P> {
         let ids = dev.buf.read32(DATA_AT + 8);
         dev.vendor = ids as u16;
         dev.product = (ids >> 16) as u16;
+        dev.configurations = (dev.buf.read32(DATA_AT + 16) >> 8) as u8;
         Ok(dev)
     }
 
-    /// Configures the device for its HID interface; what it is read as.
+    /// Configures the device for the first of its configurations with a
+    /// HID keyboard or mouse interface, or else a CDC Ethernet function
+    /// (a USB network adapter often has another configuration first,
+    /// RNDIS or a vendor's); what it is read as.
     fn configure(&mut self, dev: &mut Device<P::Mem>) -> Result<Kind, Error> {
-        self.get_descriptor(dev, 0x0200, 9)?;
-        let total = (dev.buf.read32(DATA_AT) >> 16) as u16;
-        if total < 9 {
-            return Err(Error::Descriptor("configuration shorter than its header"));
+        let mut net = None;
+        for index in 0..dev.configurations.max(1) {
+            let value = 0x0200 | u16::from(index);
+            self.get_descriptor(dev, value, 9)?;
+            let total = (dev.buf.read32(DATA_AT) >> 16) as u16;
+            if total < 9 {
+                return Err(Error::Descriptor("configuration shorter than its header"));
+            }
+            let total = total.min(DATA_LEN as u16);
+            self.get_descriptor(dev, value, total)?;
+            let mut desc = [0u8; DATA_LEN];
+            let desc = &mut desc[..usize::from(total)];
+            dev.buf.copy_out(DATA_AT, desc);
+            if let Some(hid) = find_hid(desc) {
+                return self.configure_hid(dev, hid);
+            }
+            if net.is_none() {
+                net = cdc::find(desc);
+            }
         }
-        let total = total.min(DATA_LEN as u16);
-        self.get_descriptor(dev, 0x0200, total)?;
-        let mut desc = [0u8; DATA_LEN];
-        dev.buf.copy_out(DATA_AT, &mut desc[..usize::from(total)]);
-        let hid = find_hid(&desc[..usize::from(total)]).ok_or(Error::NotHid)?;
+        match net {
+            Some(function) => self.configure_net(dev, function),
+            None => Err(Error::NoInterface),
+        }
+    }
+
+    /// Configures the device for its HID interface `hid`.
+    fn configure_hid(
+        &mut self,
+        dev: &mut Device<P::Mem>,
+        hid: HidInterface,
+    ) -> Result<Kind, Error> {
         let keyboard = hid.protocol == 1 && hid.subclass == 1;
         if hid.protocol == 1 && !keyboard {
             // A keyboard's reports are read in the boot protocol only.
-            return Err(Error::NotHid);
+            return Err(Error::NoInterface);
         }
         let mps = usize::from(hid.max_packet);
         if mps == 0 {
@@ -682,9 +807,142 @@ impl<P: Platform> Hc<P> {
             }
             Err(e) => {
                 log!(info, "usb: port {}: report descriptor not understood ({e:?})", dev.port);
-                Err(Error::NotHid)
+                Err(Error::NoInterface)
             }
         }
+    }
+
+    /// Configures the device for its Ethernet function: the bulk
+    /// endpoints, the configuration, the MAC address, NCM's block size,
+    /// the data interface's setting with the endpoints, and the packet
+    /// filter (ECM 1.2 ch. 6, NCM 1.0 ch. 6-7).
+    fn configure_net(
+        &mut self,
+        dev: &mut Device<P::Mem>,
+        function: cdc::Function,
+    ) -> Result<Kind, Error> {
+        let (bin, bout) = (function.bulk_in, function.bulk_out);
+        if bin.mps == 0 || bout.mps == 0 {
+            return Err(Error::Descriptor("bulk endpoint packet size 0"));
+        }
+        let in_dci = (bin.address & 0xf) * 2 + 1;
+        let out_dci = (bout.address & 0xf) * 2;
+        let rx_ring = Ring::new(self.alloc(PAGE)?);
+        let tx_ring = Ring::new(self.alloc(PAGE)?);
+        let rx = self.alloc(NET_SLOT * NET_SLOTS)?;
+        let tx = self.alloc(NET_SLOT * NET_SLOTS)?;
+        dev.input.zero(0, PAGE);
+        dev.input.write32(4, 1 | 1 << in_dci | 1 << out_dci);
+        self.write_slot_context(dev, u32::from(in_dci.max(out_dci)));
+        // Error count 3, type bulk IN (6) or OUT (2).
+        for (dci, ty, mps, ring) in
+            [(in_dci, 6, bin.mps, &rx_ring), (out_dci, 2, bout.mps, &tx_ring)]
+        {
+            let e = self.ctx(usize::from(dci));
+            dev.input.write32(e + 4, 3 << 1 | ty << 3 | u32::from(mps) << 16);
+            let start = ring.start();
+            dev.input.write32(e + 8, start as u32);
+            dev.input.write32(e + 12, (start >> 32) as u32);
+            dev.input.write32(e + 16, NET_SLOT as u32);
+        }
+        let at = dev.input.phys();
+        self.command([
+            at as u32,
+            (at >> 32) as u32,
+            0,
+            TRB_CONFIGURE_ENDPOINT << 10 | u32::from(dev.slot) << 24,
+        ])?;
+        // SET_CONFIGURATION.
+        self.control(dev, 0x00, 9, u16::from(function.configuration), 0, 0)?;
+        // The MAC address string (US English).
+        self.control(dev, 0x80, 6, 0x0300 | u16::from(function.mac_string), 0x0409, 255)?;
+        let mut string = [0u8; 255];
+        dev.buf.copy_out(DATA_AT, &mut string);
+        let mac = cdc::parse_mac(&string).ok_or(Error::Descriptor("MAC address string"))?;
+        let comm = u16::from(function.comm);
+        let mut ntb_out_max = NET_SLOT;
+        if function.model == cdc::Model::Ncm {
+            // GET_NTB_PARAMETERS (NCM 1.0, 6.2.1): the largest blocks
+            // each way and how datagrams out are aligned.
+            self.control(dev, 0xa1, 0x80, 0, comm, 28)?;
+            let in_max = dev.buf.read32(DATA_AT + 4) as usize;
+            let out_max = dev.buf.read32(DATA_AT + 16) as usize;
+            let divisor = (dev.buf.read32(DATA_AT + 20) & 0xffff) as usize;
+            let remainder = (dev.buf.read32(DATA_AT + 20) >> 16) as usize;
+            if out_max < 64 {
+                return Err(Error::Descriptor("NCM blocks out smaller than 64 bytes"));
+            }
+            ntb_out_max = out_max.min(NET_SLOT);
+            // gala's blocks carry their datagram at offset 12.
+            if divisor > 1 && 12 % divisor != remainder % divisor {
+                log!(
+                    warn,
+                    "usb: port {}: NCM asks datagrams out at {remainder} mod {divisor}; gala's sit at 12",
+                    dev.port
+                );
+            }
+            // SET_NTB_INPUT_SIZE (6.2.7): blocks in no larger than a slot.
+            let size = (in_max.min(NET_SLOT) as u32).to_le_bytes();
+            self.control_out(dev, 0x21, 0x86, 0, comm, &size)?;
+        }
+        // SET_INTERFACE: the data interface's setting with the endpoints.
+        self.control(dev, 0x01, 11, u16::from(function.data_alt), u16::from(function.data), 0)?;
+        // SET_ETHERNET_PACKET_FILTER: directed, broadcast, multicast. A
+        // device may stall it (the filter is then its default, which
+        // passes those); the stall halts endpoint 0, so it is reset.
+        if let Err(e) = self.control_out(dev, 0x21, 0x43, 0x0e, comm, &[]) {
+            log!(
+                info,
+                "usb: port {}: packet filter not set ({e}); the device's default stays",
+                dev.port
+            );
+            self.recover_ep0(dev)?;
+        }
+        log!(
+            info,
+            "usb: {} on port {}, mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, bulk in {:#x}/{} out {:#x}/{}",
+            function.model.name(),
+            dev.port,
+            mac[0],
+            mac[1],
+            mac[2],
+            mac[3],
+            mac[4],
+            mac[5],
+            bin.address,
+            bin.mps,
+            bout.address,
+            bout.mps
+        );
+        dev.net = Some(Net {
+            function,
+            mac,
+            in_dci,
+            out_dci,
+            rx_ring,
+            tx_ring,
+            rx,
+            tx,
+            rx_len: [None; NET_SLOTS],
+            rx_next: 0,
+            ncm_at: 0,
+            tx_next: 0,
+            tx_busy: 0,
+            sequence: 0,
+            ntb_out_max,
+        });
+        Ok(Kind::Net(function.model))
+    }
+
+    /// Queues a bulk IN transfer into rx slot `k`.
+    fn queue_rx(net: &mut Net<P::Mem>, k: usize) {
+        let at = net.rx.phys() + (k * NET_SLOT) as u64;
+        net.rx_ring.push([
+            at as u32,
+            (at >> 32) as u32,
+            NET_SLOT as u32,
+            TRB_NORMAL << 10 | TRB_IOC | TRB_ISP,
+        ]);
     }
 
     /// Queues a transfer into slice `k` of the device's buffer.
@@ -707,11 +965,26 @@ pub struct Stats {
     pub errors: u64,
 }
 
+/// A HID report taken off the event ring but not yet read: the device's
+/// index, its buffer's slice, the bytes in it. A slice is queued at most
+/// once, so `PENDING` of them never overflow.
+#[derive(Clone, Copy, Default)]
+struct Report {
+    dev: u8,
+    k: u8,
+    len: u8,
+}
+
 pub struct Xhci<P: Platform> {
     hc: Hc<P>,
     devices: [Option<Device<P::Mem>>; MAX_DEVICES],
     pub version: u16,
     pub stats: Stats,
+    /// Reports taken while the network was served (`drain`), read by
+    /// the next `poll`, in order.
+    pending: [Report; PENDING],
+    pending_at: usize,
+    pending_len: usize,
 }
 
 impl<P: Platform> Xhci<P> {
@@ -843,15 +1116,33 @@ impl<P: Platform> Xhci<P> {
                 Err(e) => log!(warn, "usb: port {port}: device not used: {e}"),
             }
         }
-        let mut xhci = Self { hc, devices, version, stats: Stats::default() };
-        // The interrupt transfers, queued once every device is set up
-        // (their events would otherwise come among the commands').
+        let mut xhci = Self {
+            hc,
+            devices,
+            version,
+            stats: Stats::default(),
+            pending: [Report::default(); PENDING],
+            pending_at: 0,
+            pending_len: 0,
+        };
+        // The interrupt and bulk IN transfers, queued once every device
+        // is set up (their events would otherwise come among the
+        // commands').
         for dev in xhci.devices.iter_mut().flatten() {
-            for k in 0..INTERRUPT_TRBS {
-                xhci.hc.queue_interrupt(dev, k);
+            if dev.intr.is_some() {
+                for k in 0..INTERRUPT_TRBS {
+                    xhci.hc.queue_interrupt(dev, k);
+                }
+                let (slot, dci) = (dev.slot, dev.dci);
+                xhci.hc.ring(slot, u32::from(dci));
             }
-            let (slot, dci) = (dev.slot, dev.dci);
-            xhci.hc.ring(slot, u32::from(dci));
+            if let Some(net) = dev.net.as_mut() {
+                for k in 0..NET_SLOTS {
+                    Hc::<P>::queue_rx(net, k);
+                }
+                let (slot, dci) = (dev.slot, net.in_dci);
+                xhci.hc.ring(slot, u32::from(dci));
+            }
         }
         Ok(xhci)
     }
@@ -861,23 +1152,27 @@ impl<P: Platform> Xhci<P> {
         self.devices.iter().flatten().map(|d| (d.port, d.kind.as_ref().map_or("?", Kind::name)))
     }
 
-    /// Reads what the devices reported, at most `limit` events of the
-    /// controller's (at least one, at most a ring's worth: a controller
-    /// writing events without end cannot keep the caller here); `f` gets
-    /// each key and pointer change. The reports read (keyboards', mice's),
-    /// counted once their transfers are queued again.
-    pub fn poll(&mut self, limit: usize, mut f: impl FnMut(hid::Event)) -> (u64, u64) {
-        let mut n = (0, 0);
-        for _ in 0..limit.clamp(1, RING_TRBS) {
+    /// Takes at most `limit` events of the controller's (at least one,
+    /// at most a ring's worth: a controller writing events without end
+    /// cannot keep the caller here): a network transfer done is noted in
+    /// its device, a HID report is put aside for `poll`. The events
+    /// taken.
+    fn drain(&mut self, limit: usize) -> usize {
+        let mut taken = 0;
+        while taken < limit.clamp(1, RING_TRBS) {
             let Some(ev) = self.hc.next_event() else { break };
+            taken += 1;
             if trb_type(&ev) != TRB_TRANSFER_EVENT {
                 self.hc.stray(&ev);
                 continue;
             }
             let slot = (ev[3] >> 24) as u8;
             let dci = (ev[3] >> 16 & 0x1f) as u8;
-            let Some(dev) =
-                self.devices.iter_mut().flatten().find(|d| d.slot == slot && d.dci == dci)
+            let Some((index, dev)) = self
+                .devices
+                .iter_mut()
+                .enumerate()
+                .find_map(|(i, d)| d.as_mut().filter(|d| d.slot == slot).map(|d| (i, d)))
             else {
                 self.hc.stray(&ev);
                 continue;
@@ -891,10 +1186,34 @@ impl<P: Platform> Xhci<P> {
                 dev.dead = true;
                 log!(
                     warn,
-                    "usb: port {}: {} transfer failed (completion code {cc}); the device is no longer read",
+                    "usb: port {}: {} transfer on endpoint {dci} failed (completion code {cc}); the device is no longer used",
                     dev.port,
                     dev.kind.as_ref().map_or("?", Kind::name)
                 );
+                continue;
+            }
+            let residual = (ev[2] & 0xff_ffff) as usize;
+            if let Some(net) = dev.net.as_mut() {
+                if dci == net.in_dci {
+                    let Some(trb) = net.rx_ring.trb(param(&ev)) else {
+                        self.hc.stray(&ev);
+                        continue;
+                    };
+                    let k = (param(&trb).wrapping_sub(net.rx.phys()) as usize) / NET_SLOT;
+                    let Some(len) = net.rx_len.get_mut(k) else {
+                        self.hc.stray(&ev);
+                        continue;
+                    };
+                    *len = Some(NET_SLOT.saturating_sub(residual) as u16);
+                } else if dci == net.out_dci {
+                    net.tx_busy = net.tx_busy.saturating_sub(1);
+                } else {
+                    self.hc.stray(&ev);
+                }
+                continue;
+            }
+            if dci != dev.dci {
+                self.hc.stray(&ev);
                 continue;
             }
             let Some(trb) = dev.intr.as_ref().and_then(|r| r.trb(param(&ev))) else {
@@ -902,12 +1221,38 @@ impl<P: Platform> Xhci<P> {
                 continue;
             };
             let k = (param(&trb).wrapping_sub(dev.buf.phys()) as usize) / SLICE;
-            if k >= INTERRUPT_TRBS {
+            if k >= INTERRUPT_TRBS || self.pending_len == PENDING {
                 self.hc.stray(&ev);
                 continue;
             }
             let asked = (trb[2] & 0x1ffff) as usize;
-            let len = asked.saturating_sub((ev[2] & 0xff_ffff) as usize).min(SLICE);
+            let len = asked.saturating_sub(residual).min(SLICE);
+            self.pending[(self.pending_at + self.pending_len) % PENDING] =
+                Report { dev: index as u8, k: k as u8, len: len as u8 };
+            self.pending_len += 1;
+        }
+        taken
+    }
+
+    /// Reads what the devices reported, at most `limit` reports (and
+    /// events of the controller's, `drain`); `f` gets each key and
+    /// pointer change. The reports read (keyboards', mice's), counted
+    /// once their transfers are queued again.
+    pub fn poll(&mut self, limit: usize, mut f: impl FnMut(hid::Event)) -> (u64, u64) {
+        self.drain(limit);
+        let mut n = (0, 0);
+        for _ in 0..limit.max(1) {
+            if self.pending_len == 0 {
+                break;
+            }
+            let r = self.pending[self.pending_at];
+            self.pending_at = (self.pending_at + 1) % PENDING;
+            self.pending_len -= 1;
+            let Some(Some(dev)) = self.devices.get_mut(usize::from(r.dev)) else { continue };
+            if dev.dead {
+                continue;
+            }
+            let (k, len) = (usize::from(r.k), usize::from(r.len));
             let mut report = [0u8; SLICE];
             dev.buf.copy_out(k * SLICE, &mut report[..len]);
             match dev.kind.as_mut() {
@@ -921,7 +1266,7 @@ impl<P: Platform> Xhci<P> {
                     }
                     n.1 += 1;
                 }
-                None => {}
+                _ => {}
             }
             self.stats.reports += 1;
             self.hc.queue_interrupt(dev, k);
@@ -929,6 +1274,145 @@ impl<P: Platform> Xhci<P> {
             self.hc.ring(slot, u32::from(dci));
         }
         n
+    }
+
+    /// The first Ethernet adapter in use: its MAC address and model.
+    pub fn net_mac(&self) -> Option<([u8; 6], cdc::Model)> {
+        self.devices
+            .iter()
+            .flatten()
+            .find_map(|d| d.net.as_ref().filter(|_| !d.dead).map(|n| (n.mac, n.function.model)))
+    }
+
+    fn net_device(&mut self) -> Option<&mut Device<P::Mem>> {
+        self.devices.iter_mut().flatten().find(|d| d.net.is_some() && !d.dead)
+    }
+
+    /// Sends one Ethernet frame on the first adapter; false if it is
+    /// gone, every tx slot is in flight, or the frame does not fit a
+    /// slot (the caller drops it, as a full queue would).
+    pub fn net_send(&mut self, frame: &[u8]) -> bool {
+        self.drain(RING_TRBS);
+        let Some(dev) = self.devices.iter_mut().flatten().find(|d| d.net.is_some() && !d.dead)
+        else {
+            return false;
+        };
+        let slot = dev.slot;
+        let Some(net) = dev.net.as_mut() else { return false };
+        // A frame takes one TRB, two with its zero-length packet.
+        if net.tx_busy == NET_SLOTS || frame.len() > NET_SLOT {
+            return false;
+        }
+        let k = net.tx_next;
+        let len = match net.function.model {
+            cdc::Model::Ecm => {
+                net.tx.copy_in(k * NET_SLOT, frame);
+                frame.len()
+            }
+            cdc::Model::Ncm => {
+                let mut block = [0u8; NET_SLOT];
+                let Some(len) =
+                    cdc::ntb16_build(frame, net.sequence, &mut block[..net.ntb_out_max])
+                else {
+                    return false;
+                };
+                net.sequence = net.sequence.wrapping_add(1);
+                net.tx.copy_in(k * NET_SLOT, &block[..len]);
+                len
+            }
+        };
+        // A transfer whose length is a whole number of packets ends with
+        // a zero-length packet (USB 2.0 5.8.3), except an NCM block of
+        // the largest size the device takes (NCM 1.0 3.2.2).
+        let mps = usize::from(net.function.bulk_out.mps);
+        let zlp =
+            len % mps == 0 && !(net.function.model == cdc::Model::Ncm && len == net.ntb_out_max);
+        let at = net.tx.phys() + (k * NET_SLOT) as u64;
+        let data = TRB_NORMAL << 10 | if zlp { 0 } else { TRB_IOC };
+        net.tx_ring.push([at as u32, (at >> 32) as u32, len as u32, data]);
+        if zlp {
+            net.tx_ring.push([0, 0, 0, TRB_NORMAL << 10 | TRB_IOC]);
+        }
+        net.tx_busy += 1;
+        net.tx_next = (k + 1) % NET_SLOTS;
+        let dci = net.out_dci;
+        self.hc.ring(slot, u32::from(dci));
+        true
+    }
+
+    /// Copies the next Ethernet frame received on the first adapter into
+    /// `out`; its length, or None if none is waiting. A frame longer
+    /// than `out` is cut short.
+    pub fn net_receive(&mut self, out: &mut [u8]) -> Option<usize> {
+        self.drain(RING_TRBS);
+        let mut errors = 0;
+        let found = {
+            let dev = self.net_device()?;
+            let (slot, port) = (dev.slot, dev.port);
+            let net = dev.net.as_mut()?;
+            let mut found = None;
+            let mut requeued = false;
+            // At most every slot once: an NCM block may hold no frame.
+            for _ in 0..NET_SLOTS {
+                let k = net.rx_next;
+                let Some(len) = net.rx_len[k] else { break };
+                let len = usize::from(len);
+                let mut done = true;
+                match net.function.model {
+                    cdc::Model::Ecm => {
+                        let n = len.min(out.len());
+                        net.rx.copy_out(k * NET_SLOT, &mut out[..n]);
+                        if len > 0 {
+                            found = Some(n);
+                        }
+                    }
+                    cdc::Model::Ncm => {
+                        let mut block = [0u8; NET_SLOT];
+                        net.rx.copy_out(k * NET_SLOT, &mut block[..len]);
+                        let (mut i, want) = (0, net.ncm_at);
+                        let walked = cdc::ntb16_frames(&block[..len], |frame| {
+                            if i == want {
+                                let n = frame.len().min(out.len());
+                                out[..n].copy_from_slice(&frame[..n]);
+                                found = Some(n);
+                            }
+                            i += 1;
+                        });
+                        match walked {
+                            Ok(count) if net.ncm_at + 1 < count => {
+                                net.ncm_at += 1;
+                                done = false;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                errors += 1;
+                                log!(
+                                    warn,
+                                    "usb: port {port}: NCM block of {len} bytes not read ({e:?})"
+                                );
+                            }
+                        }
+                    }
+                }
+                if done {
+                    net.rx_len[k] = None;
+                    net.ncm_at = 0;
+                    Hc::<P>::queue_rx(net, k);
+                    net.rx_next = (k + 1) % NET_SLOTS;
+                    requeued = true;
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            if requeued {
+                let dci = net.in_dci;
+                self.hc.ring(slot, u32::from(dci));
+            }
+            found
+        };
+        self.stats.errors += errors;
+        found
     }
 
     /// Events no one asked for, since the start.

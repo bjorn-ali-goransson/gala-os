@@ -493,6 +493,7 @@ xtask that change how a scenario boots:
 | `UEFI_SCENARIOS` | boot by UEFI (the rest by BIOS) |
 | `NET_SCENARIOS` | a network card and a host-side client ("Network tests") |
 | `HOST_PAGE_SCENARIOS` | a network card whose 10.0.2.100:80 is a page served from the host (`xtask serve-page`; "Network tests") |
+| `USB_NET_SCENARIOS` | the net scenario's user network behind QEMU's `usb-net` (a CDC-ECM function) on a `qemu-xhci`, no virtio-net card (`usb_net`) |
 | `CARD_SCENARIOS` | a network card and nothing connecting to it (the driver's set-up alone: `arm_boot`) |
 | `DISK_SCENARIOS` | a disk, sparse, with the most it may take on the host; on virtio-blk unless `DISK_CONTROLLERS` names AHCI or NVMe ("Disk tests") |
 | `GPU_SCENARIOS` | a virtio-gpu screen ("GPU tests") |
@@ -742,7 +743,9 @@ VMs have no network card unless the scenario is in `NET_SCENARIOS`,
 - A net scenario gets a virtio-net card on QEMU's user network with a
   host port forwarded to guest port 7 (TCP and UDP, the same port number
   on both; sshd's 22 for `SSH_PORT_22`). User networking needs no
-  privileges, so this works in containers and CI.
+  privileges, so this works in containers and CI. A scenario also in `USB_NET_SCENARIOS`
+  gets the same network behind a USB Ethernet adapter (`usb-net` on its
+  own `qemu-xhci`) instead of the virtio-net card.
 - Each VM leases its own host port (`PortLease`: free for both
   protocols, below the host's ephemeral range so no outgoing connection
   takes it before QEMU binds it, never given to another VM of the same

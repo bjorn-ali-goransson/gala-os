@@ -21,8 +21,8 @@
 //! The `net` thread polls; after each poll every entry whose readiness
 //! changed is reported to the notify hook with the entry's token.
 
+use super::card::Card;
 use super::loopback::Loopback;
-use super::virtio_net::VirtioNet;
 use crate::mm::heap::{KArc, TryVec};
 use crate::quota::{Block, Held, Pool};
 use crate::sync::IrqMutex;
@@ -380,7 +380,7 @@ fn buffer_budget() -> u64 {
 
 pub(super) struct Stack {
     pub(super) lo: Iface<Loopback>,
-    pub(super) eth: Option<Iface<VirtioNet>>,
+    pub(super) eth: Option<Iface<Card>>,
     pub(super) eth_ip: Option<[u8; 4]>,
     eth_mac: [u8; 6],
     pub(super) entries: Vec<Option<Entry>>,
@@ -995,7 +995,7 @@ pub fn set_notify(hook: fn(u64)) {
 
 /// Starts the stack: loopback always, the card if `card` is given, and the
 /// `net` thread.
-pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
+pub fn start(card: Option<Card>) -> Result<(), NetError> {
     let lo =
         Iface::new(Loopback::new(), HardwareAddress::Ip, IpCidr::new(IpAddress::Ipv4(LOOPBACK), 8))
             .map(|mut lo| {
@@ -1008,8 +1008,8 @@ pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
             .ok_or(NetError::NoMemory)?;
     let (mut eth, mut eth_ip, mut eth_mac) = (None, None, [0; 6]);
     if let Some(card) = card {
-        eth_mac = card.mac;
-        let mac = smoltcp::wire::EthernetAddress(card.mac);
+        eth_mac = card.mac();
+        let mac = smoltcp::wire::EthernetAddress(eth_mac);
         let mut iface =
             Iface::new(card, mac.into(), IpCidr::new(super::ADDRESS.into(), super::PREFIX))
                 .ok_or(NetError::NoMemory)?;

@@ -6365,6 +6365,7 @@ enum NetClient {
 /// xtask then runs.
 const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("net_echo", "net: echo listening on port 7", NetClient::Echo),
+    ("usb_net", "net: echo listening on port 7", NetClient::Echo),
     ("arm_net_echo", "net: echo listening on port 7", NetClient::Echo),
     ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
     ("udp_echo", "udp_test: listening on port 7", NetClient::Udp),
@@ -7783,6 +7784,21 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "net: virtio-net",
+            "net: link up, 10.0.2.15/24",
+            "net_echo: echoed 65536 bytes",
+            "xtask: net client: echo ok",
+        ],
+    },
+    Scenario {
+        // net_echo's echo server over a USB Ethernet adapter instead of
+        // virtio-net: QEMU's usb-net (a CDC-ECM function) on its xHCI
+        // controller, no PCI network card (ROADMAP HW step 3).
+        name: "usb_net",
+        cmdline: "qemu_exit net_echo",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "usb: CDC-ECM on port",
+            "net: usb CDC-ECM",
             "net: link up, 10.0.2.15/24",
             "net_echo: echoed 65536 bytes",
             "xtask: net client: echo ok",
@@ -16162,6 +16178,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("hook_match_test", "needs a screen (the hook's screendumps come from QEMU's monitor)"),
     ("paint_thread_test", "needs a screen (the square must reach the desktop)"),
     ("usb_input", "needs a screen (QEMU's sendkey and mouse_move) and xHCI"),
+    ("usb_net", "needs xHCI and a USB network adapter"),
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
@@ -17304,6 +17321,8 @@ fn run_vm_once(
             let _ = fs::remove_file(iso.with_extension("serve.log"));
             let guestfwd = host_page_fwd(&mut cmd, &iso.with_extension("serve.log"))?;
             add_net_with(&mut cmd, port, guest_port(iso_scenario(iso)), &guestfwd);
+        } else if USB_NET_SCENARIOS.contains(&iso_scenario(iso)) {
+            add_usb_net(&mut cmd, port, guest_port(iso_scenario(iso)));
         } else {
             add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
         }
@@ -21835,6 +21854,20 @@ fn add_net_with(cmd: &mut Command, port: u16, guest: u16, extra: &str) {
             "user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:{guest},hostfwd=udp:127.0.0.1:{port}-:{guest}{extra}"
         ))
         .args(["-device", "virtio-net-pci,netdev=n0"]);
+}
+
+/// Scenarios whose network card is QEMU's usb-net (a CDC-ECM function)
+/// on an xHCI controller instead of virtio-net (ROADMAP HW step 3).
+const USB_NET_SCENARIOS: &[&str] = &["usb_net"];
+
+/// add_net_to with the user network behind a USB Ethernet adapter on
+/// its own xHCI controller.
+fn add_usb_net(cmd: &mut Command, port: u16, guest: u16) {
+    cmd.arg("-netdev")
+        .arg(format!(
+            "user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:{guest},hostfwd=udp:127.0.0.1:{port}-:{guest}"
+        ))
+        .args(["-device", "qemu-xhci,id=xhci", "-device", "usb-net,netdev=n0,bus=xhci.0"]);
 }
 
 /// Scenarios booted on a machine with no i8042 (`-machine

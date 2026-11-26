@@ -4,6 +4,7 @@
 //! (with `num_buffers`; no offloads negotiated, so it is all zeros on
 //! transmit and ignored on receive).
 
+use super::card::{RX_BYTES, RX_FRAMES, TX_BYTES, TX_FRAMES, TX_FULL};
 use crate::arch::pci::{self, Function};
 use crate::arch::virtio::{InitError, ModernDevice};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -25,15 +26,9 @@ const TX: u16 = 1;
 const HEADER: usize = 12;
 /// Header plus the largest Ethernet frame without FCS.
 const SLOT: usize = 2048;
-const MTU: usize = 1514;
+use super::card::MTU;
 const SLOTS: u16 = 32;
 
-pub static RX_FRAMES: AtomicU64 = AtomicU64::new(0);
-pub static TX_FRAMES: AtomicU64 = AtomicU64::new(0);
-pub static TX_FULL: AtomicU64 = AtomicU64::new(0);
-/// Ethernet bytes received and sent (the task manager's network graph).
-pub static RX_BYTES: AtomicU64 = AtomicU64::new(0);
-pub static TX_BYTES: AtomicU64 = AtomicU64::new(0);
 /// `netreset=<n>`: the device is reset under the driver after the n-th
 /// frame sent (the driver's recovery test; 0: never).
 pub static RESET_AT: AtomicU64 = AtomicU64::new(0);
