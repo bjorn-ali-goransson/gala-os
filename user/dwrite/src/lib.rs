@@ -30,6 +30,15 @@
 //! are what Direct2D's drawing state blocks carry, and Word reads them
 //! before its first frame.
 //!
+//! Text analysis (`analyze`): the one text analyzer, which itemizes a
+//! string into script, bidi and line-break runs through the caller's
+//! analysis source and sink, maps characters to a face's glyphs and
+//! scales each glyph's design advance by the em size. Word's start-up
+//! stops at the first refused `CreateTextAnalyzer` with "something went
+//! wrong" (error 47) and nothing else, so an analyzer refused is a
+//! program that cannot start: what is not measured yet is answered as
+//! well as it can be and says so to the ledger, rather than refused.
+//!
 //! Not there yet (each reported to the ledger, E_NOTIMPL): text formats and layouts,
 //! glyph run analysis (rasterization) and outlines, GDI interop, and the
 //! IDWriteFactory1+ interfaces (QueryInterface says E_NOINTERFACE, which
@@ -39,6 +48,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod analyze;
 mod font;
 mod glyphs;
 mod params;
@@ -191,7 +201,7 @@ static FACTORY_VTBL: VTable<57> = VTable([
     factory_CreateTextLayout as *const (),
     factory_CreateGdiCompatibleTextLayout as *const (),
     factory_CreateEllipsisTrimmingSign as *const (),
-    factory_CreateTextAnalyzer as *const (),
+    analyze::factory_CreateTextAnalyzer as *const (),
     factory_CreateNumberSubstitution as *const (),
     glyphs::create_glyph_run_analysis as *const (),
     // IDWriteFactory1 and the revisions after it, in the order the
@@ -586,7 +596,6 @@ not_impl! {
     factory_CreateTextLayout as "IDWriteFactory::CreateTextLayout"
     factory_CreateGdiCompatibleTextLayout as "IDWriteFactory::CreateGdiCompatibleTextLayout"
     factory_CreateEllipsisTrimmingSign as "IDWriteFactory::CreateEllipsisTrimmingSign"
-    factory_CreateTextAnalyzer as "IDWriteFactory::CreateTextAnalyzer"
     factory_CreateNumberSubstitution as "IDWriteFactory::CreateNumberSubstitution"
     factory1_GetEudcFontCollection as "IDWriteFactory1::GetEudcFontCollection"
     factory1_CreateCustomRenderingParams as "IDWriteFactory1::CreateCustomRenderingParams"

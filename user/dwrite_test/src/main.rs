@@ -52,6 +52,39 @@
 //!     whole IID, so a run says which revision was wanted. This
 //!     program runs on Windows too, so it takes either answer here and
 //!     the `dwrite_test` scenario pins gala's;
+//! 12. text analysis, which is where Word's startup stops without it:
+//!     CreateTextAnalyzer gives an object that answers
+//!     IDWriteTextAnalyzer, 1 and 2 as itself (one pointer, three
+//!     revisions -- there is no revision 3) and refuses anything else
+//!     with E_NOINTERFACE and a NULL slot. Windows makes a fresh
+//!     analyzer per call and answers IUnknown with a different pointer
+//!     again; gala has one static analyzer and answers IUnknown with
+//!     itself, which no caller can tell apart because nothing here is
+//!     ever freed, so this step insists only on what both must do.
+//!     AnalyzeScript, AnalyzeBidi, AnalyzeNumberSubstitution and
+//!     AnalyzeLineBreakpoints read the source through
+//!     IDWriteTextAnalysisSource and report through
+//!     IDWriteTextAnalysisSink; on "Hello world 123" that is one Latin
+//!     script run (script 49, shapes DEFAULT), one bidi run at level 0,
+//!     no number substitution runs at all (a silent success: the sink is
+//!     never called) and one breakpoint call covering every character,
+//!     where a letter may not break on either side (2), each space may
+//!     break after it and carries isWhitespace, and the character after
+//!     a space may break before it (1). The source is barely consulted:
+//!     GetTextAtPosition once at position 0, and GetTextBeforePosition,
+//!     GetParagraphReadingDirection, GetLocaleName and
+//!     GetNumberSubstitution not at all. GetGlyphs maps those 15
+//!     characters to 15 glyphs with the identity cluster map, every one
+//!     a cluster start, the two spaces the same glyph and the only one
+//!     whose justification is 4 where every letter's is 2;
+//!     GetGlyphPlacements scales each glyph's own design advance by the
+//!     em size (16 here) and offsets every glyph by nothing. A
+//!     zero-length range is S_OK with no runs at all; a NULL sink or
+//!     source is E_INVALIDARG. Two edges are measured and not asserted,
+//!     because a test cannot assert a crash: real DirectWrite faults on
+//!     CreateTextAnalyzer(NULL), writing through the out pointer
+//!     unchecked, and faults again when asked to analyze a position past
+//!     the end of the source.
 
 #![no_std]
 #![no_main]
@@ -131,6 +164,16 @@ const IID_GDI_INTEROP: Iid =
     guid(0x1edd9491, 0x9853, 0x4299, [0x89, 0x8f, 0x64, 0x32, 0x98, 0x3b, 0x6f, 0x3a]);
 const IID_GDI_INTEROP1: Iid =
     guid(0x4556be70, 0x3abd, 0x4f70, [0x90, 0xbe, 0x42, 0x17, 0x80, 0xa6, 0xf5, 0x15]);
+const IID_ANALYZER: Iid =
+    guid(0xb7e6163e, 0x7f46, 0x43b4, [0x84, 0xb3, 0xe4, 0xe6, 0x24, 0x9c, 0x36, 0x5d]);
+const IID_ANALYZER1: Iid =
+    guid(0x80dad800, 0xe21f, 0x4e83, [0x96, 0xce, 0xbf, 0xcc, 0xe5, 0x00, 0xdb, 0x7c]);
+const IID_ANALYZER2: Iid =
+    guid(0x553a9ff3, 0x5693, 0x4df7, [0xb5, 0x2b, 0x74, 0x80, 0x6f, 0x7f, 0x2e, 0xb9]);
+const IID_ANALYSIS_SOURCE: Iid =
+    guid(0x688e1a58, 0x5094, 0x47c8, [0xad, 0xc8, 0xfb, 0xce, 0xa6, 0x0a, 0xe9, 0x2b]);
+const IID_ANALYSIS_SINK: Iid =
+    guid(0x5810cd44, 0x0ca0, 0x4701, [0xb3, 0xfa, 0xbe, 0xc5, 0x18, 0x2a, 0xe4, 0xf6]);
 
 /// The test's objects' QueryInterface: themselves for IUnknown and their
 /// own interface, E_NOINTERFACE (and NULL) for anything else. DirectWrite
@@ -242,7 +285,7 @@ static mut ALPHA: [u8; 3 * 48 * 48] = [0; 3 * 48 * 48];
 
 /// Step 9's ID2D1SimplifiedGeometrySink: counts what it is told.
 mod sink {
-    use super::{HResult, Iid};
+    use super::{HResult, Iid, Obj, VTable};
     use core::ffi::c_void;
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -260,14 +303,7 @@ mod sink {
         y: f32,
     }
 
-    #[repr(C)]
-    struct Obj(*const ());
-    struct VTable([*const (); 10]);
-    // SAFETY (both): pointers to a static vtable and functions.
-    unsafe impl Sync for Obj {}
-    unsafe impl Sync for VTable {}
-
-    static VTBL: VTable = VTable([
+    static VTBL: VTable<10> = VTable([
         qi as *const (),
         add_ref as *const (),
         release as *const (),
@@ -338,7 +374,7 @@ mod sink {
 /// serves `DATA` (the font file's bytes). Static objects: AddRef and
 /// Release count nothing.
 mod custom {
-    use super::{HResult, Iid};
+    use super::{HResult, Iid, Obj, VTable};
     use core::ffi::c_void;
     use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
@@ -348,13 +384,6 @@ mod custom {
     /// The enumerator's position: 0 before the file, 1 on it, 2 past it.
     static POSITION: AtomicU32 = AtomicU32::new(0);
     static FILE_KEY: u32 = 1;
-
-    #[repr(C)]
-    struct Obj(*const ());
-    struct VTable<const N: usize>([*const (); N]);
-    // SAFETY (both): pointers to static vtables and functions.
-    unsafe impl Sync for Obj {}
-    unsafe impl<const N: usize> Sync for VTable<N> {}
 
     static FILE_LOADER_VTBL: VTable<4> = VTable([
         qi as *const (),
@@ -506,6 +535,418 @@ mod custom {
             ) -> HResult = super::method(factory, 8);
             create(factory, (&raw const FILE_KEY).cast(), 4, file_loader(), file)
         }
+    }
+}
+
+/// The COM object every test module hands out: a pointer to its vtable and
+/// nothing else, and the vtable itself. One pair for the whole file, so
+/// each module describes only its own slots.
+#[repr(C)]
+struct Obj(*const ());
+struct VTable<const N: usize>([*const (); N]);
+// SAFETY (both): pointers to static vtables and to functions.
+unsafe impl Sync for Obj {}
+unsafe impl<const N: usize> Sync for VTable<N> {}
+
+/// DWRITE_SCRIPT_ANALYSIS: a script number and DWRITE_SCRIPT_SHAPES, which
+/// is a C enum and so four bytes. Measured on Windows 11 24H2: the whole
+/// struct is 8 bytes with `shapes` at offset 4, which two packed u16s would
+/// get wrong without a word from the compiler.
+#[repr(C)]
+struct ScriptAnalysis {
+    script: u16,
+    shapes: u32,
+}
+
+/// The four Analyze* methods share one signature: a source to read, a range
+/// in it, and a sink to report to.
+type Analyze = extern "system" fn(*mut c_void, *mut c_void, u32, u32, *mut c_void) -> HResult;
+
+/// IDWriteTextAnalyzer::GetGlyphs. The two shaping bitfield structs are one
+/// u16 each (measured), so they pass as u16 slots.
+#[allow(clippy::type_complexity)]
+type GetGlyphs = extern "system" fn(
+    *mut c_void, // this
+    *const u16,  // text
+    u32,         // text length
+    *mut c_void, // font face
+    i32,         // is sideways
+    i32,         // is right-to-left
+    *const ScriptAnalysis,
+    *const u16,           // locale
+    *mut c_void,          // number substitution
+    *const *const c_void, // typographic features
+    *const u32,           // feature range lengths
+    u32,                  // feature ranges
+    u32,                  // max glyph count
+    *mut u16,             // cluster map
+    *mut u16,             // shaping text properties
+    *mut u16,             // glyph indices
+    *mut u16,             // shaping glyph properties
+    *mut u32,             // glyphs written
+) -> HResult;
+
+/// IDWriteTextAnalyzer::GetGlyphPlacements. An offset is two floats
+/// (advance, ascender), measured 8 bytes with no padding.
+#[allow(clippy::type_complexity)]
+type GetPlacements = extern "system" fn(
+    *mut c_void, // this
+    *const u16,  // text
+    *const u16,  // cluster map
+    *mut u16,    // shaping text properties
+    u32,         // text length
+    *const u16,  // glyph indices
+    *const u16,  // shaping glyph properties
+    u32,         // glyph count
+    *mut c_void, // font face
+    f32,         // em size
+    i32,         // is sideways
+    i32,         // is right-to-left
+    *const ScriptAnalysis,
+    *const u16,           // locale
+    *const *const c_void, // typographic features
+    *const u32,           // feature range lengths
+    u32,                  // feature ranges
+    *mut f32,             // advances
+    *mut [f32; 2],        // offsets
+) -> HResult;
+
+/// Step 12's IDWriteTextAnalysisSource and IDWriteTextAnalysisSink: one
+/// block of text from position 0, and a count of everything the analyzer
+/// asks for and reports. Windows consults the source once (at position 0)
+/// and never calls the other four methods at all, so what is counted here
+/// is as much of the contract as what comes back through the sink.
+mod analysis {
+    use super::{
+        HResult, IID_ANALYSIS_SINK, IID_ANALYSIS_SOURCE, Iid, Obj, ScriptAnalysis, VTable,
+    };
+    use core::ffi::c_void;
+    use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
+
+    /// The text under analysis. Built at run time because `u16::from` is
+    /// not const, exactly as the custom loader's data block is.
+    static TEXT: AtomicPtr<u16> = AtomicPtr::new(core::ptr::null_mut());
+    static LEN: AtomicU32 = AtomicU32::new(0);
+
+    /// "en-us", NUL terminated.
+    static LOCALE: [u16; 6] = [0x65, 0x6e, 0x2d, 0x75, 0x73, 0];
+
+    /// What the source was asked for: the five methods' call counts, and
+    /// the highest position GetTextAtPosition was given.
+    static AT: AtomicU32 = AtomicU32::new(0);
+    static BEFORE: AtomicU32 = AtomicU32::new(0);
+    static DIR: AtomicU32 = AtomicU32::new(0);
+    static LOC: AtomicU32 = AtomicU32::new(0);
+    static SUBST: AtomicU32 = AtomicU32::new(0);
+    static AT_MAX: AtomicU32 = AtomicU32::new(0);
+
+    /// What the sink was told. Each run count stands beside the last run's
+    /// own numbers, which is enough while the test's strings produce one
+    /// run each.
+    static SCRIPT_RUNS: AtomicU32 = AtomicU32::new(0);
+    static SCRIPT_POS: AtomicU32 = AtomicU32::new(0);
+    static SCRIPT_LEN: AtomicU32 = AtomicU32::new(0);
+    static SCRIPT_ID: AtomicU32 = AtomicU32::new(0);
+    static SCRIPT_SHAPES: AtomicU32 = AtomicU32::new(0);
+    static BIDI_RUNS: AtomicU32 = AtomicU32::new(0);
+    static BIDI_POS: AtomicU32 = AtomicU32::new(0);
+    static BIDI_LEN: AtomicU32 = AtomicU32::new(0);
+    static BIDI_EXPLICIT: AtomicU32 = AtomicU32::new(0);
+    static BIDI_RESOLVED: AtomicU32 = AtomicU32::new(0);
+    static SUBST_RUNS: AtomicU32 = AtomicU32::new(0);
+    static BREAK_CALLS: AtomicU32 = AtomicU32::new(0);
+    static BREAK_POS: AtomicU32 = AtomicU32::new(0);
+    static BREAK_LEN: AtomicU32 = AtomicU32::new(0);
+    /// One DWRITE_LINE_BREAKPOINT is a single byte of bitfields (measured).
+    static BREAK: [AtomicU8; 16] = [const { AtomicU8::new(0) }; 16];
+
+    /// Point the source at `text` and forget every earlier answer, so each
+    /// Analyze* call is measured on its own.
+    pub fn arm(text: *const u16, len: u32) {
+        TEXT.store(text.cast_mut(), Ordering::Relaxed);
+        LEN.store(len, Ordering::Relaxed);
+        for c in [
+            &AT,
+            &BEFORE,
+            &DIR,
+            &LOC,
+            &SUBST,
+            &AT_MAX,
+            &SCRIPT_RUNS,
+            &SCRIPT_POS,
+            &SCRIPT_LEN,
+            &SCRIPT_ID,
+            &SCRIPT_SHAPES,
+            &BIDI_RUNS,
+            &BIDI_POS,
+            &BIDI_LEN,
+            &BIDI_EXPLICIT,
+            &BIDI_RESOLVED,
+            &SUBST_RUNS,
+            &BREAK_CALLS,
+            &BREAK_POS,
+            &BREAK_LEN,
+        ] {
+            c.store(0, Ordering::Relaxed);
+        }
+        for b in &BREAK {
+            b.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// [GetTextAtPosition, GetTextBeforePosition, GetParagraphReadingDirection,
+    /// GetLocaleName, GetNumberSubstitution, the highest position asked for].
+    pub fn source_calls() -> [u32; 6] {
+        [
+            AT.load(Ordering::Relaxed),
+            BEFORE.load(Ordering::Relaxed),
+            DIR.load(Ordering::Relaxed),
+            LOC.load(Ordering::Relaxed),
+            SUBST.load(Ordering::Relaxed),
+            AT_MAX.load(Ordering::Relaxed),
+        ]
+    }
+
+    /// [runs, the last run's position, its length, its script, its shapes].
+    pub fn script() -> [u32; 5] {
+        [
+            SCRIPT_RUNS.load(Ordering::Relaxed),
+            SCRIPT_POS.load(Ordering::Relaxed),
+            SCRIPT_LEN.load(Ordering::Relaxed),
+            SCRIPT_ID.load(Ordering::Relaxed),
+            SCRIPT_SHAPES.load(Ordering::Relaxed),
+        ]
+    }
+
+    /// [runs, position, length, explicit level, resolved level].
+    pub fn bidi() -> [u32; 5] {
+        [
+            BIDI_RUNS.load(Ordering::Relaxed),
+            BIDI_POS.load(Ordering::Relaxed),
+            BIDI_LEN.load(Ordering::Relaxed),
+            BIDI_EXPLICIT.load(Ordering::Relaxed),
+            BIDI_RESOLVED.load(Ordering::Relaxed),
+        ]
+    }
+
+    pub fn subst_runs() -> u32 {
+        SUBST_RUNS.load(Ordering::Relaxed)
+    }
+
+    /// [SetLineBreakpoints calls, the last call's position, its length].
+    pub fn breaks() -> [u32; 3] {
+        [
+            BREAK_CALLS.load(Ordering::Relaxed),
+            BREAK_POS.load(Ordering::Relaxed),
+            BREAK_LEN.load(Ordering::Relaxed),
+        ]
+    }
+
+    pub fn break_at(i: usize) -> u8 {
+        BREAK[i].load(Ordering::Relaxed)
+    }
+
+    extern "system" fn src_qi(
+        this: *mut c_void,
+        iid: *const Iid,
+        out: *mut *mut c_void,
+    ) -> HResult {
+        // SAFETY: the analyzer's IID and output slot.
+        unsafe { super::query(this, &IID_ANALYSIS_SOURCE, iid, out) }
+    }
+
+    extern "system" fn snk_qi(
+        this: *mut c_void,
+        iid: *const Iid,
+        out: *mut *mut c_void,
+    ) -> HResult {
+        // SAFETY: the analyzer's IID and output slot.
+        unsafe { super::query(this, &IID_ANALYSIS_SINK, iid, out) }
+    }
+
+    extern "system" fn add_ref(_this: *mut c_void) -> u32 {
+        2
+    }
+
+    extern "system" fn release(_this: *mut c_void) -> u32 {
+        1
+    }
+
+    /// GetTextAtPosition: the one block, from `pos` on. Past the end is
+    /// NULL and zero, as a source must answer.
+    extern "system" fn src_at(
+        _this: *mut c_void,
+        pos: u32,
+        text: *mut *const u16,
+        len: *mut u32,
+    ) -> HResult {
+        AT.fetch_add(1, Ordering::Relaxed);
+        AT_MAX.fetch_max(pos, Ordering::Relaxed);
+        let whole = LEN.load(Ordering::Relaxed);
+        // SAFETY: the analyzer's two output slots.
+        unsafe {
+            if pos >= whole {
+                *text = core::ptr::null();
+                *len = 0;
+            } else {
+                *text = TEXT.load(Ordering::Relaxed).cast_const().add(pos as usize);
+                *len = whole - pos;
+            }
+        }
+        0
+    }
+
+    /// GetTextBeforePosition: the block up to `pos`. Windows never calls
+    /// this for any of step 12's analyses, which is itself asserted.
+    extern "system" fn src_before(
+        _this: *mut c_void,
+        pos: u32,
+        text: *mut *const u16,
+        len: *mut u32,
+    ) -> HResult {
+        BEFORE.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the analyzer's two output slots.
+        unsafe {
+            if pos == 0 || pos > LEN.load(Ordering::Relaxed) {
+                *text = core::ptr::null();
+                *len = 0;
+            } else {
+                *text = TEXT.load(Ordering::Relaxed).cast_const();
+                *len = pos;
+            }
+        }
+        0
+    }
+
+    /// GetParagraphReadingDirection returns a DWRITE_READING_DIRECTION and
+    /// not an HRESULT: 0 is left to right.
+    extern "system" fn src_dir(_this: *mut c_void) -> u32 {
+        DIR.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+
+    extern "system" fn src_locale(
+        _this: *mut c_void,
+        _pos: u32,
+        len: *mut u32,
+        locale: *mut *const u16,
+    ) -> HResult {
+        LOC.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the analyzer's two output slots.
+        unsafe {
+            *len = LEN.load(Ordering::Relaxed);
+            *locale = LOCALE.as_ptr();
+        }
+        0
+    }
+
+    extern "system" fn src_subst(
+        _this: *mut c_void,
+        _pos: u32,
+        len: *mut u32,
+        subst: *mut *mut c_void,
+    ) -> HResult {
+        SUBST.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the analyzer's two output slots.
+        unsafe {
+            *len = LEN.load(Ordering::Relaxed);
+            *subst = core::ptr::null_mut();
+        }
+        0
+    }
+
+    extern "system" fn snk_script(
+        _this: *mut c_void,
+        pos: u32,
+        len: u32,
+        sa: *const ScriptAnalysis,
+    ) -> HResult {
+        SCRIPT_RUNS.fetch_add(1, Ordering::Relaxed);
+        SCRIPT_POS.store(pos, Ordering::Relaxed);
+        SCRIPT_LEN.store(len, Ordering::Relaxed);
+        // SAFETY: the analysis the analyzer hands us for the call's duration.
+        unsafe {
+            SCRIPT_ID.store(u32::from((*sa).script), Ordering::Relaxed);
+            SCRIPT_SHAPES.store((*sa).shapes, Ordering::Relaxed);
+        }
+        0
+    }
+
+    extern "system" fn snk_breaks(
+        _this: *mut c_void,
+        pos: u32,
+        len: u32,
+        bp: *const u8,
+    ) -> HResult {
+        BREAK_CALLS.fetch_add(1, Ordering::Relaxed);
+        BREAK_POS.store(pos, Ordering::Relaxed);
+        BREAK_LEN.store(len, Ordering::Relaxed);
+        for i in 0..len as usize {
+            if pos as usize + i >= BREAK.len() {
+                break;
+            }
+            // SAFETY: `len` breakpoints, one byte each, for this call.
+            let b = unsafe { *bp.add(i) };
+            BREAK[pos as usize + i].store(b, Ordering::Relaxed);
+        }
+        0
+    }
+
+    extern "system" fn snk_bidi(
+        _this: *mut c_void,
+        pos: u32,
+        len: u32,
+        explicit: u8,
+        resolved: u8,
+    ) -> HResult {
+        BIDI_RUNS.fetch_add(1, Ordering::Relaxed);
+        BIDI_POS.store(pos, Ordering::Relaxed);
+        BIDI_LEN.store(len, Ordering::Relaxed);
+        BIDI_EXPLICIT.store(u32::from(explicit), Ordering::Relaxed);
+        BIDI_RESOLVED.store(u32::from(resolved), Ordering::Relaxed);
+        0
+    }
+
+    extern "system" fn snk_subst(
+        _this: *mut c_void,
+        _pos: u32,
+        _len: u32,
+        _subst: *mut c_void,
+    ) -> HResult {
+        SUBST_RUNS.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+
+    static SOURCE_VTBL: VTable<8> = VTable([
+        src_qi as *const (),
+        add_ref as *const (),
+        release as *const (),
+        src_at as *const (),
+        src_before as *const (),
+        src_dir as *const (),
+        src_locale as *const (),
+        src_subst as *const (),
+    ]);
+
+    static SINK_VTBL: VTable<7> = VTable([
+        snk_qi as *const (),
+        add_ref as *const (),
+        release as *const (),
+        snk_script as *const (),
+        snk_breaks as *const (),
+        snk_bidi as *const (),
+        snk_subst as *const (),
+    ]);
+
+    static SOURCE: Obj = Obj(SOURCE_VTBL.0.as_ptr().cast());
+    static SINK: Obj = Obj(SINK_VTBL.0.as_ptr().cast());
+
+    pub fn source() -> *mut c_void {
+        (&raw const SOURCE).cast_mut().cast()
+    }
+
+    pub fn sink() -> *mut c_void {
+        (&raw const SINK).cast_mut().cast()
     }
 }
 
@@ -976,6 +1417,209 @@ fn tests() {
         }
         let release: GetU32 = method(interop, 2);
         release(interop);
+
+        // 12. Text analysis. Word's startup stops here without it: the
+        // DLL's ledger shows CreateTextAnalyzer refused 13 ms before the
+        // error box, so this step pins one analyzer's whole job on
+        // "Hello world 123" -- the object and its three revisions, what the
+        // four Analyze* methods report through a sink, how little of the
+        // source they read, and the glyphs and advances the two shaping
+        // calls give. Windows makes a fresh analyzer per call and answers
+        // IUnknown with a third pointer; gala has one static analyzer and
+        // answers IUnknown with itself, so what is insisted on here is only
+        // that both wrote a pointer that is not the factory.
+        let mut text_buf = [0u16; 64];
+        let text = w("Hello world 123", &mut text_buf);
+        let mut locale_buf = [0u16; 64];
+        let locale = w("en-us", &mut locale_buf);
+        const TEXT_LEN: u32 = 15;
+
+        let make_analyzer: GetPtr = method(factory, 21);
+        let mut analyzer: *mut c_void = core::ptr::null_mut();
+        check(
+            make_analyzer(factory, &mut analyzer) == 0
+                && !analyzer.is_null()
+                && analyzer != factory,
+            24,
+        );
+
+        let add_ref: GetU32 = method(analyzer, 1);
+        let release: GetU32 = method(analyzer, 2);
+        check(add_ref(analyzer) == 2 && release(analyzer) == 1, 25);
+
+        // One pointer, three revisions: there is no IDWriteTextAnalyzer3.
+        let analyzer_qi: extern "system" fn(*mut c_void, *const Iid, *mut *mut c_void) -> HResult =
+            method(analyzer, 0);
+        for iid in [IID_ANALYZER, IID_ANALYZER1, IID_ANALYZER2] {
+            let mut same: *mut c_void = core::ptr::null_mut();
+            check(analyzer_qi(analyzer, &iid, &mut same) == 0 && same == analyzer, 26);
+            let release: GetU32 = method(same, 2);
+            release(same);
+        }
+        let mut unknown: *mut c_void = core::ptr::null_mut();
+        check(analyzer_qi(analyzer, &IID_UNKNOWN, &mut unknown) == 0 && !unknown.is_null(), 27);
+        let release_unknown: GetU32 = method(unknown, 2);
+        release_unknown(unknown);
+        // Anything else is refused with the slot nulled, not left alone.
+        let mut none: *mut c_void = analyzer;
+        check(
+            analyzer_qi(analyzer, &IID_FACTORY, &mut none) == E_NOINTERFACE && none.is_null(),
+            28,
+        );
+
+        // One Latin script run over the whole string: script 49, shapes
+        // DEFAULT (0).
+        let analyze_script: Analyze = method(analyzer, 3);
+        analysis::arm(text, TEXT_LEN);
+        check(analyze_script(analyzer, analysis::source(), 0, TEXT_LEN, analysis::sink()) == 0, 29);
+        check(analysis::script() == [1, 0, TEXT_LEN, 49, 0], 29);
+        // The source is barely consulted: GetTextAtPosition once, at
+        // position 0, and the other four methods not at all.
+        check(analysis::source_calls() == [1, 0, 0, 0, 0, 0], 30);
+
+        // One bidi run, explicit and resolved level 0.
+        let analyze_bidi: Analyze = method(analyzer, 4);
+        analysis::arm(text, TEXT_LEN);
+        check(analyze_bidi(analyzer, analysis::source(), 0, TEXT_LEN, analysis::sink()) == 0, 31);
+        check(analysis::bidi() == [1, 0, TEXT_LEN, 0, 0], 31);
+
+        // Number substitution over a string with digits in it: S_OK and the
+        // sink never called at all. A silent success is the contract.
+        let analyze_subst: Analyze = method(analyzer, 5);
+        analysis::arm(text, TEXT_LEN);
+        check(analyze_subst(analyzer, analysis::source(), 0, TEXT_LEN, analysis::sink()) == 0, 32);
+        check(analysis::subst_runs() == 0, 32);
+
+        // One breakpoint call covering every character.
+        let analyze_breaks: Analyze = method(analyzer, 6);
+        analysis::arm(text, TEXT_LEN);
+        check(analyze_breaks(analyzer, analysis::source(), 0, TEXT_LEN, analysis::sink()) == 0, 33);
+        check(analysis::breaks() == [1, 0, TEXT_LEN], 33);
+        // Bits 0-1 are the condition before, 2-3 the condition after, 4 is
+        // isWhitespace; 2 may not break, 1 may. So a letter is 2/2, each
+        // space 2/1 with isWhitespace on the space itself, the character
+        // after a space 1/2, and the last character 2/1. Bits 5-7
+        // (isSoftHyphen and padding) were not measured, so they are masked
+        // off rather than guessed at.
+        let want = [10u8, 10, 10, 10, 10, 22, 9, 10, 10, 10, 10, 22, 9, 10, 6];
+        for (i, b) in want.iter().enumerate() {
+            check(analysis::break_at(i) & 0b1_1111 == *b, 34);
+        }
+
+        // GetGlyphs: 15 characters to 15 glyphs, the cluster map the
+        // identity.
+        let get_glyphs: GetGlyphs = method(analyzer, 7);
+        let sa = ScriptAnalysis { script: 49, shapes: 0 };
+        let mut clustermap = [0u16; 32];
+        let mut text_props = [0u16; 32];
+        let mut glyph_props = [0u16; 32];
+        let mut glyphs = [0u16; 32];
+        let mut count = 0u32;
+        check(
+            get_glyphs(
+                analyzer,
+                text,
+                TEXT_LEN,
+                face,
+                0,
+                0,
+                &sa,
+                locale,
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                32,
+                clustermap.as_mut_ptr(),
+                text_props.as_mut_ptr(),
+                glyphs.as_mut_ptr(),
+                glyph_props.as_mut_ptr(),
+                &mut count,
+            ) == 0
+                && count == TEXT_LEN,
+            35,
+        );
+        for i in 0..TEXT_LEN as usize {
+            check(clustermap[i] == i as u16, 35);
+            // Bit 4 isClusterStart, 5 isDiacritic, 6 isZeroWidthSpace.
+            check(glyph_props[i] & 0b111_0000 == 0b001_0000, 36);
+        }
+        // Both spaces are the one glyph the face itself gives for a space,
+        // so the mapping is the font's and not a table of our own.
+        let space = u32::from(b' ');
+        let mut space_glyph = 0u16;
+        check(
+            indices(face, &space, 1, &mut space_glyph) == 0
+                && glyphs[5] == space_glyph
+                && glyphs[11] == space_glyph,
+            36,
+        );
+        // Justification is bits 0-3: 2 for a letter, 4 for the space.
+        check(glyph_props[0] & 0b1111 == 2 && glyph_props[5] & 0b1111 == 4, 37);
+
+        // GetGlyphPlacements at em size 16: each advance is the glyph's own
+        // design advance scaled by the em size, which the face can be asked
+        // for, so the numbers hold whatever font is installed. Every offset
+        // is zero.
+        let get_placements: GetPlacements = method(analyzer, 8);
+        let mut advances = [0f32; 32];
+        let mut offsets = [[0f32; 2]; 32];
+        check(
+            get_placements(
+                analyzer,
+                text,
+                clustermap.as_ptr(),
+                text_props.as_mut_ptr(),
+                TEXT_LEN,
+                glyphs.as_ptr(),
+                glyph_props.as_ptr(),
+                count,
+                face,
+                16.0,
+                0,
+                0,
+                &sa,
+                locale,
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                advances.as_mut_ptr(),
+                offsets.as_mut_ptr(),
+            ) == 0,
+            38,
+        );
+        // A pixel's thousandth: the two routes to the quotient need not
+        // agree in the last bits for every design unit count.
+        const EPS: f32 = 1.0 / 1024.0;
+        for i in 0..TEXT_LEN as usize {
+            let mut gm = [0i32; 7];
+            check(glyph_metrics(face, &glyphs[i], 1, &mut gm, 0) == 0, 38);
+            let d = advances[i] - gm[1] as f32 * 16.0 / f32::from(metrics[0]);
+            check(d > -EPS && d < EPS, 38);
+            check(offsets[i][0] == 0.0 && offsets[i][1] == 0.0, 38);
+        }
+
+        // A zero-length range is S_OK with no runs at all.
+        analysis::arm(text, TEXT_LEN);
+        check(analyze_script(analyzer, analysis::source(), 0, 0, analysis::sink()) == 0, 39);
+        check(analysis::script()[0] == 0, 39);
+        // A NULL sink or source is E_INVALIDARG and not a fault. (Two edges
+        // are measured and not asserted, because a test cannot assert a
+        // crash: real DirectWrite faults on CreateTextAnalyzer(NULL) and on
+        // a position past the end of the source.)
+        check(
+            analyze_script(analyzer, analysis::source(), 0, TEXT_LEN, core::ptr::null_mut())
+                == E_INVALIDARG,
+            40,
+        );
+        check(
+            analyze_script(analyzer, core::ptr::null_mut(), 0, TEXT_LEN, analysis::sink())
+                == E_INVALIDARG,
+            40,
+        );
+
+        let release: GetU32 = method(analyzer, 2);
+        release(analyzer);
 
         // Release what we were given (each Release is slot 2).
         for o in

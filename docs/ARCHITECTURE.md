@@ -13115,6 +13115,32 @@ ID2D1SimplifiedGeometrySink in DIPs, y downward (winding, quadratics as
 cubic Béziers); the sink's owner closes it. Test: `dwrite_test` steps 8
 and 9.
 
+Text analysis (`analyze.rs`, IDWriteTextAnalyzer), the step Word's
+start-up stops without: one static analyzer (a text analyzer holds no
+state of its own) answering IDWriteTextAnalyzer, ...1 and ...2 as
+itself. The four Analyze* methods read the string through the caller's
+IDWriteTextAnalysisSource and report runs to its sink, as Windows does:
+AnalyzeScript itemizes into script runs (Latin 49, Arabic 3, Han 33,
+shapes DEFAULT), AnalyzeBidi into level runs, AnalyzeLineBreakpoints
+into a byte per character (the condition before it and the one after,
+whitespace flagged on the space itself), and AnalyzeNumberSubstitution
+succeeds without calling the sink at all, which is what Windows
+answers. GetGlyphs maps each character to the face's own glyph with an
+identity cluster map, GetGlyphPlacements scales each glyph's design
+advance by the em size and leaves every offset zero. A NULL source or
+sink is E_INVALIDARG; a zero-length range is S_OK with no runs. A
+refusal is not the option here that it is for a factory revision: a
+program refused a revision takes a fallback, while one refused its
+analyzer has none -- Word's boot ends 13 ms after the refusal with
+"something went wrong" (error 47) -- so what is not measured yet is
+answered as well as it can be and says so to the ledger. Two parts are
+that: AnalyzeBidi reports level 0 throughout, so an RTL run is itemized
+as if it ran left to right (resolving the levels is the bidi
+algorithm), and a hard line break is reported as a break that may
+happen rather than one that must. GetGdiCompatibleGlyphPlacements is
+refused, its numbers not being the ones measured. Test: `dwrite_test`
+step 12.
+
 ### Diagnosis
 
 Without disassembly (CLEAN_ROOM): Chromium's logs go to the serial log
@@ -13130,7 +13156,10 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
   compatible targets, effects or command lists ("Direct2D" lists them).
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
-  rotation, skew or sideways runs; no text layout. The later factory
+  rotation, skew or sideways runs; no text layout. Text analysis
+  itemizes every bidi run at level 0 and reports a hard line break as
+  one that may happen rather than one that must, and the
+  GDI-compatible glyph placements are refused. The later factory
   revisions are refused (none of their methods is implemented), and the
   GDI interop object answers for itself but implements none of its own
   ("DirectWrite").
