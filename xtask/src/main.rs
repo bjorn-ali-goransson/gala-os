@@ -10042,19 +10042,32 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // XmlLite's reader (user/xmllite_test): CreateXmlReader, an
-        // IStream of the program's own as the input, and the whole
-        // document node by node -- the declaration, white space, a
-        // comment, elements in a default and a prefixed namespace with
-        // their attributes (the namespace declarations among them),
-        // text, an empty element, CDATA, a processing instruction and
-        // end tags -- then end of file and a document that is not well
-        // formed. Word delay-loads CreateXmlReader and ends on
-        // 0xc06d007f without it (ROADMAP OF).
+        // XmlLite's reader and writer (user/xmllite_test). The
+        // reader: CreateXmlReader, an IStream of the program's own as
+        // the input, and the whole document node by node -- the
+        // declaration, white space, a comment, elements in a default
+        // and a prefixed namespace with their attributes (the namespace
+        // declarations among them), text, an empty element, CDATA, a
+        // processing instruction and end tags -- then end of file and a
+        // document that is not well formed. The writer: CreateXmlWriter
+        // and all 32 methods of IXmlWriter, twenty-six documents
+        // compared byte for byte with what Windows' own writer wrote,
+        // the properties, the namespaces it declares and the refusals
+        // that kill a writer among them. Word delay-loads both and ends
+        // on 0xc06d007f without them (ROADMAP OF).
         name: "xmllite_test",
         cmdline: "qemu_exit run=xmllite_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["xmllite_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "xmllite_test: ok",
+            // The writer on the stream: a document handed over, an
+            // interface it does not answer for, and an output that is
+            // no stream at all.
+            r#"ledger: {"service":"xmllite.dll!IXmlWriter hands its bytes over","what":"reached""#,
+            r#"ledger: {"service":"xmllite.dll!CreateXmlWriter(iid)","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlWriter::SetOutput(not a stream)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // The Windows Imaging Component (user/windowscodecs_test): the

@@ -47,8 +47,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, Guid, HResult, IID_ISEQUENTIAL_STREAM,
-    IID_ISTREAM, IID_IUNKNOWN, LEDGER_OTHER, LEDGER_UNSUPPORTED, Obj, S_OK, data1, free_box, guid,
-    not_implemented, put, record, text, try_box,
+    IID_ISTREAM, IID_IUNKNOWN, LEDGER_OTHER, LEDGER_REACHED, LEDGER_UNSUPPORTED, Obj, S_OK, data1,
+    free_box, guid, not_implemented, put, record, text, try_box,
 };
 
 /// `IXmlWriter` (xmllite.idl).
@@ -621,11 +621,16 @@ impl Writer {
                 core::mem::transmute(*vtable.add(4));
             f(self.out, self.buf.as_ptr(), self.buf.len() as u32, &mut wrote)
         };
+        let handed = self.buf.len() as u64;
         self.buf.clear();
         if hr < 0 {
             record(b"IXmlWriter::Flush(stream write)", LEDGER_OTHER, hr as u32 as u64);
             return hr;
         }
+        // Not a gap: what a program actually got out of the writer, so a
+        // run that ends elsewhere still says a document was written and
+        // how long it was.
+        record(b"IXmlWriter hands its bytes over", LEDGER_REACHED, handed);
         if self.committable {
             // SAFETY: slot 8 is IStream::Commit, which the output
             // answered QueryInterface for.
@@ -1325,6 +1330,10 @@ pub extern "system" fn CreateXmlWriter(riid: *const Guid, out: *mut Obj, malloc:
     match try_box(Writer::new()) {
         Some(p) => {
             put(out, p.cast());
+            // Not a gap: a writer was made. Without this row a run says
+            // nothing about a program that asked for one and then wrote
+            // nothing, which is the shape a failure here takes.
+            record(b"CreateXmlWriter", LEDGER_REACHED, 0);
             S_OK
         }
         None => E_OUTOFMEMORY,

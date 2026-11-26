@@ -74,6 +74,9 @@ pub const E_OUTOFMEMORY: HResult = 0x8007_000eu32 as i32;
 pub const LEDGER_UNSUPPORTED: u32 = 2;
 pub const LEDGER_NOT_IMPLEMENTED: u32 = 3;
 pub const LEDGER_OTHER: u32 = 5;
+/// Not a gap: the first call that reached something gala answers,
+/// recorded so a run says a program got here at all.
+pub const LEDGER_REACHED: u32 = 9;
 
 /// What every ledger line of this DLL starts with.
 const PREFIX: &str = "xmllite.dll!";
