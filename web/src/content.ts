@@ -71,7 +71,7 @@ export const componentGroups: ComponentGroup[] = [
         name: "Files and disk",
         path: "kernel/src/fs, kernel/src/disk",
         status: "works",
-        what: "C: as a case-insensitive file system with Windows' share modes, kept on a virtio disk as a log that is replayed at the next boot, written back lazily.",
+        what: "C: as a case-insensitive file system with Windows' share modes, kept on a virtio, NVMe or AHCI disk as a log that is replayed at the next boot, written back lazily.",
       },
       {
         name: "Networking",

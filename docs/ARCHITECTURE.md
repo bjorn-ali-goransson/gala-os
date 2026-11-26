@@ -8287,7 +8287,7 @@ expects.
 
 ## Disk
 
-A virtio-blk disk, and with the boot option `persist` C: on it: the
+A disk (virtio-blk, NVMe or AHCI), and with the boot option `persist` C: on it: the
 changes to C: and to the registry kept across reboots, and files'
 contents in the disk's data area rather than in memory. Four layers
 (D1-D3 named in docs/SECURITY.md): the device (D1), C: kept as a change
@@ -8306,8 +8306,56 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   which implies any layout); one queue with one slot of 64 KiB
   of data. A request is the 16-byte header (type IN/OUT/FLUSH, sector),
   the data and a status byte.
+- **The controller** (`disk::Backend`): `disk::init` takes the first
+  found of a virtio-blk function, an NVMe controller and an AHCI
+  controller with an ATA disk, and logs it (`disk: <kind> at <PCI
+  address> ...`: model, serial, firmware, sectors, MiB; NVMe also its
+  version, write cache and bytes per command). A controller that is
+  found but not usable says why (`disk: NVMe at ...: not usable: ...`)
+  and the next kind is tried. The AHCI and NVMe drivers need the
+  calibrated clock for the specifications' timeouts (without it they are
+  not looked for, logged). Both are generic over `disk::hw::Platform`
+  (32-bit register access, DMA memory, a clock; the kernel's is
+  `KernelPlatform` over `arch::mmio::Mmio` and `arch::dma::DmaRegion`,
+  which fences before every register write so a doorbell follows the
+  memory it announces), and their host unit tests run them against
+  models of the controllers that assert the specifications' order of
+  operations.
+- `disk::nvme` (NVM Express Base and NVM Command Set specifications):
+  class 01/08 prog-if 02, BAR0 (0x2000 bytes: the registers and two
+  queue pairs' doorbells; a CAP.DSTRD that puts them further is
+  refused). Setup: CC.EN = 0 and CSTS.RDY = 0 within CAP.TO (whatever a
+  firmware or a previous kernel left running stops here), an admin
+  queue pair of up to 8 entries, enable, Identify Controller and
+  Identify Namespace 1, Set Features (one I/O queue pair), Create I/O
+  Completion Queue (contiguous, no interrupts) and Submission Queue. Only
+  4 KiB pages (CAP.MPSMIN 0), 512-byte blocks without metadata (another
+  LBA format is refused with what it is), namespace 1. I/O: Read, Write
+  and Flush (only with a volatile write cache, VWC) on namespace 1, the
+  data in one 64 KiB buffer described by PRP1, PRP2 or a PRP list
+  (`nvme::prps`); the transfer is the smaller of 64 KiB and MDTS. A
+  completion is found by its phase tag; an error status is logged with
+  its type, code and the specification's name for it, and fails that
+  request only.
+- `disk::ahci` (Serial ATA AHCI 1.3.1, ATA/ATAPI Command Set): class
+  01/06 prog-if 01, ABAR (BAR5). Setup: GHC.AE, the BIOS/OS handoff when
+  the HBA offers it (CAP2.BOH), then the first implemented port with a
+  device present (PxSSTS.DET 3) and an ATA signature (or none yet) whose
+  IDENTIFY DEVICE answers: its engine stopped (ST then CR, FRE then FR,
+  500 ms each; an HBA reset if it will not stop), the command list and
+  received-FIS area given, FIS receive on, a COMRESET if the device does
+  not come ready (FIS receive is on before it, or the device's first
+  register FIS that clears BSY is never received), then ST. Ports with
+  an ATAPI or other signature (the CD) are left alone, and the HBA is
+  not reset at setup. LBA48 is required; only 512-byte logical sectors.
+  I/O: READ/WRITE DMA EXT and FLUSH CACHE EXT in command slot 0, one
+  PRDT entry for a 64 KiB buffer; memory above 4 GiB is refused without
+  CAP.S64A. A failed command (PxIS.TFES) is logged with the task file's
+  status and error and the port recovered as section 6.2.2.1 says (stop,
+  clear, COMRESET if still busy, start).
 - `disk` (the kernel's API, independent of NT): `read`/`write` of whole
-  512-byte sectors (split into 64 KiB requests), `flush`, `sectors`.
+  512-byte sectors (split into requests of the controller's largest
+  transfer), `flush`, `sectors`.
   One request is on the device at a time: a caller takes the turn (an
   atomic flag; others yield), posts under the device's `IrqMutex`, then
   polls for completion with the lock dropped between polls and yields,
@@ -8346,8 +8394,11 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   Other IOCTLs are recorded.
 - Tests: `disk_test` (as SYSTEM) on a 16 MiB image xtask creates for it
   (`DISK_SCENARIOS`: size, what to write into the fresh image, what the
-  image must hold after the run, checked on the host); host unit tests
-  for the IOCTL outputs and sector checks.
+  image must hold after the run, checked on the host), and the same on
+  AHCI and NVMe (`disk_test_ahci`, `disk_test_nvme`; xtask's
+  `DISK_CONTROLLERS` puts a scenario's disk on another controller);
+  `persist_nvme` keeps C: on an NVMe disk across a reboot; host unit
+  tests for the IOCTL outputs, sector checks and both drivers.
 - **Partition tables** (`nt::gpt`, pure and host-tested; ROADMAP IN
   step 1): the UEFI specification's GPT (protective MBR, primary header
   and 128-entry array at LBA 1-33, backup array and header at the end,
@@ -8379,7 +8430,15 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   partitions are `\Device\HarddiskVolume<N>` with these names as links,
   and an open handle keeps the range it was opened with across a new
   table.
-- TODO: device interrupts, more than one request in flight.
+- Limits: no device interrupts and one request in flight (one command
+  slot, one I/O queue entry in use); one disk (the first controller
+  found, and on it the first AHCI port or NVMe namespace 1); 512-byte
+  sectors only (a 4Kn disk is refused, logged); no ATAPI, port
+  multipliers or hot plug; a handover does not quiesce the controller
+  (the next kernel stops it before reprogramming it, which a DMA still
+  in flight into the old kernel's memory would precede).
+- TODO: device interrupts, more than one request in flight, more than
+  one disk.
 
 ### Installing gala onto a disk
 
@@ -17969,6 +18028,17 @@ New code follows them; old code is brought in line (ROADMAP R1).
      place (`ModernDevice::reinit`: a second device value would reset it
      again when dropped) and posts the request again, up to 3 times
      (scenario `disk_reset`).
+   - NVMe: a fatal status (CSTS.CFS), a controller disabled under the
+     driver (CSTS.RDY or CC.EN 0, as `diskreset=` does) or a command
+     not completed in 30 s sets the controller up again (disable,
+     admin queues, the I/O queue pair; Identify is not repeated) and the
+     request is submitted again (`disk_reset_nvme`).
+   - AHCI: an HBA reset (GHC.AE 0), a stopped engine or lost command
+     list (an HBA reset under the driver, as `diskreset=` does with
+     GHC.HR), a fatal port error, a failed error recovery or a command
+     not finished in 30 s sets the port up again (AHCI mode, engine
+     stopped, COMRESET, engine started) and the command is issued again
+     (`disk_reset_ahci`).
    - virtio-net: before receiving or sending it checks the device and
      sets it up again in place (new queues, every receive buffer posted
      again); frames in flight are lost and TCP sends them again

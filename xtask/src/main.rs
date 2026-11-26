@@ -8885,6 +8885,47 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // HW step 1: disk_test on an ATA disk behind an AHCI controller
+        // (DISK_CONTROLLERS), the kernel's AHCI driver.
+        name: "disk_test_ahci",
+        cmdline: "qemu_exit as=system run=disk_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["disk: AHCI at ", "disk_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // disk_reset on AHCI: an HBA reset (GHC.HR) under the driver.
+        name: "disk_reset_ahci",
+        cmdline: "qemu_exit diskreset=3 as=system run=disk_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "disk: AHCI at ",
+            "disk: the device was reset or gave up; setting it up again",
+            "disk_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // HW step 1: disk_test on namespace 1 of an NVMe controller
+        // (DISK_CONTROLLERS), the kernel's NVMe driver.
+        name: "disk_test_nvme",
+        cmdline: "qemu_exit as=system run=disk_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["disk: NVMe at ", "disk_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // disk_reset on NVMe: the controller disabled (CC.EN = 0) under
+        // the driver.
+        name: "disk_reset_nvme",
+        cmdline: "qemu_exit diskreset=3 as=system run=disk_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "disk: NVMe at ",
+            "disk: the device was reset or gave up; setting it up again",
+            "disk_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // R4: the crash record kept across reboots (DISK_SCENARIOS: the
         // first boot panics on purpose and leaves it; this one prints and
         // clears it, then runs normally).
@@ -8950,6 +8991,14 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit persist run=persist_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["persist_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // persist_test with C: on an NVMe disk (DISK_CONTROLLERS): the
+        // volume, its flushes and a reboot through the NVMe driver.
+        name: "persist_nvme",
+        cmdline: "qemu_exit persist run=persist_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["disk: NVMe at ", "persist_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // IN step 2: C: kept in a partition. persist_test's two boots on a
@@ -14966,6 +15015,11 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("gala_cli", "gala_cli_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
+    ("disk_test_ahci", "disk_test"),
+    ("disk_reset_ahci", "disk_test"),
+    ("disk_test_nvme", "disk_test"),
+    ("disk_reset_nvme", "disk_test"),
+    ("persist_nvme", "persist_test"),
     ("runas_declined", "runas_test"),
     ("reparse_test_user", "reparse_test"),
     ("handover_disk", "persist_test"),
@@ -17220,7 +17274,7 @@ fn run_vm_once(
         add_card(&mut cmd);
     }
     if let Some(disk) = disk {
-        add_disk(&mut cmd, disk);
+        add_disk(&mut cmd, disk, disk_controller(iso_scenario(iso)));
     }
     if GPU_SCENARIOS.contains(&iso_scenario(iso)) {
         add_gpu(&mut cmd);
@@ -21797,19 +21851,51 @@ fn add_gpu(cmd: &mut Command) {
 }
 
 /// A virtio-blk disk backed by the raw image `path`.
-fn add_disk(cmd: &mut Command, path: &Path) {
+/// The controller a scenario's disk is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Controller {
+    VirtioBlk,
+    /// An ATA disk on a second AHCI controller (q35's own, at 00:1f.2,
+    /// has the CD).
+    Ahci,
+    Nvme,
+}
+
+/// Scenarios whose disk is not on virtio-blk (the kernel's AHCI and NVMe
+/// drivers, ROADMAP HW step 1).
+const DISK_CONTROLLERS: &[(&str, Controller)] = &[
+    ("disk_test_ahci", Controller::Ahci),
+    ("disk_reset_ahci", Controller::Ahci),
+    ("disk_test_nvme", Controller::Nvme),
+    ("disk_reset_nvme", Controller::Nvme),
+    ("persist_nvme", Controller::Nvme),
+];
+
+fn disk_controller(scenario: &str) -> Controller {
+    DISK_CONTROLLERS
+        .iter()
+        .find(|(name, _)| *name == scenario)
+        .map_or(Controller::VirtioBlk, |(_, c)| *c)
+}
+
+fn add_disk(cmd: &mut Command, path: &Path, controller: Controller) {
     // A run resumed from a machine snapshot has a qcow2 layer of its own
     // over the snapshot's disk (snapshot.rs); the rest are raw images.
     let format = if path.extension().is_some_and(|e| e == "qcow2") { "qcow2" } else { "raw" };
     // A host error (the host's disk full under a sparse image) reaches the
     // guest as a failed request, which it logs, rather than pausing the VM
     // (QEMU's default for ENOSPC) until the scenario times out.
-    cmd.arg("-drive")
-        .arg(format!(
-            "if=none,id=d0,format={format},werror=report,rerror=report,file={}",
-            path.display()
-        ))
-        .args(["-device", "virtio-blk-pci,drive=d0"]);
+    cmd.arg("-drive").arg(format!(
+        "if=none,id=d0,format={format},werror=report,rerror=report,file={}",
+        path.display()
+    ));
+    match controller {
+        Controller::VirtioBlk => cmd.args(["-device", "virtio-blk-pci,drive=d0"]),
+        Controller::Ahci => {
+            cmd.args(["-device", "ahci,id=ahci", "-device", "ide-hd,drive=d0,bus=ahci.0"])
+        }
+        Controller::Nvme => cmd.args(["-device", "nvme,serial=gala0,drive=d0"]),
+    };
 }
 
 /// A scenario that gets a disk.
@@ -21882,6 +21968,55 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         setup: disk_test_setup,
         check: disk_test_check,
         earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "disk_test_ahci",
+        size: 16 << 20,
+        host_mib: None,
+        setup: disk_test_setup,
+        check: disk_test_check,
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "disk_reset_ahci",
+        size: 16 << 20,
+        host_mib: None,
+        setup: disk_test_setup,
+        check: disk_test_check,
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "disk_test_nvme",
+        size: 16 << 20,
+        host_mib: None,
+        setup: disk_test_setup,
+        check: disk_test_check,
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "disk_reset_nvme",
+        size: 16 << 20,
+        host_mib: None,
+        setup: disk_test_setup,
+        check: disk_test_check,
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "persist_nvme",
+        size: 32 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&[
+            "disk: NVMe at ",
+            "persist_test: first boot",
+            "exited with status 0x00000000",
+        ]],
         earlier_fail: false,
     },
     DiskScenario {

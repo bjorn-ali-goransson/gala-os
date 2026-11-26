@@ -494,7 +494,7 @@ xtask that change how a scenario boots:
 | `NET_SCENARIOS` | a network card and a host-side client ("Network tests") |
 | `HOST_PAGE_SCENARIOS` | a network card whose 10.0.2.100:80 is a page served from the host (`xtask serve-page`; "Network tests") |
 | `CARD_SCENARIOS` | a network card and nothing connecting to it (the driver's set-up alone: `arm_boot`) |
-| `DISK_SCENARIOS` | a virtio-blk disk, sparse, with the most it may take on the host ("Disk tests") |
+| `DISK_SCENARIOS` | a disk, sparse, with the most it may take on the host; on virtio-blk unless `DISK_CONTROLLERS` names AHCI or NVMe ("Disk tests") |
 | `GPU_SCENARIOS` | a virtio-gpu screen ("GPU tests") |
 | `NO_I8042_SCENARIOS` | `-machine q35,i8042=off`: no PS/2 controller at all, as on a machine whose keyboard and mouse are USB alone (`no_i8042`) |
 | `SCREEN_SCENARIOS` | pixel checks through the QEMU monitor ("Screenshots") |
@@ -778,8 +778,13 @@ what it may take on the host, what xtask writes into the fresh raw
 image, what the image must hold afterwards).
 
 - The image is `target/.../<scenario>.disk.img` next to the ISO,
-  attached as a virtio-blk device; such scenarios boot alone and
-  not in gala-um.
+  attached as a virtio-blk device, or on the controller
+  `DISK_CONTROLLERS` names for the scenario (AHCI: a second `ahci`
+  controller with an `ide-hd`, since q35's own has the CD; NVMe:
+  `nvme,serial=gala0`); such scenarios boot alone and not in gala-um.
+  A driver change runs the scenarios of each controller
+  (`disk_test,disk_test_ahci,disk_test_nvme`, their `disk_reset*`, and
+  `persist_test,persist_nvme`).
 - Raw disk access needs an administrator, so their programs run
   `as=system`.
 - `earlier_boots` boots the same image first (each with the lines its
@@ -5852,7 +5857,7 @@ ARCHITECTURE "Waits".
 | Linux personality (exec, system calls, mmap/brk, ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
 | Linux ABI data (signal frames, sigsets, termios, struct layouts) | `kernel/lx_abi/` |
 | Ramfs, boot-module tar trees | `kernel/src/fs/` |
-| Disk (virtio-blk) | `kernel/src/disk/` |
+| Disk (virtio-blk, NVMe, AHCI; `hw.rs` the drivers' platform and host fakes) | `kernel/src/disk/` |
 | Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |
 | Kernel handover record | `kernel/src/handover/` |
 | gala-um's platform | `kernel/src/hosted/`, `um/` |
