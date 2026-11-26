@@ -12068,7 +12068,15 @@ stations and desktops a program creates are refused until stage 3).
   `Version`, `LicenseStatus` -- is SL_E_VALUE_NOT_FOUND, as is an
   unknown SKU, while a NULL handle, SKU, value name or required output
   is E_INVALIDARG before the SKU is looked up and the data type stays
-  optional). Invariants and limits: no product key is ever installed
+  optional). A handle no SLOpen gave -- never opened, or closed -- is
+  RPC_NT_SS_CONTEXT_MISMATCH from every call that takes one, never
+  E_INVALIDARG, which is a NULL handle or a NULL required argument; the
+  arguments are looked at first. Windows' handles are RPC context
+  handles, so that is what its sppc.dll answers (measured for each of
+  the seventeen calls gala exports that take one), and Office's
+  licensing reads the two apart, where gala answered E_INVALIDARG for
+  both until this was measured. Invariants and limits: no product key
+  is ever installed
   (SLInstallProofOfPurchase is SL_E_INVALID_PRODUCT_KEY: product keys
   are not decoded against a license's key configuration; the product-key
   queries, SLGetPKeyId and SLGetPKeyInformation among them,
@@ -12077,13 +12085,19 @@ stations and desktops a program creates are refused until stage 3).
   a NULL handle, algorithm, key string or output), so no right is
   granted
   (SLConsumeRight SL_E_RIGHT_NOT_GRANTED), every SKU is unlicensed in
-  SLGetLicensingStatusInformation (reason SL_E_PKEY_NOT_INSTALLED), no
+  SLGetLicensingStatusInformation (reason SL_E_PKEY_NOT_INSTALLED,
+  while a SKU the store does not hold is
+  SL_E_PRODUCT_SKU_NOT_INSTALLED -- 0xC004F015, measured; gala answered
+  0xC004F069, which the same header calls SL_E_MISMATCHED_PRODUCT_SKU,
+  an answer no caller here means -- and an application id is required,
+  as Windows requires one, so a NULL one is E_INVALIDARG before any
+  store is read), no
   policy can be read (SLGetPolicyInformation and
   SLGetPolicyInformationDWORD SL_E_RIGHT_NOT_GRANTED, which is what
   Windows answers for any value name on a handle that consumed no right
-  -- measured, with E_INVALIDARG for what is not a handle, a NULL
-  required output or a NULL value name, which both forms look at before
-  the right)
+  -- measured, with E_INVALIDARG for a NULL handle, a NULL required
+  output or a NULL value name, which both forms look at before the
+  right)
   and SLPersistApplicationPolicies has nothing to keep (S_OK), which
   leaves the fast policy path with nothing to load:
   SLLoadApplicationPolicies is SL_E_APPLICATION_POLICIES_MISSING and
@@ -12093,18 +12107,33 @@ stations and desktops a program creates are refused until stage 3).
   check in: a NULL context, value name or required output is
   E_INVALIDARG before the context is looked up, while
   SLGetApplicationPolicy's data type stays optional;
-  SLPersistRTSPayloadOverride, undocumented, is E_NOTIMPL. No plugin
-  can be registered, there being no service to register one with:
+  SLPersistRTSPayloadOverride, undocumented, is E_NOTIMPL. Nothing is
+  activated offline, there being no product key to derive an
+  installation id from: SLGenerateOfflineInstallationId answers
+  SL_E_VALUE_NOT_FOUND for a SKU the store does not hold and
+  SL_E_PKEY_NOT_INSTALLED for one it holds,
+  SLDepositOfflineConfirmationId SL_E_PRODUCT_SKU_NOT_INSTALLED and
+  SL_E_PKEY_NOT_INSTALLED -- the two differ on the unknown SKU,
+  measured, and the deposit answers the SKU before it looks at the
+  identifier strings at all, empty ones included -- and no output is
+  ever written. Neither reads those strings, so no SL_E_CIDIID_* code
+  is used: gala will not claim it checked their digits. The Ex forms,
+  which take an SL_ACTIVATION_INFO_HEADER, take it only as a NULL
+  pointer: any header, the default one included, is E_INVALIDARG, which
+  is what Windows answers while no key is installed. What Windows
+  answers for a SKU its store does hold is not measured, which would
+  mean generating an installation id from this machine's product key.
+  Word's licensing asks for the first of the four by name once the
+  plugin pair answers. No plugin can be registered, there being no
+  service to register one with:
   SLRegisterPlugin and SLUnregisterPlugin, which no public header
   declares and Office's licensing reaches through a delay load, answer
   SL_E_LUA_ACCESSDENIED once their pointers and handle are good -- what
   Windows answers a caller that is not elevated, which Office is not --
   with E_INVALIDARG for a NULL handle or a NULL pointer, the pointers
-  looked at first, and RPC_NT_SS_CONTEXT_MISMATCH for a handle that is
-  not one, Windows' handles being RPC context handles (measured by
-  calling the exports: nothing past the third argument of the one or
-  the second of the other changes an answer, and what the plugin
-  pointer points at is never looked into). The name missing was what
+  looked at first (measured by calling the exports: nothing past the
+  third argument of the one or the second of the other changes an
+  answer, and what the plugin pointer points at is never looked into). The name missing was what
   stopped Word: a delay load that resolves to nothing is
   ERROR_PROC_NOT_FOUND, the 0x8007007F
   Office.Licensing.FullValidation reported before Word's "(6)" box. XrML
@@ -12134,7 +12163,7 @@ stations and desktops a program creates are refused until stage 3).
   name in
   `user/slc/exports.txt`, which build.rs turns into
   `/EXPORT:<name>=sppc.<name>` for the 31, so a license, SKU or policy
-  asked of slc is answered from the store sppc keeps; the 18 of them
+  asked of slc is answered from the store sppc keeps; the 11 of them
   sppc does not implement resolve to nothing, as an absent export does,
   and start working when sppc has the function. Of the 9:
   SLGetWindowsInformation and SLGetWindowsInformationDWORD answer
