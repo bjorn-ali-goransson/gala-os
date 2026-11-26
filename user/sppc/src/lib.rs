@@ -149,6 +149,8 @@ const E_OUTOFMEMORY: i32 = 0x8007_000e_u32 as i32;
 const E_NOTIMPL: i32 = 0x8000_4001_u32 as i32;
 /// HRESULT_FROM_WIN32(ERROR_INVALID_DATA): a blob that is not a license.
 const E_INVALID_DATA: i32 = 0x8007_000d_u32 as i32;
+/// ERROR_BUFFER_OVERFLOW as an HRESULT: a count sppc will not read that far.
+const E_BUFFER_OVERFLOW: i32 = 0x8007_006f_u32 as i32;
 /// slerror.h and the documented Software Licensing error codes.
 const SL_E_LICENSE_FILE_NOT_INSTALLED: i32 = 0xc004_f011_u32 as i32;
 const SL_E_VALUE_NOT_FOUND: i32 = 0xc004_f012_u32 as i32;
@@ -1408,6 +1410,70 @@ pub extern "system" fn SLUnregisterPlugin(handle: usize, plugin: *const u8) -> i
         return hr;
     }
     record(F, "no plugin is registered", SL_E_LUA_ACCESSDENIED)
+}
+
+/// SLSetAuthenticationData(hSLC, cbData, pbData): the authentication
+/// data Office's licensing deposits before it validates. No public
+/// header declares it, so what it takes and answers was measured by
+/// calling Windows' own export (build 26100) from an unelevated
+/// process -- the privilege Office's licensing runs at -- never by
+/// reading its code. Each case below is one line of that measurement:
+///
+/// - a NULL handle is E_INVALIDARG, whatever the other two are, and it
+///   is the first thing looked at;
+/// - a count above 1024 is ERROR_BUFFER_OVERFLOW, and that is decided
+///   before either the buffer or the handle: 2048 bytes through a
+///   handle that was never opened is ERROR_BUFFER_OVERFLOW, not the
+///   context mismatch that handle earns with a count of 32. 1024
+///   itself is read, 1025 is not, so the bound is a 1 KiB blob;
+/// - a count that is not zero with a NULL buffer is E_INVALIDARG,
+///   again before the handle;
+/// - a handle that is not one (never opened, or closed), past those
+///   two, is RPC_NT_SS_CONTEXT_MISMATCH, from the RPC context handle
+///   sppsvc keeps;
+/// - a count of zero is S_OK, and the buffer is not read at all: a
+///   count of zero with a reserved, unreadable page answers S_OK while
+///   a count of 32 with that same page faults in the caller, so sppc
+///   reads the blob in the caller's context without a probe;
+/// - a blob of 1 to 1024 bytes of filler is ERROR_INVALID_DATA: the
+///   call is not gated on elevation, it reads the bytes and the
+///   service refuses them.
+///
+/// What gala answers for a blob it cannot refuse on those grounds is
+/// S_OK, and that is a choice rather than a measurement, because the
+/// host's service decides it from the blob's contents and gala has no
+/// Software Protection service to decide anything. It is the honest
+/// answer here for a reason the export table gives: there is no
+/// SLGetAuthenticationData on Windows (measured: the name does not
+/// resolve), and no other sppc call reads the data back, so a blob
+/// gala accepts and drops leaves no state any caller can observe to be
+/// wrong. A refusal, by contrast, would be gala inventing a verdict on
+/// bytes it never looked at.
+///
+/// The name missing is what Word reached next: the licensing stack
+/// delay-loads it, a delay load that resolves to nothing is
+/// ERROR_PROC_NOT_FOUND (0x8007007F), and that is the HRESULT
+/// Office.Licensing.FullValidation reported with no licenses at all in
+/// `Data.Licenses` (ROADMAP OF), the same shape as SLRegisterPlugin
+/// before it.
+#[unsafe(no_mangle)]
+pub extern "system" fn SLSetAuthenticationData(handle: usize, cb: u32, data: *const u8) -> i32 {
+    const F: &str = "SLSetAuthenticationData";
+    if handle == 0 {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if cb > 1024 {
+        return record(F, "more data than sppc reads", E_BUFFER_OVERFLOW);
+    }
+    if cb != 0 && data.is_null() {
+        return record(F, "invalid argument", E_INVALIDARG);
+    }
+    if !valid(handle) {
+        return record(F, "not a handle", RPC_NT_SS_CONTEXT_MISMATCH);
+    }
+    // Nothing reads the data back: there is no SLGetAuthenticationData,
+    // so there is no state to keep and none to be wrong about.
+    record(F, "no service to authenticate to", S_OK)
 }
 
 /// DllMain (the entry point our link flags name).

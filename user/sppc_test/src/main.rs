@@ -38,6 +38,19 @@
 //!   pointer, the pointers first, and RPC_NT_SS_CONTEXT_MISMATCH for a
 //!   handle that is not one, their handles being RPC context handles.
 //!
+//! - authentication data is set but never read back:
+//!   SLSetAuthenticationData, which no public header declares and
+//!   which has no getter beside it, takes a count and a buffer and
+//!   answers S_OK for a count of zero, ERROR_BUFFER_OVERFLOW above
+//!   1024 bytes (before it looks at either the buffer or the handle)
+//!   and E_INVALIDARG for a count with no buffer (also before the
+//!   handle). Windows reads a blob of 1 to 1024 bytes and its service
+//!   refuses filler with ERROR_INVALID_DATA; gala has no such service
+//!   and accepts what it cannot refuse, so that one case is the only
+//!   answer the two do not share and this test does not pin it to a
+//!   code (measured on Windows 11 24H2, build 26100, as the standard
+//!   user Office runs as).
+//!
 //! - and that last answer is every call's: a handle no SLOpen gave,
 //!   never opened or closed, is RPC_NT_SS_CONTEXT_MISMATCH from each
 //!   call that takes one, the arguments looked at first, while a NULL
@@ -216,6 +229,7 @@ unsafe extern "system" {
     ) -> i32;
     fn SLRegisterPlugin(h: Handle, plugin: *const u8, out: *mut u8) -> i32;
     fn SLUnregisterPlugin(h: Handle, plugin: *const u8) -> i32;
+    fn SLSetAuthenticationData(h: Handle, cb: u32, data: *const u8) -> i32;
     fn SLConsumeRight(
         h: Handle,
         app: *const Guid,
@@ -248,6 +262,10 @@ unsafe extern "system" {
 
 const S_OK: i32 = 0;
 const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+/// ERROR_INVALID_DATA as an HRESULT: the service read the blob and refused it.
+const E_INVALID_DATA: i32 = 0x8007_000du32 as i32;
+/// ERROR_BUFFER_OVERFLOW as an HRESULT: a count sppc will not read that far.
+const E_BUFFER_OVERFLOW: i32 = 0x8007_006fu32 as i32;
 /// SL_E_VALUE_NOT_FOUND.
 const SL_E_VALUE_NOT_FOUND: i32 = 0xc004_f012u32 as i32;
 /// SL_E_RIGHT_NOT_GRANTED.
@@ -821,6 +839,49 @@ fn run() -> Result<(), u32> {
     // SAFETY: not a handle; our name.
     let hr = unsafe { SLUnregisterPlugin(1, plugin) };
     c.code(b"unregister a plugin on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+
+    // The authentication data Office's licensing deposits, which no
+    // public header declares either (sppc's SLSetAuthenticationData
+    // records what was measured of it). The order the three arguments
+    // are looked at in is the whole of what gala promises: a count
+    // above 1024 is refused before the buffer and before the handle,
+    // and a count with no buffer before the handle.
+    let blob = [0x5au8; 64];
+    let data = blob.as_ptr();
+    // SAFETY: our handle; no data, which is not read.
+    let hr = unsafe { SLSetAuthenticationData(h, 0, null()) };
+    c.code(b"authentication data of no length", hr, S_OK)?;
+    // SAFETY: our handle and buffer; a length of zero, so it is not read.
+    let hr = unsafe { SLSetAuthenticationData(h, 0, data) };
+    c.code(b"a buffer no length reads", hr, S_OK)?;
+    // SAFETY: our handle; a length with no buffer.
+    let hr = unsafe { SLSetAuthenticationData(h, 64, null()) };
+    c.code(b"authentication data with no buffer", hr, E_INVALIDARG)?;
+    // SAFETY: not a handle; a length with no buffer, which is looked at
+    // first, so this is not the context mismatch the handle would earn.
+    let hr = unsafe { SLSetAuthenticationData(STALE, 64, null()) };
+    c.code(b"no buffer on what is not a handle", hr, E_INVALIDARG)?;
+    // SAFETY: our handle and buffer; a length past what sppc reads.
+    let hr = unsafe { SLSetAuthenticationData(h, 1025, data) };
+    c.code(b"more authentication data than sppc reads", hr, E_BUFFER_OVERFLOW)?;
+    // SAFETY: not a handle; our buffer; a length past what sppc reads,
+    // which is looked at before the handle.
+    let hr = unsafe { SLSetAuthenticationData(STALE, 1025, data) };
+    c.code(b"too much data on what is not a handle", hr, E_BUFFER_OVERFLOW)?;
+    // SAFETY: our buffer; a NULL handle, which is looked at first of all.
+    let hr = unsafe { SLSetAuthenticationData(0, 1025, data) };
+    c.code(b"authentication data on a NULL handle", hr, E_INVALIDARG)?;
+    // SAFETY: not a handle; our buffer and a length it reads.
+    let hr = unsafe { SLSetAuthenticationData(STALE, 64, data) };
+    c.code(b"authentication data on what is not a handle", hr, RPC_NT_SS_CONTEXT_MISMATCH)?;
+    // The one case Windows and gala answer differently: Windows reads
+    // the blob and its service refuses filler, gala has no service and
+    // keeps nothing, so only the success or failure is checked and not
+    // the code. 1024 is read and 1025 is not, so this is the last
+    // length that gets this far.
+    // SAFETY: our handle and buffer, whose length sppc reads.
+    let hr = unsafe { SLSetAuthenticationData(h, 1024, data) };
+    c.ok(hr == S_OK || hr == E_INVALID_DATA, hr as u32 as u64)?;
 
     round_trip(&mut c, h)?;
 
