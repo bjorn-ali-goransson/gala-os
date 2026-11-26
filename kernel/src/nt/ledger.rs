@@ -508,6 +508,36 @@ fn plain_text(name: &[u8]) -> bool {
     name.iter().all(|&b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\')
 }
 
+/// A name no row can carry, as the log says it: printable ASCII as
+/// itself, the two characters a JSON string could not carry escaped,
+/// and every other byte as `\xNN`. The bytes go out as the caller
+/// passed them and none is dropped, so the name it meant reads in front
+/// of whatever followed it -- which is the whole of what the reader has
+/// to go on.
+struct Escaped<'a>(&'a [u8]);
+
+impl fmt::Display for Escaped<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for &b in self.0 {
+            match b {
+                b'"' => f.write_str("\\\"")?,
+                b'\\' => f.write_str("\\\\")?,
+                0x20..=0x7e => write!(f, "{}", b as char)?,
+                _ => write!(f, "\\x{b:02x}")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How many names that are not text one boot says in the log before the
+/// `?text` rows alone carry them. A caller whose length is wrong once is
+/// wrong on every call, and a line per call would bury the log it is
+/// there to explain; eight is enough to tell one such caller from
+/// several, and the closing line says the rest were counted.
+const MAX_SAID: usize = 8;
+static SAID: AtomicUsize = AtomicUsize::new(0);
+
 fn record_named(name: &[u8], what: &'static str, detail: u64, bulk: bool) {
     // Before the name is interned and before the entry, so that a gap
     // the filter names costs neither (`ledger_except=`).
@@ -521,6 +551,26 @@ fn record_named(name: &[u8], what: &'static str, detail: u64, bulk: bool) {
     // the name with whatever followed it, which is a caller's bug and
     // no cap of the ledger's (`ledger_test`).
     if !plain_text(name) {
+        // The row cannot carry the name, so the log must: a `?text` row
+        // on its own is a gap whose identity the one facility for
+        // naming gaps threw away, and the name is what says which DLL
+        // asked after what. Said before the entry, so that a boot the
+        // ledger's own caps cut short still names the gap.
+        let said = SAID.fetch_add(1, Ordering::Relaxed);
+        if said < MAX_SAID {
+            let len = name.len();
+            crate::warn!(
+                "ledger: a name that is not text, counted under ?text: \"{}\" \
+                 ({len} bytes, {what}, detail {detail:#x})",
+                Escaped(name)
+            );
+        } else if said == MAX_SAID {
+            crate::warn!(
+                "ledger: further names that are not text are counted under ?text \
+                 and not said here ({MAX_SAID} of them were): a caller whose \
+                 length is wrong is wrong on every call"
+            );
+        }
         add(Key { service: Service::Kernel("?text"), what, detail }, bulk);
         return;
     }
@@ -954,6 +1004,28 @@ mod tests {
         assert!(!plain_text(b"a\"b"));
         assert!(!plain_text(br"a\b"));
         assert!(!plain_text("café".as_bytes()));
+    }
+
+    /// And such a name still reads in the log, which is the only place
+    /// it can: the bytes as the caller passed them, the ones that are
+    /// not text escaped, so that the name it meant reads in front of
+    /// whatever followed it.
+    #[test]
+    fn a_name_that_is_not_text_still_reads_in_the_log() {
+        assert_eq!(
+            alloc::format!("{}", Escaped(b"ledger_test.exe!\0\0bad")),
+            r"ledger_test.exe!\x00\x00bad"
+        );
+        // The two characters a row's name cannot hold.
+        assert_eq!(alloc::format!("{}", Escaped(b"a\"b")), r#"a\"b"#);
+        assert_eq!(alloc::format!("{}", Escaped(br"a\b")), r"a\\b");
+        // Text that is not ASCII goes out byte by byte, not lost.
+        assert_eq!(alloc::format!("{}", Escaped("café".as_bytes())), r"caf\xc3\xa9");
+        // A name a row can carry reads as itself.
+        assert_eq!(
+            alloc::format!("{}", Escaped(b"kernel32.dll!CreateFileW")),
+            "kernel32.dll!CreateFileW"
+        );
     }
 
     /// A text is a part of a name and is compared without regard to

@@ -488,7 +488,16 @@ that finds no room is `?user`, and a name that is not plain text is
 `?text` -- a caller's bug and no cap of the ledger's, told apart
 because a row that said `?user` of a name read for more bytes than the
 caller meant sent the reader after a cap of the ledger's instead
-(`ledger_test` reports one of each).
+(`ledger_test` reports one of each). A `?text` row cannot carry the
+name, so the log says it instead, as the caller passed it with the
+bytes that are not text escaped (`a name that is not text, counted
+under ?text: "dwrite.dll!Foo\x00\x00" (18 bytes, unsupported, detail
+0x1)`): the row alone is a gap whose identity the one facility for
+naming gaps threw away, while the escaped name says which DLL asked
+after what, the name it meant reading in front of whatever followed
+it. Eight such names a boot, because a caller whose length is wrong
+once is wrong on every call; a closing line says the rest were counted
+and not said.
 
 Invariants (`nt::ledger`): each dump gives back the names no
 entry uses any more, so the table holds the names of the gaps since the

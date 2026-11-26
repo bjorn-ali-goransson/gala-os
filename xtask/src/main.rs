@@ -12331,6 +12331,13 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // apart from a name the table had no room for (`?user`),
             // which is a cap of the ledger's and not a caller's bug.
             r#"ledger: {"service":"?text","what":"other","detail":2989,"hits":1,"#,
+            // And the name itself, which the row could not carry and
+            // the log must: a `?text` row with nothing else said is a
+            // gap whose identity the one facility for naming gaps threw
+            // away. The bytes go out as the caller passed them, the
+            // ones that are not text escaped, so the name it meant
+            // reads in front of whatever followed it.
+            r#"ledger: a name that is not text, counted under ?text: "ledger_test.exe!\x00\x00bad" (21 bytes, other, detail 0xbad)"#,
             // The table filled up; how many records it then dropped
             // depends on what the boot itself recorded, but their kind
             // does not.
