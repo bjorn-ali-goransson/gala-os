@@ -48,6 +48,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/unix.rs           AF_UNIX sockets as core objects (seam 5): names, connections, rights in flight
   src/display/          virtio-gpu (`display=virtio`): protocol, driver (host-tested), PCI transport
   src/input.rs          PS/2 keyboard and mouse polling for the desktop
+  src/usb/              xHCI host controller and HID keyboards and mice (host-tested)
   src/nt/               NT personality: PE loader, processes, objects, syscalls, registry, ...
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
   src/nt/abi/           Windows' ABI on this architecture (x64/: CONTEXT, frames, ...)
@@ -8285,6 +8286,63 @@ reading the echo, half-closes, checks every byte and appends `xtask: net
 client: echo ok` (or the error) to the serial log, which the scenario
 expects.
 
+## USB
+
+gala's own xHCI driver (`usb::xhci`, from the xHCI 1.2 specification
+and USB 2.0 chapter 9) and HID (`usb::hid`, HID 1.11 and its usage
+tables), for USB keyboards and mice where a machine has no PS/2 ones
+(ROADMAP USB, HW).
+
+- **Controller** (`usb::init`): the first PCI function of class
+  0c/03/30. The capability registers give the window's length (the
+  doorbells, the runtime registers, the ports, at least 8 KiB); the
+  driver resets the controller, gives
+  it a device context array (scratchpad buffers as HCSPARAMS2 asks),
+  one command ring and one event ring of one segment, each a page of
+  256 TRBs (transfer and command rings end in a Link TRB with Toggle
+  Cycle). Polled: no interrupter is enabled, `Xhci::poll` reads the
+  event ring and moves its dequeue pointer. Every wait is bounded in
+  time (`hw::Platform`'s clock), so `usb::init` needs a calibrated
+  clock and says so when there is none.
+- **Devices**: those on root ports when the controller starts (no
+  hubs, no hotplug), at most `MAX_DEVICES` (8). Each port is
+  reset, given a slot (Enable Slot, Address Device with the port's
+  default max packet size), read (device, then configuration
+  descriptor), configured (Set Configuration), and its first HID
+  interface with an interrupt IN endpoint taken: a keyboard (protocol
+  1) is put in the boot protocol, a mouse is read in the report
+  protocol through its report descriptor (`hid::MouseLayout`: buttons,
+  X, Y, wheel, the report ID; the boot layout where the descriptor
+  gives none). Logged per port (`usb: port N: device connected, speed
+  S`, `usb: port N: device V:P on slot S`,
+  `usb: port N: read as a keyboard|mouse`, or why not).
+- **Reports**: each interrupt endpoint keeps 16 transfers queued; a
+  completed one is decoded and queued again. A boot keyboard report is
+  diffed against the one before (modifiers as usages 0xe0..=0xe7, the
+  six keys; a rollover report is ignored), giving `hid::Event::Key`; a
+  mouse report gives `hid::Event::Pointer`. `usb::poll` takes a few
+  reports at a time under the controller's lock and hands their events
+  on with the lock released (the desktop may start a program).
+- **Limits**: one controller; root ports only; the first HID interface
+  of a device; the default port speed IDs; control transfers of at most
+  `DATA_LEN` (2 KiB), in or none; no interrupts. Before the reset the
+  USB Legacy Support capability, where the firmware has one, is asked
+  for the controller (a second's wait; a firmware that does not let go
+  is logged, `the firmware did not hand the controller over`, and the
+  controller taken anyway) and its SMIs are turned off; the walk of the
+  extended capabilities stops at the end of the mapped window (two pages
+  at least). `usb::stats` keeps the counters and the events no one
+  asked for (`strays`).
+- **Tests**: host tests drive the driver against a model of a
+  controller (`usb/xhci/tests.rs`: enumeration, reports, rings that
+  wrap, a failed transfer, a device that stalls, no devices, a firmware
+  that hands the controller over and one that holds on) and HID's
+  parsing (`usb/hid.rs`);
+  the boot scenario `usb_input` runs `usbinput_test` on q35 with
+  `qemu-xhci`, `usb-kbd` and `usb-mouse` and no PS/2 controller
+  (`i8042=off`), typing and clicking through QEMU's monitor, paced by
+  the reports the guest read (WORKFLOW "Screen checks").
+
 ## Disk
 
 A disk (virtio-blk, NVMe or AHCI), and with the boot option `persist` C: on it: the
@@ -8925,8 +8983,8 @@ session's is shown by nothing unless GalaSession attaches a presenter
   so a byte looks ready forever -- and each read is a VM exit a hundred
   times slower than a real one. A machine with no controller is left in
   milliseconds with `input: the PS/2 controller (ports 0x60 and 0x64)
-  never answered`, which names USB HID (ROADMAP USB) as what such a
-  machine needs. Mouse packets with the buttons held are
+  never answered`, which points at the `usb:` lines (a machine whose
+  keyboard and mouse are USB reads them through "USB"). Mouse packets with the buttons held are
   summed per poll (`Coalescer`); a packet that changes the buttons goes
   to the desktop at once with its own move, so a press or release taken
   late still lands where it happened (a later move is never folded into
@@ -8961,6 +9019,14 @@ session's is shown by nothing unless GalaSession attaches a presenter
   reads (`EVENTS_READ`, every event, SYN_REPORT included) and logs
   their address (`input: virtio events read at <address>`) for xtask's
   pacing, as `BYTES_READ`.
+  USB keyboards and mice ("USB"): the input thread polls the xHCI
+  driver too; a key's HID usage becomes its set 1 code
+  (`hid::scan_code`) and then the same virtual key, a mouse report goes
+  the PS/2 packet's way. It counts the reports it takes
+  (`USB_REPORTS_READ`) and logs their address (`input: usb reports
+  read at <address>`). `usb::init` runs before `nt::init`, whose
+  desktop starts the input thread: the thread looks for its devices
+  once, when it starts.
 - **Boot splash** (`console.rs`): from when the kernel takes the
   framebuffer until the desktop does, the screen shows the fortress
   (160 px) over the wordmark (220 px) on a dark gradient, with a

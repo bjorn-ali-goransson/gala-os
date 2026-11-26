@@ -733,6 +733,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("paint_thread_test", "kernel32.dll", "Windows/System32"),
     ("paint_thread_test", "user32.dll", "Windows/System32"),
     ("paint_thread_test", "gdi32.dll", "Windows/System32"),
+    ("usb_input", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("usb_input", "ntdll.dll", "Windows/System32"),
+    ("usb_input", "kernel32.dll", "Windows/System32"),
+    ("usb_input", "user32.dll", "Windows/System32"),
+    ("usb_input", "gdi32.dll", "Windows/System32"),
     ("console_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("sshd_server", "user/sshd/logs-placeholder.txt", "ProgramData/ssh/logs"),
     ("sshd_sftp", "target/prebuilt/openssh/OpenSSH-Win64/sftp-server.exe", "Windows/System32"),
@@ -3612,6 +3617,7 @@ const USER_PROGRAMS: &[&str] = &[
     "rtl_test",
     "gui_test",
     "paint_thread_test",
+    "usbinput_test",
     "conhost",
     "console_window_test",
     "wsl",
@@ -6276,6 +6282,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "hook_test",
     "hook_match_test",
     "paint_thread_test",
+    "usb_input",
     "virtio_gpu",
     "virtio_gpu_reset",
     "filezilla",
@@ -7043,6 +7050,15 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
         if NO_I8042_SCENARIOS.contains(&iso_scenario(iso)) { "q35,i8042=off" } else { "q35" };
     cmd.args(["-machine", machine, "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
     cmd.args(["-name", &vmtime::qemu_name(iso_scenario(iso))]);
+    // A USB keyboard and mouse on QEMU's xHCI controller.
+    if USB_INPUT_SCENARIOS.contains(&iso_scenario(iso)) {
+        cmd.args(["-device", "qemu-xhci,id=xhci"]).args([
+            "-device",
+            "usb-kbd,bus=xhci.0",
+            "-device",
+            "usb-mouse,bus=xhci.0",
+        ]);
+    }
     // KVM when available, otherwise software emulation; an `-accel` in
     // XTASK_QEMU_ARGS replaces both (`-accel tcg,thread=multi` reproduces
     // what SINGLE_THREAD_TCG avoids).
@@ -8625,6 +8641,29 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "paint_thread_test: drew from another thread",
             "xtask: screen ok",
             "paint_thread_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Keys, a click and the wheel from QEMU's usb-kbd and usb-mouse
+        // on xHCI, on a machine with no PS/2 controller
+        // (USB_INPUT_SCENARIOS): the kernel's xHCI and HID boot-protocol
+        // drivers (kernel/src/usb) feed the same input path PS/2 does
+        // (user/usbinput_test). SCREEN_SCENARIOS types and clicks.
+        name: "usb_input",
+        cmdline: "qemu_exit wallpaper=night run=usbinput_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "usb: xhci at ",
+            "read as a keyboard",
+            "read as a mouse",
+            "input: usb reports read at ",
+            "usbinput_test: ready",
+            "usbinput_test: typed a",
+            "usbinput_test: typed A",
+            "usbinput_test: clicked",
+            "usbinput_test: wheel",
+            "usbinput_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -16122,6 +16161,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("hook_test", "needs a screen (the hook's screendumps come from QEMU's monitor)"),
     ("hook_match_test", "needs a screen (the hook's screendumps come from QEMU's monitor)"),
     ("paint_thread_test", "needs a screen (the square must reach the desktop)"),
+    ("usb_input", "needs a screen (QEMU's sendkey and mouse_move) and xHCI"),
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
@@ -20387,6 +20427,46 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
             ],
         },
     ),
+    (
+        // A key, Shift+key, a click at screen (300, 250) and a wheel notch,
+        // each after the program has taken the one before, from QEMU's
+        // usb-kbd and usb-mouse (user/usbinput_test). Relative moves stay
+        // within one USB report each (QEMU splits a move beyond +-127
+        // into several): from the middle of the screen (640, 400) to
+        // (300, 250).
+        "usb_input",
+        ScreenCheck {
+            marker: "usbinput_test: ready",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &["sendkey a"],
+                    pixels: &[PixelCheck::At(101 + 200, 133 + 100, 0x336699)],
+                },
+                ScreenStep {
+                    after: "usbinput_test: typed a",
+                    input: &["sendkey shift-a"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "usbinput_test: typed A",
+                    input: &[
+                        "mouse_move -120 -75",
+                        "mouse_move -120 -75",
+                        "mouse_move -100 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "usbinput_test: clicked",
+                    input: &["mouse_move 0 0 1"],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
     ("office_word", OFFICE_WORD_SCREEN),
     ("office_excel", OFFICE_EXCEL_SCREEN),
     ("start_menu", START_MENU_SCREEN),
@@ -21071,7 +21151,9 @@ fn monitor_closed(monitor: &std::os::unix::net::UnixStream) -> bool {
 /// the input goes to virtio-input devices, whose queue the guest also
 /// empties as it polls: there the guest counts the events it reads
 /// (`input: virtio events read at <address>`), and what QEMU queues for
-/// each command is `virtio_events`.
+/// each command is `virtio_events`. A USB keyboard and mouse (xHCI,
+/// `usb_input`) are counted in HID reports (`input: usb reports read
+/// at <address>`, `usb_reports`).
 #[derive(Default)]
 struct InputPace {
     /// The guest's counters' physical address and the devices they
@@ -21100,6 +21182,8 @@ enum Counted {
     Ps2Bytes(u64),
     /// virtio-input events.
     VirtioEvents,
+    /// USB HID reports.
+    UsbReports,
 }
 
 impl InputPace {
@@ -21137,7 +21221,11 @@ impl InputPace {
                 self.want.0,
                 read.1,
                 self.want.1,
-                if self.unit() == "bytes" { "ps2_bytes" } else { "virtio_events" }
+                match self.guest {
+                    Some((_, Counted::VirtioEvents)) => "virtio_events",
+                    Some((_, Counted::UsbReports)) => "usb_reports",
+                    _ => "ps2_bytes",
+                }
             ));
         }
         Ok(())
@@ -21147,6 +21235,7 @@ impl InputPace {
     fn unit(&self) -> &'static str {
         match self.guest {
             Some((_, Counted::VirtioEvents)) => "events",
+            Some((_, Counted::UsbReports)) => "reports",
             _ => "bytes",
         }
     }
@@ -21162,22 +21251,26 @@ impl InputPace {
         if let Some(g) = self.guest {
             return Ok(g);
         }
-        // The input thread logs one of the two once its devices are set up.
+        // The input thread logs one of these once its devices are set up.
         const PS2: &str = "input: bytes read at ";
         const VIRTIO: &str = "input: virtio events read at ";
+        const USB: &str = "input: usb reports read at ";
         let began = ScreenWait::start(clock);
-        let (rest, virtio) = loop {
+        let (rest, kind) = loop {
             let text = String::from_utf8_lossy(&fs::read(log).unwrap_or_default()).into_owned();
             let found = text.lines().rev().find_map(|l| {
                 l.split_once(VIRTIO)
-                    .map(|(_, r)| (r.to_string(), true))
-                    .or_else(|| l.split_once(PS2).map(|(_, r)| (r.to_string(), false)))
+                    .map(|(_, r)| (r.to_string(), Some(Counted::VirtioEvents)))
+                    .or_else(|| {
+                        l.split_once(USB).map(|(_, r)| (r.to_string(), Some(Counted::UsbReports)))
+                    })
+                    .or_else(|| l.split_once(PS2).map(|(_, r)| (r.to_string(), None)))
             });
             if let Some(f) = found {
                 break f;
             }
             if let Some(why) = began.over(clock, SCREEN_STEP_WAIT) {
-                return Err(format!("no {PS2:?} or {VIRTIO:?} in the serial log {why}"));
+                return Err(format!("no {PS2:?}, {VIRTIO:?} or {USB:?} in the serial log {why}"));
             }
             thread::sleep(Duration::from_millis(100));
         };
@@ -21187,14 +21280,13 @@ impl InputPace {
             .and_then(|a| u64::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok())
             .filter(|&a| a != 0)
             .ok_or_else(|| format!("no physical address in the input counters line `{rest}`"))?;
-        let counted = if virtio {
-            Counted::VirtioEvents
-        } else {
-            Counted::Ps2Bytes(
+        let counted = match kind {
+            Some(k) => k,
+            None => Counted::Ps2Bytes(
                 rest.split_once("mouse packets of ")
                     .and_then(|(_, r)| r.split_whitespace().next()?.parse().ok())
                     .ok_or_else(|| format!("unreadable `{PS2}{rest}`"))?,
-            )
+            ),
         };
         self.guest = Some((at, counted));
         self.file = std::path::absolute(log.with_extension("input-counters"))
@@ -21209,6 +21301,7 @@ impl InputPace {
         let (keyboard, mouse) = match counted {
             Counted::Ps2Bytes(packet) => ps2_bytes(command, packet, &mut self.buttons)?,
             Counted::VirtioEvents => virtio_events(command, &mut self.buttons)?,
+            Counted::UsbReports => usb_reports(command, &mut self.buttons)?,
         };
         self.want.0 += keyboard;
         self.want.1 += mouse;
@@ -21248,6 +21341,35 @@ fn virtio_events(command: &str, buttons: &mut u8) -> Result<(u64, u64)> {
         _ => Err(format!("input command {command:?}: what it queues is not known (virtio_events)")),
     }
 }
+
+/// The HID reports QEMU's usb-kbd and usb-mouse send for monitor command
+/// `command` (keyboard reports, mouse reports), with `buttons` the
+/// monitor's button state (updated), while the guest keeps transfers
+/// queued on both (the kernel keeps 16): a key is one report per
+/// keycode QEMU queues (pressed and released, the E0 prefix a keycode of
+/// its own, as `ps2_bytes`' bytes); a move is a report per 127 on the
+/// longer axis (at least one), a wheel notch USB_WHEEL_REPORTS more; a
+/// change of the buttons is one report. A command this does not know is
+/// refused.
+fn usb_reports(command: &str, buttons: &mut u8) -> Result<(u64, u64)> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    match words.first().copied() {
+        Some("mouse_move") => {
+            // The move without its wheel, then the wheel's.
+            let wheel = words.len() > 3 && words[3] != "0";
+            let moved = words.iter().take(3).copied().collect::<Vec<_>>().join(" ");
+            let (_, packets) =
+                ps2_bytes(&moved, 1, &mut 0).map_err(|e| e.replace("ps2_bytes", "usb_reports"))?;
+            Ok((0, packets + if wheel { USB_WHEEL_REPORTS } else { 0 }))
+        }
+        Some("mouse_button") => ps2_bytes(command, 1, buttons),
+        Some("sendkey") => ps2_bytes(command, 1, &mut 0),
+        _ => Err(format!("input command {command:?}: what it queues is not known (usb_reports)")),
+    }
+}
+
+/// The reports a wheel notch adds to a move's (`usb_reports`).
+const USB_WHEEL_REPORTS: u64 = 2;
 
 /// What QEMU's PS/2 devices queue for monitor command `command`
 /// (keyboard bytes, mouse bytes), with `packet`-byte mouse packets and
@@ -21718,7 +21840,12 @@ fn add_net_with(cmd: &mut Command, port: u16, guest: u16, extra: &str) {
 /// Scenarios booted on a machine with no i8042 (`-machine
 /// q35,i8042=off`): every read of port 0x64 is 0xff, as on a machine
 /// whose keyboard and mouse are USB alone.
-const NO_I8042_SCENARIOS: &[&str] = &["no_i8042"];
+const NO_I8042_SCENARIOS: &[&str] = &["no_i8042", "usb_input"];
+
+/// Scenarios whose keyboard and mouse are QEMU's usb-kbd and usb-mouse on
+/// an xHCI controller (ROADMAP HW step 2): on the root hub's ports, no hub
+/// between (the kernel drives none).
+const USB_INPUT_SCENARIOS: &[&str] = &["usb_input"];
 
 /// Scenarios that get a virtio-net card on QEMU's user network and no
 /// client: the card is found and set up, nothing connects
@@ -27130,6 +27257,22 @@ mod ps2_pace {
         assert_eq!(virtio_events("sendkey ctrl-alt-delete", &mut b), Ok((12, 0)));
         assert_eq!(virtio_events("sendkey kp_enter", &mut b), Ok((4, 0)));
         assert!(virtio_events("screendump x", &mut b).is_err());
+    }
+
+    #[test]
+    fn usb_reports_are_what_qemu_sends() {
+        let mut b = 0;
+        assert_eq!(usb_reports("mouse_move 0 0", &mut b), Ok((0, 1)));
+        assert_eq!(usb_reports("mouse_move -120 -75", &mut b), Ok((0, 1)));
+        assert_eq!(usb_reports("mouse_move 116 255", &mut b), Ok((0, 3)));
+        assert_eq!(usb_reports("mouse_move 0 0 1", &mut b), Ok((0, 1 + USB_WHEEL_REPORTS)));
+        assert_eq!(usb_reports("mouse_button 1", &mut b), Ok((0, 1)));
+        assert_eq!(usb_reports("mouse_button 1", &mut b), Ok((0, 0)));
+        assert_eq!(usb_reports("mouse_button 0", &mut b), Ok((0, 1)));
+        assert_eq!(usb_reports("sendkey a", &mut b), Ok((2, 0)));
+        assert_eq!(usb_reports("sendkey shift-a", &mut b), Ok((4, 0)));
+        assert_eq!(usb_reports("sendkey meta_l-left", &mut b), Ok((8, 0)));
+        assert!(usb_reports("screendump x", &mut b).is_err());
     }
 
     #[test]

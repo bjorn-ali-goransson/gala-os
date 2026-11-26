@@ -7,7 +7,11 @@
 //! screen, or when the console session's desktop goes live without one
 //! (`presenter=`: a headless desktop still takes the local input).
 //!
-//! The keyboard and the mouse are found separately (`ps2::Devices`) and
+//! A USB keyboard and mouse (`crate::usb`, an xHCI controller's HID
+//! devices) and virtio-input devices are read in the same loop, their
+//! keys turned into the same set 1 scan codes and virtual keys.
+//!
+//! The PS/2 keyboard and mouse are found separately (`ps2::Devices`) and
 //! each is reported, because a machine may have one, the other, both or
 //! neither: this thread polls for as long as either answered. Nothing
 //! else rides on it -- the desktop's clock is its own thread
@@ -73,6 +77,15 @@ static EVENTS_READ: BytesRead = BytesRead {
     mouse: core::sync::atomic::AtomicU64::new(0),
 };
 
+/// The HID reports the input thread has read from USB devices: the
+/// keyboards', then the mice's. Its address is on the serial log
+/// (`input: usb reports read at`): xtask paces a screen check's input on
+/// it as on `BYTES_READ`.
+static USB_REPORTS_READ: BytesRead = BytesRead {
+    keyboard: core::sync::atomic::AtomicU64::new(0),
+    mouse: core::sync::atomic::AtomicU64::new(0),
+};
+
 /// The `input:` line (at the end of a run).
 pub fn log_stats() {
     use core::sync::atomic::Ordering::Relaxed;
@@ -102,7 +115,7 @@ fn ps2_setup() -> Option<(ps2::I8042, usize)> {
     // that silently ignores the keyboard.
     let Some(found) = controller.enable() else {
         crate::warn!(
-            "input: the PS/2 controller (ports 0x60 and 0x64) never answered: no local keyboard or mouse (a machine whose keyboard and mouse are USB alone has none until USB HID is driven)"
+            "input: the PS/2 controller (ports 0x60 and 0x64) never answered: no local keyboard or mouse (a machine whose keyboard and mouse are USB reads them through the xHCI controller: the `usb:` lines)"
         );
         return None;
     };
@@ -110,14 +123,14 @@ fn ps2_setup() -> Option<(ps2::I8042, usize)> {
         crate::info!("input: PS/2 keyboard scanning (set 1, the controller translating)");
     } else {
         crate::warn!(
-            "input: no PS/2 keyboard: nothing on the controller's first port acknowledged 0xf4 (enable scanning), so keys will not reach the desktop (a USB keyboard is not driven yet)"
+            "input: no PS/2 keyboard: nothing on the controller's first port acknowledged 0xf4 (enable scanning), so its keys will not reach the desktop (a USB keyboard's would: the `usb:` lines)"
         );
     }
     if found.mouse {
         crate::info!("input: PS/2 mouse reporting (wheel: {})", found.wheel);
     } else {
         crate::warn!(
-            "input: no PS/2 mouse: nothing on the controller's auxiliary port acknowledged 0xf6/0xf4 (defaults, enable reporting), so the pointer will not move (a USB mouse is not driven yet)"
+            "input: no PS/2 mouse: nothing on the controller's auxiliary port acknowledged 0xf6/0xf4 (defaults, enable reporting), so it will not move the pointer (a USB mouse would: the `usb:` lines)"
         );
     }
     if !found.keyboard && !found.mouse {
@@ -177,9 +190,17 @@ fn physical(at: usize) -> u64 {
 fn input_thread(_: usize) {
     let mut ps2 = ps2_setup();
     let mut devices = virtio_setup();
-    if ps2.is_none() && devices.is_empty() {
+    let usb = crate::usb::present();
+    if usb {
+        crate::info!(
+            "input: usb reports read at {:#x} (physical {:#x}; keyboard, mouse: two u64)",
+            core::ptr::addr_of!(USB_REPORTS_READ) as usize,
+            physical(core::ptr::addr_of!(USB_REPORTS_READ) as usize)
+        );
+    }
+    if ps2.is_none() && devices.is_empty() && !usb {
         crate::warn!(
-            "input: no PS/2 device and no virtio-input keyboard or mouse: nothing to read, the input thread stops"
+            "input: no PS/2 device, no virtio-input keyboard or mouse and no USB one: nothing to read, the input thread stops"
         );
         return;
     }
@@ -217,6 +238,29 @@ fn input_thread(_: usize) {
                     pointer(dx, dy, buttons, dz, &mut held, &mut mouse, &mut deliver);
                 }
             });
+        }
+        if usb {
+            let (k, m) = crate::usb::poll(|e| match e {
+                crate::usb::hid::Event::Key { usage, down } => {
+                    if let Some((scan, extended)) = crate::usb::hid::scan_code(usage) {
+                        let vk = vk_of(scan, extended);
+                        if vk != 0 {
+                            key(vk, scan, extended, down, &mut mouse, &mut deliver);
+                        }
+                    }
+                }
+                crate::usb::hid::Event::Pointer { dx, dy, buttons, dz } => pointer(
+                    dx.into(),
+                    dy.into(),
+                    buttons,
+                    dz.into(),
+                    &mut held,
+                    &mut mouse,
+                    &mut deliver,
+                ),
+            });
+            USB_REPORTS_READ.keyboard.fetch_add(k, core::sync::atomic::Ordering::Release);
+            USB_REPORTS_READ.mouse.fetch_add(m, core::sync::atomic::Ordering::Release);
         }
         mouse.flush(&mut deliver);
         sched::sleep_ms(5);

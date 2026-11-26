@@ -83,7 +83,7 @@ export const componentGroups: ComponentGroup[] = [
         name: "Screen and input",
         path: "kernel/src/display",
         status: "works",
-        what: "The bootloader's framebuffer or a virtio-gpu, a PS/2 keyboard and mouse.",
+        what: "The bootloader's framebuffer or a virtio-gpu, a PS/2 or USB keyboard and mouse.",
       },
       {
         name: "Kernel handover",
@@ -639,7 +639,7 @@ export const planned: Planned[] = [
   },
   {
     name: "Sound and USB",
-    what: "virtio-sound with WASAPI on top; xHCI with keyboards, mice and storage",
+    what: "virtio-sound with WASAPI on top; USB storage, hubs and hot plug (USB keyboards and mice already work)",
   },
   {
     name: "An installer",
@@ -1024,7 +1024,7 @@ export const usb: {
   ],
   limits: [
     "It is tested in virtual machines, booted from a USB stick under BIOS and UEFI, but not yet on physical PCs: expect some not to start it. What the screen shows when one stops is worth reporting.",
-    "The keyboard and mouse work where they reach gala as PS/2 devices: a laptop's built-in keyboard often does, and many PCs present USB ones that way while their firmware's USB legacy support is on. gala's own USB driver is planned.",
+    "The keyboard and mouse work as PS/2 devices, or as USB ones plugged in before gala starts (gala's own USB driver reads them, tested in virtual machines; no USB hubs yet, so a keyboard behind a hub or a dock is not seen unless the firmware presents it as PS/2).",
     "There is no network on a physical PC yet, and no sound.",
   ],
 };

@@ -4368,7 +4368,11 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   black-box: a move is REL_X, REL_Y and SYN whatever its size, a wheel
   notch three more, a button change one event per button changed and a
   SYN, a key four: down, SYN, up, SYN); the same host test refuses a
-  twin's command it does not know. A twin is screen-checked as its x64
+  twin's command it does not know. USB keyboards and mice (`usb_input`)
+  are counted in HID reports (`input: usb reports read at <address>`;
+  `usb_reports`, measured black-box: a key is a report per keycode QEMU
+  queues, as `ps2_bytes`' bytes, a move a report per 127 on the longer
+  axis, a wheel notch two more, a change of the buttons one). A twin is screen-checked as its x64
   scenario (`screen_check` looks through `twin_base`). Under the
   `events=window` mask, each button change the desktop takes is an
   event `pointer` (where, and what got it: `Start`, `LinuxEntry(0)`,
