@@ -4392,7 +4392,15 @@ fn unit_tests() -> Result {
     run_cmd(
         cargo()
             .args(["test", "--package", "kernel", "--lib", "--features", "handover_next"])
-            .arg("handover::"),
+            .arg("handover::")
+            // Without the incremental cache, for the reason
+            // `build_next_kernel_unlocked` gives: this build is made
+            // nowhere else, so its cache is always many commits behind the
+            // sources, and the link then fails with `undefined hidden
+            // symbol: anon.<hash>.<n>.llvm.<id>` -- codegen is cached, the
+            // link is not, so every rerun fails the same way until the
+            // cache is cleared.
+            .env("CARGO_INCREMENTAL", "0"),
     )?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
     // gala's wsl.exe's tar, gzip, command line and -l -v (ROADMAP CT).

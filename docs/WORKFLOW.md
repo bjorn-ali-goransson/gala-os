@@ -434,6 +434,18 @@ unusual), Linux 5.11+ for gala-um. The first build fetches the pinned
 Limine into `target/`. The `handover_next` kernel is built into
 `target/next`.
 
+Both `handover_next` builds -- that kernel and the host unit tests
+`cargo xtask test` runs with the feature -- are made without the
+incremental cache (xtask sets `CARGO_INCREMENTAL=0` for them). They are
+built seldom, so their caches are always many commits behind the
+sources, and an incremental rebuild of the kernel's 1024 codegen units
+has produced objects referring to LLVM anonymous constants no unit
+defines: the link fails with `undefined hidden symbol:
+anon.<hash>.<n>.llvm.<id>` while the same sources build clean. Codegen
+is cached and the link is not, so a build that lands in that state fails
+the same way on every rerun; `rm -rf` of that unit's directory under
+`target/debug/incremental` is the way out.
+
 ### Environment variables
 
 | Variable | Effect |
