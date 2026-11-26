@@ -126,23 +126,21 @@ pub const IID_IUNKNOWN: Iid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 pub const IID_IDWRITE_FACTORY: Iid =
     guid(0xb859ee5a, 0xd838, 0x4b5b, [0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48]);
 
-/// Every factory interface this DLL answers: IDWriteFactory and the
-/// revisions after it, each of which only adds methods to the one
-/// before. DirectWrite answers them all with the one factory object --
-/// QueryInterface and DWriteCreateFactory both give the shared factory's
-/// own pointer, measured on Windows -- and so does gala, whose vtable is
-/// IDWriteFactory7's whole length so that a method a revision added
-/// lands on a slot that records its name (dwrite_test step 11).
-const FACTORY_IIDS: [Iid; 8] = [
-    IID_IDWRITE_FACTORY,
-    guid(0x30572f99, 0xdac6, 0x41db, [0xa1, 0x6e, 0x04, 0x86, 0x30, 0x7e, 0x60, 0x6a]),
-    guid(0x0439fc60, 0xca44, 0x4994, [0x8d, 0xee, 0x3a, 0x9a, 0xf7, 0xb7, 0x32, 0xec]),
-    guid(0x9a1b41c3, 0xd3bb, 0x466a, [0x87, 0xfc, 0xfe, 0x67, 0x55, 0x6a, 0x3b, 0x65]),
-    guid(0x4b0b5bd3, 0x0797, 0x4549, [0x8a, 0xc5, 0xfe, 0x91, 0x5c, 0xc5, 0x38, 0x56]),
-    guid(0x958db99a, 0xbe2a, 0x4f09, [0xaf, 0x7d, 0x65, 0x18, 0x98, 0x03, 0xd1, 0xd3]),
-    guid(0xf3744d80, 0x21f7, 0x42eb, [0xb3, 0x5d, 0x99, 0x5b, 0xc7, 0x2f, 0xc2, 0x23]),
-    guid(0x35d0e0b3, 0x9076, 0x4d2e, [0xa0, 0x16, 0xa9, 0x1b, 0x56, 0x8a, 0x06, 0xb4]),
-];
+/// The factory interfaces this DLL answers. DirectWrite answers
+/// IDWriteFactory and every revision after it (IDWriteFactory1 through
+/// 7, each only adding methods to the one before) with the one factory
+/// object, from QueryInterface and from DWriteCreateFactory alike --
+/// measured on Windows. gala answers a revision when the methods that
+/// revision adds exist, and refuses it until then, because a revision
+/// answered but not implemented is worse for a program than one
+/// refused: a program asks for the revision it would like, and takes a
+/// fallback when it is refused, while a method that answers E_NOTIMPL is
+/// an answer it did not plan for. Measured too -- Chromium asks for
+/// IDWriteFactory2, and with it answered its first call
+/// (GetSystemFontFallback) ends the browser on a CHECK, where the
+/// refusal costs it only its font fallback. The refusal names the whole
+/// IID, so a run says which revision was wanted (dwrite_test step 11).
+const FACTORY_IIDS: [Iid; 1] = [IID_IDWRITE_FACTORY];
 
 /// The GDI interop interfaces, which the one interop object answers.
 const GDI_INTEROP_IIDS: [Iid; 2] = [
@@ -197,8 +195,13 @@ static FACTORY_VTBL: VTable<57> = VTable([
     factory_CreateNumberSubstitution as *const (),
     glyphs::create_glyph_run_analysis as *const (),
     // IDWriteFactory1 and the revisions after it, in the order the
-    // headers declare them: a program that asked for a revision calls
-    // these through the same vtable.
+    // headers declare them, up to IDWriteFactory7's whole length: a
+    // program that takes the factory for a later revision on the
+    // Windows version alone, rather than asking for it, calls these
+    // through this same vtable, and a slot that exists records the
+    // method's name where a word past the end of the table would be
+    // called as a function. They are also where a revision's methods
+    // land when one is implemented and FACTORY_IIDS answers it.
     factory1_GetEudcFontCollection as *const (),
     factory1_CreateCustomRenderingParams as *const (),
     factory2_GetSystemFontFallback as *const (),

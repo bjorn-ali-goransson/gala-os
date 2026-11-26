@@ -38,11 +38,18 @@
 //!     E_INVALIDARG; one object answers IDWriteRenderingParams 1, 2 and
 //!     3, and each call gives a new object;
 //! 11. the factory's later revisions and its GDI interop object, as
-//!     Word's startup asks for them: IDWriteFactory1 through 7 are all
-//!     this one factory, asked for from the start (DWriteCreateFactory)
-//!     or grown into (QueryInterface), and GetGdiInterop gives one
-//!     object per factory -- the same pointer on a second call -- which
-//!     answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself.
+//!     Word's startup asks for them. GetGdiInterop gives one object per
+//!     factory -- the same pointer on a second call -- which answers
+//!     IDWriteGdiInterop and IDWriteGdiInterop1 as itself, as Windows'
+//!     does. The revisions are the one divergence gala keeps on
+//!     purpose: Windows answers IDWriteFactory1 through 7 with this same
+//!     factory object, through DWriteCreateFactory and QueryInterface
+//!     alike, and gala refuses each with E_NOINTERFACE until the
+//!     methods that revision adds exist, because a program asks for the
+//!     revision it would like and takes a fallback when it is refused
+//!     (Chromium, measured: with IDWriteFactory2 answered, its first
+//!     call to it ends the browser on a CHECK). The refusal records the
+//!     whole IID, so a run says which revision was wanted;
 
 #![no_std]
 #![no_main]
@@ -914,21 +921,20 @@ fn tests() {
         let release: GetU32 = method(params, 2);
         release(params);
 
-        // 11. The later factory revisions: one object answers them all,
-        // whether a program asks for the revision from the start or
-        // grows into it. A revision gala did not answer is what Word's
-        // startup walked into (ROADMAP OF).
+        // 11. The later factory revisions: Windows answers every one of
+        // them with this same factory object, by either route; gala
+        // refuses each until that revision's methods exist, and says so
+        // with the whole IID (the DLL's FACTORY_IIDS explains why, and
+        // this assertion turns into the Windows answer with the first
+        // revision implemented).
+        const E_NOINTERFACE: HResult = 0x8000_4002_u32 as i32;
         let factory_qi: extern "system" fn(*mut c_void, *const Iid, *mut *mut c_void) -> HResult =
             method(factory, 0);
         for iid in IID_FACTORY_REVISIONS {
-            let mut same: *mut c_void = core::ptr::null_mut();
-            check(factory_qi(factory, &iid, &mut same) == 0 && same == factory, 11);
-            let release: GetU32 = method(same, 2);
-            release(same);
-            let mut made: *mut c_void = core::ptr::null_mut();
-            check(DWriteCreateFactory(0, &iid, &mut made) == 0 && made == factory, 11);
-            let release: GetU32 = method(made, 2);
-            release(made);
+            let mut same: *mut c_void = factory;
+            check(factory_qi(factory, &iid, &mut same) == E_NOINTERFACE && same.is_null(), 11);
+            let mut made: *mut c_void = factory;
+            check(DWriteCreateFactory(0, &iid, &mut made) == E_NOINTERFACE && made.is_null(), 11);
         }
         // IDWriteFactory::GetGdiInterop (17): the factory's own object,
         // the same one on a second call, which answers both GDI interop

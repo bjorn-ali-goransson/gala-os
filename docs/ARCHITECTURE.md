@@ -12705,12 +12705,22 @@ an interface only to a reader who already has the list to match it
 against.
 
 The factory's later revisions (IDWriteFactory1 through 7, each only
-adding methods to the one before) are the same object, which answers
-every one of their IIDs through QueryInterface and through
-DWriteCreateFactory, as Windows does -- measured, not assumed. Its
-vtable is IDWriteFactory7's whole length, so a method a revision added
-lands on a slot that records its name instead of a word past the end of
-the table. Its GDI interop object (`GetGdiInterop`, one per factory on
+adding methods to the one before) are on Windows the same object, which
+answers every one of their IIDs through QueryInterface and through
+DWriteCreateFactory -- measured, not assumed. gala answers a revision
+when the methods that revision adds exist, and refuses it until then
+(E_NOINTERFACE, the whole IID recorded), the one place DirectWrite
+diverges on purpose: a program asks for the revision it would like and
+takes a fallback when it is refused, while a method answering E_NOTIMPL
+is an answer it did not plan for. Chromium is the measurement -- it asks
+for IDWriteFactory2, and with that answered its first call of it
+(GetSystemFontFallback) ends the browser on a CHECK, where the refusal
+costs it only its font fallback. The vtable is IDWriteFactory7's whole
+length all the same: a program that takes the factory for a later
+revision on the Windows version alone, rather than asking, lands on a
+slot that records the method's name where a word past the end of the
+table would be called as a function, and that is where a revision's
+methods go when one is implemented. Its GDI interop object (`GetGdiInterop`, one per factory on
 Windows, so one static object here), which bridges a font and a
 LOGFONT, answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself;
 none of its methods is built, each recording its own name, so the run of
@@ -12767,8 +12777,9 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
   rotation, skew or sideways runs; no text layout. The later factory
-  revisions and the GDI interop object answer for themselves but
-  implement none of their own methods ("DirectWrite").
+  revisions are refused (none of their methods is implemented), and the
+  GDI interop object answers for itself but implements none of its own
+  ("DirectWrite").
 - Mitigation policies are kept, not enforced; no sandbox (stage 3).
 - One Windows Runtime class (PackageManager, with no packages); no
   shell namespace objects, no COM proxies (see their sections).
