@@ -15716,7 +15716,8 @@ fn history_path() -> PathBuf {
 const HISTORY_KEEP: usize = 20_000;
 
 /// Appends this run's outcomes to target/report/history.jsonl (one JSON
-/// line per scenario: time, commit, host load, outcome, duration).
+/// line per scenario: time, commit, whether the tree matched it, host
+/// load, outcome, duration).
 fn record_history(runs: &[HistoryRun]) {
     if runs.is_empty() {
         return;
@@ -15731,6 +15732,14 @@ fn record_history(runs: &[HistoryRun]) {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
+    // Whether the run was built from `commit` or from edits on top of
+    // it. Without git's answer the run is recorded as not matching, the
+    // reading that claims the least: see history_findings.
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(root())
+        .output()
+        .map_or(true, |o| !o.stdout.is_empty());
     let load = fs::read_to_string("/proc/loadavg")
         .ok()
         .and_then(|l| l.split_whitespace().next().map(str::to_string))
@@ -15748,7 +15757,7 @@ fn record_history(runs: &[HistoryRun]) {
             })
             .collect();
         text += &format!(
-            "{{\"t\":{t},\"commit\":\"{commit}\",\"load\":{load},\"scenario\":\"{}\",\"ok\":{},\"secs\":{:.1},\"shared\":{},\"reason\":\"{reason}\"}}\n",
+            "{{\"t\":{t},\"commit\":\"{commit}\",\"dirty\":{dirty},\"load\":{load},\"scenario\":\"{}\",\"ok\":{},\"secs\":{:.1},\"shared\":{},\"reason\":\"{reason}\"}}\n",
             r.scenario, r.ok, r.secs, r.shared
         );
     }
@@ -15770,57 +15779,91 @@ fn record_history(runs: &[HistoryRun]) {
 /// Runs of one scenario looked at for flakiness.
 const HISTORY_WINDOW: usize = 30;
 
+/// One run of one scenario, as a history line records it.
+struct HistoryLine<'a> {
+    ok: bool,
+    /// The VM's whole time (a shared VM's for each of its scenarios).
+    secs: f64,
+    shared: bool,
+    reason: &'a str,
+    load: &'a str,
+    /// The tree had uncommitted changes, so the run was not of the
+    /// commit the line names. A line from before the field was recorded
+    /// counts as matching, which is what it was.
+    dirty: bool,
+}
+
 /// What the history says about `scenarios` (this run's): those that both
 /// passed and failed in their last HISTORY_WINDOW runs (flaky, with the
 /// last failure's reason), and those whose latest run (alone in its VM)
 /// took over 1.5 times, and 10 s more than, the median of their previous
 /// ten passes.
+///
+/// Flakiness is counted over the runs whose tree matched their commit.
+/// A run built from uncommitted edits says nothing about the commit it
+/// is recorded against: a scenario being worked on test-first fails
+/// until it passes, and counting those made every scenario under the
+/// hand look flaky -- which is how `sppc_test` came to be reported as
+/// having failed 5 of 23 runs while its code was never at fault. Those
+/// failures are still named, as what they are, so a real break cannot
+/// hide behind the rule. The slower finding keeps every run: a dirty
+/// tree's time is still time the host spent.
 fn history_findings(history: &str, scenarios: &[&str]) -> Vec<String> {
     use std::collections::BTreeMap;
     use triage::field;
-    // Per scenario: (ok, secs, shared, reason, load).
-    type Run<'a> = (bool, f64, bool, &'a str, &'a str);
-    let mut runs: BTreeMap<&str, Vec<Run>> = BTreeMap::new();
+    let mut runs: BTreeMap<&str, Vec<HistoryLine>> = BTreeMap::new();
     for line in history.lines() {
         let Some(name) = field(line, "scenario") else { continue };
-        let ok = field(line, "ok") == Some("true");
-        let secs = field(line, "secs").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let shared = field(line, "shared") == Some("true");
-        let reason = field(line, "reason").unwrap_or("");
-        let load = field(line, "load").unwrap_or("?");
-        runs.entry(name).or_default().push((ok, secs, shared, reason, load));
+        runs.entry(name).or_default().push(HistoryLine {
+            ok: field(line, "ok") == Some("true"),
+            secs: field(line, "secs").and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            shared: field(line, "shared") == Some("true"),
+            reason: field(line, "reason").unwrap_or(""),
+            load: field(line, "load").unwrap_or("?"),
+            dirty: field(line, "dirty") == Some("true"),
+        });
     }
     let mut out = Vec::new();
     for name in scenarios {
         let Some(all) = runs.get(name) else { continue };
         let recent = &all[all.len().saturating_sub(HISTORY_WINDOW)..];
-        let failures = recent.iter().filter(|r| !r.0).count();
-        if failures > 0 && failures < recent.len() {
-            let last = recent.iter().rev().find(|r| !r.0).map_or("", |r| r.3);
+        let last_failure = |r: &HistoryLine| r.reason.chars().take(120).collect::<String>();
+        let clean = recent.iter().filter(|r| !r.dirty).count();
+        let failures = recent.iter().filter(|r| !r.ok && !r.dirty).count();
+        let dirty_failures = recent.iter().filter(|r| !r.ok && r.dirty).count();
+        if failures > 0 && failures < clean {
+            let last = recent.iter().rev().find(|r| !r.ok).map_or(String::new(), last_failure);
             out.push(format!(
-                "{name} is flaky: failed {failures} of its last {} runs (last failure: {})",
-                recent.len(),
-                last.chars().take(120).collect::<String>()
+                "{name} is flaky: failed {failures} of its last {clean} runs \
+                 (last failure: {last})"
+            ));
+        } else if failures == 0 && dirty_failures > 0 {
+            let last = recent.iter().rev().find(|r| !r.ok).map_or(String::new(), last_failure);
+            out.push(format!(
+                "{name} failed {dirty_failures} of its last {} runs, every one of them on a \
+                 tree with uncommitted changes: not flakiness, and not about the commit \
+                 (last failure: {last})",
+                recent.len()
             ));
         }
         let Some((latest, earlier)) = all.split_last() else { continue };
-        if latest.2 || !latest.0 {
+        if latest.shared || !latest.ok {
             continue;
         }
         let mut passes: Vec<f64> =
-            earlier.iter().rev().filter(|r| r.0 && !r.2).take(10).map(|r| r.1).collect();
+            earlier.iter().rev().filter(|r| r.ok && !r.shared).take(10).map(|r| r.secs).collect();
         if passes.len() < 3 {
             continue;
         }
         passes.sort_by(f64::total_cmp);
         let median = passes[passes.len() / 2];
-        if latest.1 > 1.5 * median && latest.1 - median > 10.0 {
+        if latest.secs > 1.5 * median && latest.secs - median > 10.0 {
             out.push(format!(
                 "{name} is slower: {:.1}s against a median of {median:.1}s over its last {} \
                  passes (host load {})",
-                latest.1,
+                latest.secs,
                 passes.len(),
-                latest.4
+                latest.load
             ));
         }
     }
@@ -27009,6 +27052,14 @@ mod health {
         )
     }
 
+    /// The same row with uncommitted changes in the tree it was built
+    /// from.
+    fn dirty(name: &str, ok: bool, secs: f64) -> String {
+        format!(
+            r#"{{"t":1,"commit":"abc","dirty":true,"load":2.5,"scenario":"{name}","ok":{ok},"secs":{secs},"shared":false,"reason":"check 125 got 0x4e"}}"#
+        )
+    }
+
     #[test]
     fn flaky_and_slower_scenarios_are_found() {
         let mut h = Vec::new();
@@ -27029,6 +27080,39 @@ mod health {
         assert!(found[2].starts_with("shared is flaky"));
         // Only this run's scenarios.
         assert!(history_findings(&h.join("\n"), &["steady"]).is_empty());
+    }
+
+    /// A run of a tree with uncommitted changes in it is not evidence
+    /// about the commit it is recorded against: its failures are the red
+    /// half of test-first work, not flakiness. They are still said out
+    /// loud, so a real break is not hidden by the rule.
+    #[test]
+    fn failures_of_a_dirty_tree_are_not_flakiness() {
+        let mut h = Vec::new();
+        for i in 0..10 {
+            h.push(line("worked_on", true, 5.0, false));
+            h.push(line("really_flaky", i != 3, 5.0, false));
+        }
+        // Two red iterations on an uncommitted tree, then the commit.
+        h.push(dirty("worked_on", false, 5.0));
+        h.push(dirty("worked_on", false, 5.0));
+        h.push(line("worked_on", true, 5.0, false));
+        h.push(dirty("really_flaky", false, 5.0));
+        let found = history_findings(&h.join("\n"), &["worked_on", "really_flaky"]);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found[0].starts_with(
+                "worked_on failed 2 of its last 13 runs, every one of them on a tree with \
+                 uncommitted changes: not flakiness"
+            ),
+            "{found:?}"
+        );
+        assert!(found[0].contains("check 125 got 0x4e"), "{found:?}");
+        // The dirty failure neither adds to the count nor to the window.
+        assert!(
+            found[1].starts_with("really_flaky is flaky: failed 1 of its last 10 runs"),
+            "{found:?}"
+        );
     }
 
     /// A watchdog report in the log fails the run, however complete its

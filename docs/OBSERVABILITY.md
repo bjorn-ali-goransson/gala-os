@@ -965,12 +965,24 @@ keep one each: `target/failed/<name>.r<i>.log`), which ends with:
   [events.jsonl]` prints it for any log.
 
 **History**: every `cargo xtask test`/`boot-test` appends one line per
-scenario to `target/report/history.jsonl` (time, commit, host load,
-pass/fail, VM seconds, whether the VM was shared, reason; the last 20000
-runs are kept) and ends with `xtask: health:` lines: scenarios that both
-passed and failed in their last 30 runs (with the last failure's reason)
-and scenarios whose latest pass, alone in a VM, took over 1.5 times, and
-10 s more than, the median of their last ten.
+scenario to `target/report/history.jsonl` (time, commit, whether the
+tree had uncommitted changes, host load, pass/fail, VM seconds, whether
+the VM was shared, reason; the last 20000 runs are kept) and ends with
+`xtask: health:` lines: scenarios that both passed and failed in their
+last 30 runs (with the last failure's reason) and scenarios whose latest
+pass, alone in a VM, took over 1.5 times, and 10 s more than, the median
+of their last ten.
+
+Only runs whose tree matched their commit count towards flakiness. A run
+built from uncommitted edits says nothing about the commit it is
+recorded against -- a scenario being written test-first fails until it
+passes, and counting those made whatever was under the hand look flaky.
+Such failures are still named, as `<name> failed n of its last m runs,
+every one of them on a tree with uncommitted changes`, so a real break
+cannot hide behind the rule. The slower finding keeps every run: a dirty
+tree's time is still time the host spent. `dirty` is recorded as true
+when git cannot answer, and a line from before the field counts as
+matching, which is what it was.
 
 **Disk space**: an image is not started with less than 300 MiB free,
 nor packed into an ISO without its tree's size free; the error names the
