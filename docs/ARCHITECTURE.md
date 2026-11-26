@@ -6477,14 +6477,15 @@ built for x64 and x86.
   content not of the type) leaves, char's value and a failed typed
   load's parse error.
 
-### xmllite (XmlLite's reader)
+### xmllite (XmlLite's reader and writer)
 
-XmlLite's pull reader, `CreateXmlReader` and `IXmlReader`
-(`user/xmllite`, `xmllite_test`; ROADMAP OF). Word delay-loads
-`CreateXmlReader` and ends on 0xc06d007f without it; SQL Server LocalDB
-imports it and `CreateXmlWriter`. Built for x64, x86 and ARM64. The
-reader is `gala_xml`'s `Scan`, so it refuses what msxml6's DOM and
-webservices' reader refuse, in the same words.
+XmlLite's pull reader and its writer, `CreateXmlReader`/`IXmlReader` and
+`CreateXmlWriter`/`IXmlWriter` (`user/xmllite`, `xmllite_test`; ROADMAP
+OF). Word delay-loads both and ends on 0xc06d007f without either; SQL
+Server LocalDB imports both. Built for x64, x86 and ARM64. The reader is
+`gala_xml`'s `Scan`, so it refuses what msxml6's DOM and webservices'
+reader refuse, in the same words; the writer is its own (`writer.rs`),
+and every byte it writes is measured against Windows' writer.
 
 - **The reader**: `CreateXmlReader(IID_IXmlReader, &reader, NULL)`;
   another interface is E_NOINTERFACE and an IMalloc passed is ignored
@@ -6547,10 +6548,95 @@ webservices' reader refuse, in the same words.
   difference over.
 - **Limits**, each recorded when a program meets it: ReadValueChunk and
   GetBaseUri are not implemented, a DTD is never parsed (DtdProcessing
-  stays Prohibit, XmlLite's own default), the attribute getters answer
-  with the position of the element's node since the scan keeps none per
-  attribute, and the writer (`CreateXmlWriter`) ends the process
-  (`gala_stubs`) so the ledger names it when something wants one.
+  stays Prohibit, XmlLite's own default), and the attribute getters
+  answer with the position of the element's node since the scan keeps
+  none per attribute.
+
+The writer is `writer.rs`: `CreateXmlWriter(IID_IXmlWriter, &writer,
+NULL)` and the 32 methods of `IXmlWriter`. What it writes is measured,
+not derived from the standard -- `xmllite_test`'s `writer` module writes
+twenty-six documents with the same calls on Windows and under gala and
+compares the bytes (1048 checks for the DLL in all). The parts a program
+can tell apart:
+
+- **When bytes reach the stream**: never until they are asked for. Flush
+  hands over what there is; the last Release closes every element still
+  open and then hands over. WriteEndDocument closes the open elements
+  and writes nothing itself, so a program that ends its document and
+  never flushes gets the same bytes from Release. A writer whose last
+  call killed it (below) keeps the unfinished document it had and closes
+  nothing, which is why a refused doctype leaves a half-written `<r` in
+  the stream.
+- **The output**: SetOutput asks the object for IStream and then
+  ISequentialStream (anything else is E_NOINTERFACE, recorded) and keeps
+  the one reference its QueryInterface took, which the last Release
+  gives back. It writes with ISequentialStream::Write and commits with
+  IStream::Commit, and asks for nothing else -- no Seek, no SetSize, no
+  Stat, no Clone -- so a stream that can only write is enough; Commit is
+  called only for an output that answered as an IStream, since a
+  sequential stream has no such method. `SetOutput(NULL)` gives the
+  output up, and every write is E_UNEXPECTED without one while Flush is
+  S_OK. A second SetOutput starts the document over and keeps the
+  properties.
+- **The declaration** is written at the first call that produces bytes,
+  with the standalone a *successful* WriteStartDocument asked for. A
+  fragment has no document to start, so WriteStartDocument is
+  WR_E_INVALIDACTION there -- and the declaration still comes out,
+  which is what the measurement says and what no reading of the
+  documentation would give. A stream output never gets a byte order
+  mark, whatever the ByteOrderMark property says.
+- **The properties** are six slots read back exactly as they were set
+  (MultiLanguage, Indent, ByteOrderMark, OmitXmlDeclaration,
+  ConformanceLevel and an undocumented fifth that reads 0); the sixth
+  and anything past it is E_NOTIMPL both ways and leaves the out value
+  alone, and nowhere to put the answer is E_INVALIDARG. It is **writing**
+  that locks them, not SetOutput: from the first byte on, SetProperty is
+  E_ACCESSDENIED while GetProperty still answers.
+- **A refusal either kills the writer or it does not**, and which one it
+  is was measured call by call. A call that does not belong where the
+  document now is kills it -- an attribute with no start tag open, a
+  processing instruction named `xml`, a second root element at Document
+  level, a second or late WriteStartDocument, a doctype after the root
+  -- and every write after it answers that same code until a new output
+  revives it, while Flush still answers S_OK. A refusal about the call's
+  own arguments does not: a bad name (WC_E_NAMECHARACTER), an end tag
+  with nothing open (E_INVALIDARG), a duplicate attribute, an `xmlns`
+  attribute (WR_E_NSPREFIXDECLARED), a bad `xml:space`
+  (WR_E_INVALIDXMLSPACE), text at the top of a document
+  (WR_E_INVALIDACTION), non-white space to WriteWhitespace
+  (WR_E_NONWHITESPACE), a bad character or surrogate
+  (WC_E_XMLCHARACTER), a qualified name in a namespace nothing declared
+  (WR_E_NAMESPACEUNDECLARED). Every write checks in one order --
+  dead, then place, then whether there is an output, then its arguments
+  -- so a bad name writes nothing and leaves the tag it was going into
+  open.
+- **Namespaces**: an element's prefix with no URI given and none in
+  scope is WR_E_NSPREFIXWITHEMPTYNSURI; a URI with no prefix is written
+  as `xmlns="..."`. An attribute's declaration goes at the **end** of
+  the start tag, not beside the attribute: an `xmlns:p` attribute
+  declares `p` inline, an attribute with a URI nothing declares gets a
+  prefix invented (`p` and one more than the prefixes in scope, so `p1`
+  where nothing is declared and `p2` beside one that is), and an
+  attribute with a prefix nothing declares and no URI quietly loses its
+  prefix.
+- **Escaping**: an attribute's value escapes `<`, `&` and `"` by name
+  and a tab or a line end by reference, leaving `>` and `'` as they
+  are; character data escapes `<`, `&` and `>`, leaves `"`, `'` and a
+  tab, and writes every line end as CRLF. WriteRaw passes text through.
+  A character reference is `&#x` and upper-case hexadecimal with no
+  leading zeros. WriteString(NULL) is S_OK and writes nothing, while
+  WriteComment(NULL) writes `<!---->`. A comment keeps what would end it
+  apart with a space instead of refusing it (`no -- allowed?` comes out
+  `no - - allowed?`), and a CDATA section is split around a `]]>` in its
+  text.
+- **Indenting** (Indent on): CRLF and two spaces a level before a node
+  that stands on a line of its own, and an end tag indented only where
+  the element held nodes and no character data.
+- **Limits**, each recorded when a program meets it: WriteAttributes,
+  WriteNode and WriteNodeShallow copy from an `IXmlReader` and are
+  E_NOTIMPL, the MultiLanguage property is kept and not acted on (the
+  output is UTF-8), and a doctype with a public identifier and no system
+  identifier is a shape no measurement covers.
 
 ### RPC: rpcrt4
 

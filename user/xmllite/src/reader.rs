@@ -43,29 +43,20 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use gala_xml::{Attr, Event, Reason, Scan};
 
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
-    LEDGER_NOT_IMPLEMENTED, LEDGER_OTHER, LEDGER_UNSUPPORTED, S_FALSE, S_OK, data1, free_box, guid,
-    not_implemented, push, put, record, record_head, text, try_box,
+    IID_ISEQUENTIAL_STREAM, IID_ISTREAM, IID_IUNKNOWN, LEDGER_NOT_IMPLEMENTED, LEDGER_OTHER,
+    LEDGER_UNSUPPORTED, Obj, S_FALSE, S_OK, data1, free_box, guid, not_implemented, push, put,
+    record, record_head, text, try_box,
 };
 
-type Obj = *mut c_void;
-
-const IID_IUNKNOWN: Guid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 /// `IXmlReader` (xmllite.idl).
 const IID_IXML_READER: Guid =
     guid(0x7279_fc81, 0x709d, 0x4095, [0xb6, 0x3d, 0x69, 0xfe, 0x4b, 0x0d, 0x90, 0x30]);
-/// `IStream`, which an input stream is asked for first (objidl.idl).
-const IID_ISTREAM: Guid = guid(0x0000_000c, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
-/// `ISequentialStream`: all the reader needs of a stream, for one that
-/// is no more than that.
-const IID_ISEQUENTIAL_STREAM: Guid =
-    guid(0x0c73_3a30, 0x2a1c, 0x11ce, [0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d]);
 
 // XmlNodeType.
 const NODE_NONE: u32 = 0;
