@@ -4677,6 +4677,12 @@ Prometheus or Grafana.
   last 30 runs, or got much slower. A known-flaky scenario's failure is
   still a bug; its history line has the reason of each failure (`jq
   'select(.scenario=="java_http")' target/report/history.jsonl`).
+  Flakiness counts only the runs whose tree matched their commit
+  (`"dirty":false`), because the red runs of writing a test are not
+  flakiness; they are reported as `every one of them on a tree with
+  uncommitted changes` instead. Two scenarios failing in the same second
+  on both architectures and passing a minute later at the same commit is
+  that, not a race.
 - **The event stream**: `XTASK_EVENTS=all cargo xtask boot-test <name>`,
   then `cargo xtask events target/debug/test-<name>.events.jsonl` (or
   the copy in `target/failed/`) for system calls by time, failing
