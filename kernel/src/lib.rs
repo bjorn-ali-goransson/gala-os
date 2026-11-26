@@ -64,6 +64,7 @@ pub mod sync;
 pub mod time;
 pub mod trust;
 pub mod unix;
+pub mod usb;
 pub mod virtio_console;
 pub mod wayland;
 
@@ -229,6 +230,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
             Err(why) => warn!("smbios: no table kept ({why})"),
         }
     }
+    // Before the desktop (`nt::init`) starts the input thread, which
+    // reads the USB keyboards and mice found here.
+    usb::init();
     nt::init();
     net::init();
     phase(&cmdline, "drivers");

@@ -106,7 +106,7 @@ export function LayerStack() {
         <p className="stack-label">{t("The machine")}</p>
         <div className="stack-cells">
           <div className="cell cell-hw">
-            <span>{t("A PC or a virtual machine: UEFI or BIOS · virtio disk, network and display · PS/2")}</span>
+            <span>{t("A PC or a virtual machine: UEFI or BIOS · virtio, NVMe or AHCI disk · virtio network and display · PS/2 or USB input")}</span>
           </div>
         </div>
       </div>
