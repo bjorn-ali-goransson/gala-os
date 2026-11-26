@@ -39,8 +39,16 @@
 //! program that cannot start: what is not measured yet is answered as
 //! well as it can be and says so to the ledger, rather than refused.
 //!
-//! Not there yet (each reported to the ledger, E_NOTIMPL): text formats and layouts,
-//! glyph run analysis (rasterization) and outlines, GDI interop, and the
+//! Glyphs as pixels and as outlines (`glyphs`), which is what Skia's
+//! DirectWrite scaler draws text from: CreateGlyphRunAnalysis rasterizes
+//! a glyph run (fontdue, as gdi32 draws Selawik) into an aliased or
+//! ClearType coverage texture, and GetGlyphRunOutline gives a glyph's
+//! TrueType outline to a geometry sink. Rotation, skew and sideways runs
+//! are not supported (ledger, E_NOTIMPL).
+//!
+//! Not there yet (each reported to the ledger, E_NOTIMPL): text formats,
+//! layouts and typography, number substitution, the GDI interop object's
+//! methods (the object itself answers for itself), and the
 //! IDWriteFactory1+ interfaces (QueryInterface says E_NOINTERFACE, which
 //! Skia accepts).
 
