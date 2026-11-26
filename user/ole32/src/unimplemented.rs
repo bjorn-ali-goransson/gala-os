@@ -5,8 +5,4 @@
 gala_stubs::unimplemented_exports!("ole32.dll":
     CoDisconnectObject
     CoRegisterMallocSpy
-    OleFlushClipboard
-    OleGetClipboard
-    OleIsCurrentClipboard
-    OleSetClipboard
 );

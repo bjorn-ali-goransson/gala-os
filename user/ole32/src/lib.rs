@@ -33,6 +33,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 mod absent;
 mod bindctx;
 mod class;
+mod clipboard;
 mod link;
 mod marshal;
 mod moniker;
@@ -121,7 +122,7 @@ pub const E_NOINTERFACE: HResult = 0x8000_4002u32 as i32;
 pub const E_POINTER: HResult = 0x8000_4003u32 as i32;
 pub const E_OUTOFMEMORY: HResult = 0x8007_000eu32 as i32;
 pub const E_INVALIDARG: HResult = 0x8007_0057u32 as i32;
-const CO_E_NOTINITIALIZED: HResult = 0x8004_01f0u32 as i32;
+pub(crate) const CO_E_NOTINITIALIZED: HResult = 0x8004_01f0u32 as i32;
 const CO_E_CLASSSTRING: HResult = 0x8004_01f3u32 as i32;
 const RPC_E_CHANGED_MODE: HResult = 0x8001_0106u32 as i32;
 const RPC_S_CALLPENDING: HResult = 0x8001_0115u32 as i32;
@@ -499,6 +500,9 @@ pub(crate) struct ThreadState {
     /// CoEnableCallCancellation's calls not yet undone by
     /// CoDisableCallCancellation (0: cancellation disabled).
     cancel_enables: u32,
+    /// OleInitialize's own count, beside `refs`: what the OLE clipboard
+    /// gates on (clipboard.rs).
+    pub(crate) ole_refs: u32,
 }
 
 const APARTMENT_STA: u32 = 0x80;
@@ -572,6 +576,7 @@ pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
                 },
                 number: 0,
                 cancel_enables: 0,
+                ole_refs: 0,
             });
             *slot = p;
         }
@@ -644,16 +649,37 @@ pub extern "system" fn CoInitialize(reserved: *mut c_void) -> HResult {
     CoInitializeEx(reserved, 2)
 }
 
-/// OleInitialize(reserved): COM in a single-threaded apartment
-/// (CoInitializeEx's result: S_OK, then S_FALSE). OLE's own parts
-/// (clipboard, drag and drop) need no setup here yet.
+/// OleInitialize(reserved): COM in a single-threaded apartment, and a
+/// count of OLE's own kept beside the COM count -- per thread, a count
+/// and not a flag, saturating at zero, and what the OLE clipboard gates
+/// on (clipboard.rs). The answer tracks that count alone: S_OK when it
+/// was 0 however many CoInitializeEx already stand, S_FALSE when it was
+/// not, and CoInitializeEx's error (an MTA thread: RPC_E_CHANGED_MODE)
+/// when the apartment is refused, arming nothing. Measured on
+/// Windows 11 24H2; user/ole32_test asserts it.
 #[unsafe(no_mangle)]
 pub extern "system" fn OleInitialize(reserved: *mut c_void) -> HResult {
-    CoInitializeEx(reserved, 2)
+    let hr = CoInitializeEx(reserved, 2);
+    if hr != S_OK && hr != S_FALSE {
+        return hr;
+    }
+    let Some(state) = thread_state() else { return E_OUTOFMEMORY };
+    let first = state.ole_refs == 0;
+    state.ole_refs += 1;
+    if first { S_OK } else { S_FALSE }
 }
 
+/// OleUninitialize: one OleInitialize undone, and with it the COM count
+/// that one raised. With the count already at zero it does nothing
+/// whatever, the COM count included -- which is what makes an
+/// unbalanced call survivable rather than a stolen apartment (measured).
 #[unsafe(no_mangle)]
 pub extern "system" fn OleUninitialize() {
+    let Some(state) = thread_state() else { return };
+    if state.ole_refs == 0 {
+        return;
+    }
+    state.ole_refs -= 1;
     CoUninitialize();
 }
 

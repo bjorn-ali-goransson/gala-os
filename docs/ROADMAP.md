@@ -5003,9 +5003,12 @@ is left is delay-loaded or stubbed.
 
 **Next** (what is left, by DLL):
 1. ole32: CoRegisterMallocSpy (sqlmin; the task allocator would call the
-   spy around every operation and track spied blocks), the OLE clipboard
-   (OleSetClipboard and friends, over user32's clipboard) and
-   DoDragDrop.
+   spy around every operation and track spied blocks), the OLE
+   clipboard's data objects and DoDragDrop. The four clipboard exports
+   and OleInitialize's own count are in (ARCHITECTURE "COM: ole32 and
+   oleaut32"), which is what Word's delay load of
+   OleIsCurrentClipboard needs; what is left is publishing a data
+   object's formats, and that waits on delayed rendering (LD step 3).
 2. crypt32: the other decode types the programs use (which ones is only
    seen at run time: the ledger's `CryptDecodeObjectEx` lines),
    CRLs/CTLs, collections' member stores, PFX with ECDSA keys (ncrypt

@@ -5626,6 +5626,35 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   registered under HKCR\CLSID are created from their DLLs ("UI
   Automation"); ProgIDs and out-of-process servers fail as unregistered
   (recorded).
+- **The OLE clipboard** (`clipboard.rs`), over the window station's one
+  ("The clipboard"): OleSetClipboard, OleGetClipboard, OleFlushClipboard
+  and OleIsCurrentClipboard, reached through ntdll's clipboard services
+  rather than user32, because ole32 does not import user32 (programs
+  without windows use it too). All four are functions and none is a
+  `.gstub`: Word's WWLIB delay-loads OleIsCurrentClipboard, and a delay
+  load sees a stub as the honest absence it is and raises 0xc06d007f,
+  where a static import would only have been refused by GetProcAddress.
+  Invariant, measured on Windows 11 24H2 (`ole32_test`): OleInitialize
+  keeps a count of its own beside the apartment's reference count --
+  per thread, a count and not a flag, saturating at zero -- and only
+  OleSetClipboard reads it, refused with CO_E_NOTINITIALIZED until it
+  stands, before the argument is looked at. OleInitialize's answer
+  tracks that count alone (S_OK when it was 0 however many
+  CoInitializeEx already stand, S_FALSE when it was not, and
+  CoInitializeEx's error when the apartment is refused, arming
+  nothing); it does raise the COM count as well as its own, and an
+  OleUninitialize with the count already at zero does nothing whatever,
+  the COM count included, which is what makes an unbalanced call
+  survivable rather than a stolen apartment. The other three never
+  gate, and OleIsCurrentClipboard is S_FALSE in every state, a NULL
+  argument included. OleSetClipboard(NULL), the documented way to clear
+  the clipboard, clears the window station's. Limit: a data object has
+  nowhere to go while a delayed-rendering entry is kept but never
+  rendered (ROADMAP LD step 3), because publishing its formats means
+  offering them without rendering them -- so a non-NULL object is
+  CLIPBRD_E_CANT_SET, OleGetClipboard has no wrapper over the Win32
+  formats to hand back (E_FAIL), and OleFlushClipboard has nothing to
+  render (S_OK), each recorded.
 - **Activation filters** (`class.rs`): the process's IActivationFilter,
   which Office's shared code registers early (Word's MSO.DLL delay-loads
   CoRegisterActivationFilter), has its say on every activation before
@@ -13825,7 +13854,9 @@ same program as SYSTEM).
 
 `kernel/src/nt/clipboard.rs` (the state; host tests there),
 `kernel/src/nt/clipboard_calls.rs` (gala's services),
-`user/user32/src/clipboard.rs`. Test program: `user/clipboard_test`
+`user/user32/src/clipboard.rs`; the OLE clipboard over it is
+`user/ole32/src/clipboard.rs` ("COM: ole32 and oleaut32"). Test program:
+`user/clipboard_test`
 (scenario `clipboard_test`, `events=ipc`: a parent and its child copy
 to each other). ROADMAP LD step 3.
 
