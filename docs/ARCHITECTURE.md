@@ -12838,7 +12838,14 @@ stations and desktops a program creates are refused until stage 3).
   session 0 ERROR_NO_TOKEN; other sessions' users are not recorded yet,
   so ERROR_NO_TOKEN too, recorded); `office_api_test`'s `service.rs`), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
   NULL, and every call on a context fails as on an invalid one, FALSE
-  with ERROR_INVALID_HANDLE, nothing set for NULL). powrprof: platform role and active
+  with ERROR_INVALID_HANDLE, nothing set for NULL. The handles are
+  still answered for: ImmGetContext and ImmAssociateContext (which
+  MSO's UI delay-loads) look at the window before the context, so a
+  NULL window is a silent nothing, a handle that is no window is
+  ERROR_INVALID_WINDOW_HANDLE, and only then is a handle that is no
+  context ERROR_INVALID_HANDLE. Associating nothing with a window that
+  holds nothing changes nothing, so the last error stands, which is
+  how Windows says a call did something). powrprof: platform role and active
   scheme. uxtheme: DrawThemeBackgroundEx as ordinal 47.
 - ntdll: RtlGetDeviceFamilyInfoEnum (10.0.26100.<UBR>, the desktop
   family, an unknown form).

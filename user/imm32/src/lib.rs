@@ -1,6 +1,9 @@
 //! gala's imm32.dll (the Input Method Manager, imm.h): gala has no input
 //! methods, so no keyboard layout is an IME and there are no input
-//! contexts (every call on one fails as on an invalid context).
+//! contexts (every call on one fails as on an invalid context). What a
+//! window is associated with is therefore always nothing, but the
+//! handles are still answered for: ImmGetContext and ImmAssociateContext
+//! tell a window from a handle that is none.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -43,9 +46,40 @@ pub extern "system" fn ImmIsIME(_layout: usize) -> i32 {
     0
 }
 
-/// ImmGetContext(hWnd): no input context (NULL).
+/// ImmGetContext(hWnd): no input context (NULL). A window of a thread
+/// that has one answers with it on Windows; gala's threads have none, so
+/// the answer is always NULL, with the last error left as it was. A
+/// handle that is no window is ERROR_INVALID_WINDOW_HANDLE, a NULL one
+/// nothing (`user32_test`).
 #[unsafe(no_mangle)]
-pub extern "system" fn ImmGetContext(_hwnd: usize) -> usize {
+pub extern "system" fn ImmGetContext(hwnd: usize) -> usize {
+    window_or_error(hwnd);
+    0
+}
+
+/// ImmAssociateContext(hWnd, hIMC): the input context the window was
+/// associated with, NULL for none, which is what gala always answers --
+/// its threads have no input context, so no window holds one. Windows
+/// sets ERROR_SUCCESS when the association changed and leaves the last
+/// error as it was when it did not, so a call that changes nothing (the
+/// only kind here) leaves it alone. The window is looked at before the
+/// context: NULL is that silent nothing, a handle that is no window
+/// (destroyed among them) is ERROR_INVALID_WINDOW_HANDLE whatever the
+/// context, and then a handle that is no context is
+/// ERROR_INVALID_HANDLE -- which, with no contexts of gala's making, is
+/// every handle that is not NULL. Windows 11; `user32_test`. MSO's UI
+/// delay-loads this (ROADMAP OF).
+#[unsafe(no_mangle)]
+pub extern "system" fn ImmAssociateContext(hwnd: usize, himc: usize) -> usize {
+    if !window_or_error(hwnd) {
+        return 0;
+    }
+    if himc != 0 {
+        // SAFETY: plain call.
+        unsafe { SetLastError(ERROR_INVALID_HANDLE) };
+    }
+    // Nothing was associated and nothing is now, so nothing changed and
+    // the last error stands.
     0
 }
 
@@ -71,13 +105,45 @@ unsafe extern "system" {
     fn SetLastError(code: u32);
 }
 
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "user32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "user32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn IsWindow(hwnd: usize) -> i32;
+}
+
+/// ERROR_INVALID_WINDOW_HANDLE: the handle given is no window.
+const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+/// ERROR_INVALID_HANDLE: the handle given is no input context.
+const ERROR_INVALID_HANDLE: u32 = 6;
+
+/// Whether `hwnd` is a window, as the input functions ask: NULL is no
+/// window and no error either (the call is a silent nothing), a handle
+/// that is no window is ERROR_INVALID_WINDOW_HANDLE, and the last error
+/// is left alone for a window.
+fn window_or_error(hwnd: usize) -> bool {
+    // SAFETY: plain calls.
+    unsafe {
+        if hwnd == 0 {
+            return false;
+        }
+        if IsWindow(hwnd) == 0 {
+            SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+            return false;
+        }
+    }
+    true
+}
+
 /// The answer for a call on input context `himc`: gala makes no input
 /// contexts (ImmGetContext gives NULL), so none is valid; FALSE with
 /// ERROR_INVALID_HANDLE for a handle, nothing set for NULL (as Windows
 /// answers ImmNotifyIME).
 fn no_context(himc: usize) -> i32 {
     // SAFETY: plain calls.
-    unsafe { SetLastError(if himc == 0 { 0 } else { 6 }) }; // ERROR_INVALID_HANDLE
+    unsafe { SetLastError(if himc == 0 { 0 } else { ERROR_INVALID_HANDLE }) };
     0
 }
 
