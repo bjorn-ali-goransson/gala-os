@@ -46,11 +46,22 @@
 //! TrueType outline to a geometry sink. Rotation, skew and sideways runs
 //! are not supported (ledger, E_NOTIMPL).
 //!
-//! Not there yet (each reported to the ledger, E_NOTIMPL): text formats,
-//! layouts and typography, number substitution, the GDI interop object's
-//! methods (the object itself answers for itself), and the
-//! IDWriteFactory1+ interfaces (QueryInterface says E_NOINTERFACE, which
-//! Skia accepts).
+//! Text formats (`format`): what a piece of text is laid out with --
+//! the family, weight, style, stretch, em size and locale, and the
+//! paragraph's alignment, wrapping, direction, tab stop, line spacing
+//! and trimming -- with typography (a font's features) and number
+//! substitution beside them. Word's start-up makes 279 formats in the
+//! tenth of a second before its window, and reads back what it set.
+//!
+//! GDI logical fonts (`logfont`): what one of gala's fonts or faces is
+//! as a LOGFONT, which is how a program carries a font through the GDI
+//! half of its own drawing.
+//!
+//! Not there yet (each reported to the ledger, E_NOTIMPL): text layouts
+//! (the formats above are what a layout is made from), ellipsis
+//! trimming signs, the rest of the GDI interop object's methods (the
+//! object itself answers for itself), and the IDWriteFactory1+
+//! interfaces (QueryInterface says E_NOINTERFACE, which Skia accepts).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -58,7 +69,9 @@
 
 mod analyze;
 mod font;
+mod format;
 mod glyphs;
+mod logfont;
 mod params;
 
 extern crate alloc;
@@ -203,14 +216,14 @@ static FACTORY_VTBL: VTable<57> = VTable([
     params::factory_CreateCustomRenderingParams as *const (),
     factory_register_loader as *const (),
     factory_register_loader as *const (),
-    factory_CreateTextFormat as *const (),
-    factory_CreateTypography as *const (),
+    format::factory_CreateTextFormat as *const (),
+    format::factory_CreateTypography as *const (),
     factory_GetGdiInterop as *const (),
     factory_CreateTextLayout as *const (),
     factory_CreateGdiCompatibleTextLayout as *const (),
     factory_CreateEllipsisTrimmingSign as *const (),
     analyze::factory_CreateTextAnalyzer as *const (),
-    factory_CreateNumberSubstitution as *const (),
+    format::factory_CreateNumberSubstitution as *const (),
     glyphs::create_glyph_run_analysis as *const (),
     // IDWriteFactory1 and the revisions after it, in the order the
     // headers declare them, up to IDWriteFactory7's whole length: a
@@ -274,8 +287,8 @@ static GDI_INTEROP_VTBL: VTable<12> = VTable([
     static_add_ref as *const (),
     static_release as *const (),
     interop_CreateFontFromLOGFONT as *const (),
-    interop_ConvertFontToLOGFONT as *const (),
-    interop_ConvertFontFaceToLOGFONT as *const (),
+    logfont::interop_ConvertFontToLOGFONT as *const (),
+    logfont::interop_ConvertFontFaceToLOGFONT as *const (),
     interop_CreateFontFaceFromHdc as *const (),
     interop_CreateBitmapRenderTarget as *const (),
     interop1_CreateFontFromLOGFONT as *const (),
@@ -599,12 +612,9 @@ macro_rules! not_impl {
 }
 
 not_impl! {
-    factory_CreateTextFormat as "IDWriteFactory::CreateTextFormat"
-    factory_CreateTypography as "IDWriteFactory::CreateTypography"
     factory_CreateTextLayout as "IDWriteFactory::CreateTextLayout"
     factory_CreateGdiCompatibleTextLayout as "IDWriteFactory::CreateGdiCompatibleTextLayout"
     factory_CreateEllipsisTrimmingSign as "IDWriteFactory::CreateEllipsisTrimmingSign"
-    factory_CreateNumberSubstitution as "IDWriteFactory::CreateNumberSubstitution"
     factory1_GetEudcFontCollection as "IDWriteFactory1::GetEudcFontCollection"
     factory1_CreateCustomRenderingParams as "IDWriteFactory1::CreateCustomRenderingParams"
     factory2_GetSystemFontFallback as "IDWriteFactory2::GetSystemFontFallback"
@@ -639,8 +649,6 @@ not_impl! {
     factory7_GetSystemFontSet as "IDWriteFactory7::GetSystemFontSet"
     factory7_GetSystemFontCollection as "IDWriteFactory7::GetSystemFontCollection"
     interop_CreateFontFromLOGFONT as "IDWriteGdiInterop::CreateFontFromLOGFONT"
-    interop_ConvertFontToLOGFONT as "IDWriteGdiInterop::ConvertFontToLOGFONT"
-    interop_ConvertFontFaceToLOGFONT as "IDWriteGdiInterop::ConvertFontFaceToLOGFONT"
     interop_CreateFontFaceFromHdc as "IDWriteGdiInterop::CreateFontFaceFromHdc"
     interop_CreateBitmapRenderTarget as "IDWriteGdiInterop::CreateBitmapRenderTarget"
     interop1_CreateFontFromLOGFONT as "IDWriteGdiInterop1::CreateFontFromLOGFONT(collection)"

@@ -422,6 +422,19 @@ pub fn font_of_face(face: *const c_void) -> Option<usize> {
     FACE_OBJS.iter().position(|f| core::ptr::eq((f as *const Indexed).cast(), face))
 }
 
+/// The font index of a font object of ours.
+pub fn index_of_font(font: *const c_void) -> Option<usize> {
+    FONT_OBJS.iter().position(|f| core::ptr::eq((f as *const Indexed).cast(), font))
+}
+
+/// What one of gala's fonts is as a GDI logical font: its weight,
+/// whether it is italic (no face of Selawik's is) and the name GDI
+/// knows it by, which is the family's name -- a LOGFONT names a family
+/// and says the rest in its own fields.
+pub fn as_logfont(i: usize) -> (u32, bool, &'static [u16]) {
+    (WEIGHTS[i], false, &FAMILY_NAME)
+}
+
 /// The face of a font file object of ours.
 pub fn face_for_file(file: *const c_void) -> Option<*const c_void> {
     let i = FILE_OBJS.iter().position(|f| core::ptr::eq((f as *const Indexed).cast(), file))?;

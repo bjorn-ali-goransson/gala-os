@@ -13429,9 +13429,10 @@ slot that records the method's name where a word past the end of the
 table would be called as a function, and that is where a revision's
 methods go when one is implemented. Its GDI interop object (`GetGdiInterop`, one per factory on
 Windows, so one static object here), which bridges a font and a
-LOGFONT, answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself;
-none of its methods is built, each recording its own name, so the run of
-a program that wants one names it. Test: `dwrite_test` step 11, which
+LOGFONT, answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself; of
+its methods the two LOGFONT conversions are built (`logfont.rs`, below)
+and the rest record their own names, so the run of a program that wants
+one of those names it. Test: `dwrite_test` step 11, which
 takes either answer for a revision -- Windows' object or gala's refusal
 -- because that program runs on Windows too (`user/windows/ci-passing.txt`);
 the refusal itself is pinned by the `dwrite_test` scenario, which expects
@@ -13498,6 +13499,56 @@ happen rather than one that must. GetGdiCompatibleGlyphPlacements is
 refused, its numbers not being the ones measured. Test: `dwrite_test`
 step 12.
 
+Text formats (`format.rs`, IDWriteTextFormat), what a program lays a
+piece of text out with and the busiest call of Word's start-up: 279 of
+them in the tenth of a second before its window
+(`IDWriteFactory::CreateTextFormat`). A format is the font the text is
+asked for -- the family's name, the weight, the style, the stretch, the
+em size and the locale -- and the paragraph's own values beside it: the
+text and paragraph alignment, the word wrapping, the reading and flow
+direction, the incremental tab stop, the line spacing and the trimming.
+It keeps whatever it is given, a family nothing has by that name
+included, because finding a face for a name is the layout's work and not
+the format's; a program reads back what it set, so every value has its
+getter and the two strings answer their length and then their characters
+(E_NOT_SUFFICIENT_BUFFER for a buffer with no room for the terminator,
+measured). The refusals are measured too: a weight outside 1..999, a
+style, a direction or a trimming granularity past its last value, an em
+size that is zero, negative or NaN, a locale not shaped like a BCP-47
+tag (hyphen-separated runs of one to eight characters, the contents
+unchecked and an empty name taken), and a NULL family or locale are each
+E_INVALIDARG, while an out pointer is not validated at all -- real
+DirectWrite faults on a bad one (0xC0000005), so gala does too rather
+than answer where Windows would not. Unlike the static objects above, a
+format is counted, and it holds its trimming sign and its collection
+while it lives. Its vtable is IDWriteTextFormat3's whole length for the
+reason the factory's is IDWriteFactory7's: the fifteen methods those
+three revisions add record their own names in their own slots, where a
+program that takes the format for a later revision on the Windows
+version alone would otherwise call a word past the end of the table.
+Beside them, typography (a list of a font's OpenType features, each a
+tag and a parameter) and number substitution (the method and its
+locale, kept for the layout that will read it). Test: `dwrite_test`
+step 13.
+
+GDI logical fonts (`logfont.rs`): IDWriteGdiInterop's
+ConvertFontToLOGFONT and ConvertFontFaceToLOGFONT, which a program calls
+when it holds a DirectWrite font and has to name it to the GDI half of
+Windows -- to measure with a device context, to put it in a font dialog,
+or to draw with gdi32 after laying the text out with DirectWrite. The
+LOGFONT is of a font and not of a size (measured): the height, the
+width, the escapement and the orientation are all zero, because the em
+size belongs to the text format and not to the font, and what the
+conversion fills in is the weight, the italic flag, DEFAULT_CHARSET,
+OUT_OUTLINE_PRECIS and the family's name as the face name -- the name
+GDI looks a font up by, so gala writes Selawik where Windows writes
+Arial, each the name its own collection answered with. Every font of
+gala's is of the system collection, so the system flag is always set; a
+font of another collection is a ledger row and E_INVALIDARG, and a
+refusal clears the whole structure first as Windows' does, so nothing of
+a font a program was not given can be read back out of it. Test:
+`dwrite_test` step 13.
+
 ### Diagnosis
 
 Without disassembly (CLEAN_ROOM): Chromium's logs go to the serial log
@@ -13517,9 +13568,10 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
   itemizes every bidi run at level 0 and reports a hard line break as
   one that may happen rather than one that must, and the
   GDI-compatible glyph placements are refused. The later factory
-  revisions are refused (none of their methods is implemented), and the
-  GDI interop object answers for itself but implements none of its own
-  ("DirectWrite").
+  revisions are refused (none of their methods is implemented), the
+  methods the later text format revisions (IDWriteTextFormat1 through 3)
+  add are not implemented either, and of the GDI interop object's own
+  methods only the two LOGFONT conversions are ("DirectWrite").
 - Mitigation policies are kept, not enforced; no sandbox (stage 3).
 - One Windows Runtime class (PackageManager, with no packages); no
   shell namespace objects, no COM proxies (see their sections).

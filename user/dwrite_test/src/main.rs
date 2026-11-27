@@ -85,6 +85,55 @@
 //!     CreateTextAnalyzer(NULL), writing through the out pointer
 //!     unchecked, and faults again when asked to analyze a position past
 //!     the end of the source.
+//! 13. the text format, which is what Word asks for 279 times a tenth of
+//!     a second before its window: CreateTextFormat takes a family name,
+//!     a collection (NULL meaning the system's), a weight, a style, a
+//!     stretch, an em size and a locale name, and gives an object that
+//!     keeps every one of them. It is not a lookup: a family no
+//!     collection has, an empty name and a thousand characters are all
+//!     taken and read back verbatim, and only NULL is refused. The
+//!     weight runs 1..=999 (a value between the enumeration's, 450, is
+//!     kept as it is), the style 0..=2, the stretch 1..=9, and the size
+//!     must be a positive number -- 0, a negative and a NaN are
+//!     E_INVALIDARG where 0.0001 and 1e30 are not. A locale name is
+//!     checked for BCP-47's shape and not its length: hyphen-separated
+//!     runs of one to eight characters, so two runs of eight are taken
+//!     where one run of nine is refused, as are a leading or trailing
+//!     hyphen and two running; what is inside a run is never looked at
+//!     ("zz-not-a-locale" and "en_us" are both taken). The format starts
+//!     leading-aligned both ways, left-to-right and top-to-bottom, with
+//!     no wrapping option, the default line spacing, no trimming, and an
+//!     incremental tab stop of four times the em size (measured at 16,
+//!     10, 7.5 and 0.5). Each setter takes its enumeration's values and
+//!     refuses the first past it, leaving the old value behind; the tab
+//!     stop must be positive; a uniform line spacing takes a spacing of
+//!     zero or more with any baseline at all; trimming takes a
+//!     granularity, a delimiter and a count, and no options at all is
+//!     E_INVALIDARG. Every call makes a new object, AddRef and Release
+//!     count it, and it answers its own interface with itself --
+//!     IDWriteTextFormat1, 2 and 3 are the divergence step 11 describes,
+//!     so this step takes either answer and insists only that the slot
+//!     was written. Typography (CreateTypography) is an empty set of font
+//!     features that takes them one at a time, by tag and parameter, and
+//!     reads them back in the order they went in, an index past the end
+//!     being E_INVALIDARG; a tag is four bytes and is not looked at.
+//!     Number substitution (CreateNumberSubstitution) takes a method
+//!     0..=4 and does not look at the locale either, except that only
+//!     NONE may be given no locale at all -- the others have nothing to
+//!     substitute from. And the GDI interop object converts a font or a
+//!     face to a LOGFONT, which is how a program that draws through GDI
+//!     asks for the font it holds: a LOGFONT of a font and not of a size,
+//!     so the height, the width, the escapement and the orientation are
+//!     zero, the weight is the font's own, the character set is
+//!     DEFAULT_CHARSET and the precision OUT_OUTLINE_PRECIS, and the face
+//!     name is the family's own name (measured for two families), which
+//!     this step therefore reads from the collection rather than writing
+//!     down -- a font of the system collection reports itself a system
+//!     font. A NULL font or face is E_INVALIDARG. Measured and not
+//!     asserted, a test having no way to assert a crash: real DirectWrite
+//!     writes through the out pointers of CreateTextFormat,
+//!     CreateTypography, CreateNumberSubstitution, GetTrimming and both
+//!     conversions unchecked, and faults on a NULL one.
 
 #![no_std]
 #![no_main]
@@ -174,6 +223,17 @@ const IID_ANALYSIS_SOURCE: Iid =
     guid(0x688e1a58, 0x5094, 0x47c8, [0xad, 0xc8, 0xfb, 0xce, 0xa6, 0x0a, 0xe9, 0x2b]);
 const IID_ANALYSIS_SINK: Iid =
     guid(0x5810cd44, 0x0ca0, 0x4701, [0xb3, 0xfa, 0xbe, 0xc5, 0x18, 0x2a, 0xe4, 0xf6]);
+const IID_TEXT_FORMAT: Iid =
+    guid(0x9c906818, 0x31d7, 0x4fd3, [0xa1, 0x51, 0x7c, 0x5e, 0x22, 0x5d, 0xb5, 0x5a]);
+/// A text format's later revisions, each adding methods to the one before.
+const IID_TEXT_FORMAT_REVISIONS: [Iid; 3] = [
+    guid(0x5f174b49, 0x0d8b, 0x4cfb, [0x8b, 0xca, 0xf1, 0xcc, 0xe9, 0xd0, 0x6c, 0x67]),
+    guid(0xf67e0edd, 0x9e3d, 0x4ecc, [0x8c, 0x32, 0x41, 0x83, 0x25, 0x3d, 0xfe, 0x70]),
+    guid(0x6d3b5641, 0xe550, 0x430d, [0xa8, 0x5b, 0xb7, 0xbf, 0x48, 0xa9, 0x34, 0x27]),
+];
+/// A GUID of no interface at all, for the refusal every QueryInterface
+/// owes (made up here, so nothing will ever answer it).
+const IID_NOT_AN_INTERFACE: Iid = guid(0x1b1b1b1b, 0x2c2c, 0x3d3d, [0x4e; 8]);
 
 /// The test's objects' QueryInterface: themselves for IUnknown and their
 /// own interface, E_NOINTERFACE (and NULL) for anything else. DirectWrite
@@ -282,6 +342,9 @@ unsafe fn values_of(params: *mut c_void) -> (f32, f32, f32, u32, u32, f32, u32, 
 /// Step 8's texture buffer (static: a frame over a page would need a
 /// stack probe).
 static mut ALPHA: [u8; 3 * 48 * 48] = [0; 3 * 48 * 48];
+
+/// Step 13's thousand-character family name, static for the same reason.
+static mut LONG_NAME: [u16; 1024] = [0; 1024];
 
 /// Step 9's ID2D1SimplifiedGeometrySink: counts what it is told.
 mod sink {
@@ -958,6 +1021,69 @@ fn w(s: &str, buf: &mut [u16; 64]) -> *const u16 {
     buf.as_ptr()
 }
 
+/// LOGFONTW (wingdi.h), which the GDI interop object fills in.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LogFont {
+    height: i32,
+    width: i32,
+    escapement: i32,
+    orientation: i32,
+    weight: i32,
+    italic: u8,
+    underline: u8,
+    strike_out: u8,
+    charset: u8,
+    out_precision: u8,
+    clip_precision: u8,
+    quality: u8,
+    pitch_and_family: u8,
+    face_name: [u16; 32],
+}
+
+impl LogFont {
+    /// Every field zero, so a conversion that writes nothing is seen to.
+    const EMPTY: LogFont = LogFont {
+        height: 0,
+        width: 0,
+        escapement: 0,
+        orientation: 0,
+        weight: 0,
+        italic: 0,
+        underline: 0,
+        strike_out: 0,
+        charset: 0,
+        out_precision: 0,
+        clip_precision: 0,
+        quality: 0,
+        pitch_and_family: 0,
+        face_name: [0; 32],
+    };
+}
+
+/// The 92 bytes GDI's structure is: what the conversions write through.
+const _: () = assert!(core::mem::size_of::<LogFont>() == 92);
+
+/// The characters of `s` before its terminator.
+fn chars(s: &[u16]) -> &[u16] {
+    &s[..s.iter().position(|&c| c == 0).unwrap_or(s.len())]
+}
+
+/// Whether `s` holds `want` and then a terminator.
+fn is_text(s: &[u16], want: &str) -> bool {
+    chars(s).len() == want.len() && want.bytes().zip(s).all(|(b, &c)| u16::from(b) == c)
+}
+
+/// Releases a COM object (Release is slot 2 of every interface).
+///
+/// # Safety
+/// `o` is a COM object this call owns a reference of.
+unsafe fn drop_com(o: *mut c_void) {
+    // SAFETY: as the caller promises.
+    let release: GetU32 = unsafe { method(o, 2) };
+    release(o);
+}
+
 fn tests() {
     // SAFETY (whole function): documented COM calls through each
     // interface's vtable (slot numbers from dwrite.h), valid arguments.
@@ -1620,6 +1746,401 @@ fn tests() {
 
         let release: GetU32 = method(analyzer, 2);
         release(analyzer);
+
+        // 13. Text formats (IDWriteFactory::CreateTextFormat, 15),
+        // typography (16), number substitution (22) and the GDI interop
+        // object's LOGFONT conversions (4, 5): what Word asks for as it
+        // lays its window's text out.
+        const E_NOT_SUFFICIENT_BUFFER: HResult = 0x8007_007a_u32 as i32;
+        /// DWRITE_FONT_FEATURE_TAG_KERNING, which is the bytes "kern".
+        const KERNING: u32 = u32::from_le_bytes(*b"kern");
+        type MakeFormat = extern "system" fn(
+            *mut c_void,
+            *const u16,
+            *mut c_void,
+            u32,
+            u32,
+            u32,
+            f32,
+            *const u16,
+            *mut *mut c_void,
+        ) -> HResult;
+        type SetU32 = extern "system" fn(*mut c_void, u32) -> HResult;
+        type SetF32 = extern "system" fn(*mut c_void, f32) -> HResult;
+        type ReadString = extern "system" fn(*mut c_void, *mut u16, u32) -> HResult;
+        let make_format: MakeFormat = method(factory, 15);
+        let (mut fb, mut lb, mut nb) = ([0u16; 64], [0u16; 64], [0u16; 64]);
+        // The family step 2 found, and the locale every format here is
+        // made with. The name is one any Windows install has, and gala's
+        // collection answers it with its own family (FindFamilyName).
+        let arial = w("Arial", &mut fb);
+        let enus = w("en-us", &mut lb);
+        let make = |family: *const u16,
+                    weight: u32,
+                    style: u32,
+                    stretch: u32,
+                    size: f32,
+                    locale: *const u16|
+         -> (HResult, *mut c_void) {
+            let mut made: *mut c_void = core::ptr::null_mut();
+            let r = make_format(
+                factory,
+                family,
+                core::ptr::null_mut(),
+                weight,
+                style,
+                stretch,
+                size,
+                locale,
+                &mut made,
+            );
+            (r, made)
+        };
+
+        // A format keeps every value it was made with, and both strings
+        // verbatim -- a format is not a lookup, and a family no
+        // collection has is taken as readily (check 45). Each string
+        // wants a buffer for its terminator as well: its length exactly
+        // is E_NOT_SUFFICIENT_BUFFER.
+        let (r, fmt) = make(arial, 400, 0, 5, 16.0, enus);
+        check(r == 0 && !fmt.is_null(), 41);
+        let family_name_length: GetU32 = method(fmt, 20);
+        let family_name: ReadString = method(fmt, 21);
+        let locale_name_length: GetU32 = method(fmt, 26);
+        let locale_name: ReadString = method(fmt, 27);
+        let font_weight: GetU32 = method(fmt, 22);
+        let font_style: GetU32 = method(fmt, 23);
+        let font_stretch: GetU32 = method(fmt, 24);
+        let font_size: GetF32 = method(fmt, 25);
+        check(family_name_length(fmt) == 5 && locale_name_length(fmt) == 5, 41);
+        let mut read = [0u16; 64];
+        check(family_name(fmt, read.as_mut_ptr(), 5) == E_NOT_SUFFICIENT_BUFFER, 41);
+        check(family_name(fmt, read.as_mut_ptr(), 0) == E_NOT_SUFFICIENT_BUFFER, 41);
+        check(family_name(fmt, read.as_mut_ptr(), 6) == 0 && is_text(&read, "Arial"), 41);
+        check(locale_name(fmt, read.as_mut_ptr(), 5) == E_NOT_SUFFICIENT_BUFFER, 41);
+        check(locale_name(fmt, read.as_mut_ptr(), 6) == 0 && is_text(&read, "en-us"), 41);
+        check(font_weight(fmt) == 400 && font_style(fmt) == 0 && font_stretch(fmt) == 5, 41);
+        check(font_size(fmt) == 16.0, 41);
+
+        // A NULL collection means the system's, and the format answers
+        // that same object (measured: the pointer GetSystemFontCollection
+        // gives).
+        let format_collection: GetPtr = method(fmt, 19);
+        let mut held: *mut c_void = core::ptr::null_mut();
+        check(format_collection(fmt, &mut held) == 0 && held == collection, 42);
+        drop_com(held);
+
+        // What a format starts with: leading alignment both ways, no
+        // wrapping option, left-to-right and top-to-bottom, the default
+        // line spacing, no trimming -- and an incremental tab stop of
+        // four times the em size (measured at 16, 10, 7.5 and 0.5).
+        let text_alignment: GetU32 = method(fmt, 11);
+        let paragraph_alignment: GetU32 = method(fmt, 12);
+        let word_wrapping: GetU32 = method(fmt, 13);
+        let reading_direction: GetU32 = method(fmt, 14);
+        let flow_direction: GetU32 = method(fmt, 15);
+        let tab_stop: GetF32 = method(fmt, 16);
+        let get_trimming: extern "system" fn(
+            *mut c_void,
+            *mut [u32; 3],
+            *mut *mut c_void,
+        ) -> HResult = method(fmt, 17);
+        let get_line_spacing: extern "system" fn(
+            *mut c_void,
+            *mut u32,
+            *mut f32,
+            *mut f32,
+        ) -> HResult = method(fmt, 18);
+        check(text_alignment(fmt) == 0 && paragraph_alignment(fmt) == 0, 43);
+        check(word_wrapping(fmt) == 0 && reading_direction(fmt) == 0, 43);
+        check(flow_direction(fmt) == 0 && tab_stop(fmt) == 64.0, 43);
+        let (mut spacing_method, mut spacing, mut baseline) = (9u32, 9f32, 9f32);
+        check(get_line_spacing(fmt, &mut spacing_method, &mut spacing, &mut baseline) == 0, 43);
+        check(spacing_method == 0 && spacing == 0.0 && baseline == 0.0, 43);
+        let mut trimming = [9u32; 3];
+        // A pointer that is neither answer, so the call is seen to write it.
+        let mut sign: *mut c_void = fmt;
+        check(get_trimming(fmt, &mut trimming, &mut sign) == 0, 43);
+        check(trimming == [0, 0, 0] && sign.is_null(), 43);
+        let (r, ten) = make(arial, 400, 0, 5, 10.0, enus);
+        check(r == 0, 43);
+        let ten_tab: GetF32 = method(ten, 16);
+        check(ten_tab(ten) == 40.0, 43);
+        drop_com(ten);
+
+        // A format is a counted object of its own: every call makes
+        // another, AddRef and Release count it, and it answers its own
+        // interface with itself. The revisions (IDWriteTextFormat1, 2 and
+        // 3) are the divergence step 11 describes -- Windows answers them
+        // with this same object, gala refuses each until the methods it
+        // adds exist -- so this step takes either answer and insists only
+        // that the slot was written. IUnknown is not asked about at all:
+        // Windows answers it with a different pointer again.
+        let (r, another) = make(arial, 400, 0, 5, 16.0, enus);
+        check(r == 0 && another != fmt, 44);
+        drop_com(another);
+        let format_qi: extern "system" fn(*mut c_void, *const Iid, *mut *mut c_void) -> HResult =
+            method(fmt, 0);
+        let add_ref: GetU32 = method(fmt, 1);
+        let release: GetU32 = method(fmt, 2);
+        let mut got: *mut c_void = core::ptr::null_mut();
+        check(format_qi(fmt, &IID_TEXT_FORMAT, &mut got) == 0 && got == fmt, 44);
+        drop_com(got);
+        got = fmt;
+        check(
+            format_qi(fmt, &IID_NOT_AN_INTERFACE, &mut got) == E_NOINTERFACE && got.is_null(),
+            44,
+        );
+        for revision in IID_TEXT_FORMAT_REVISIONS {
+            got = fmt;
+            let hr = format_qi(fmt, &revision, &mut got);
+            if hr == 0 {
+                check(!got.is_null(), 44);
+                drop_com(got);
+            } else {
+                check(hr == E_NOINTERFACE && got.is_null(), 44);
+            }
+        }
+        check(add_ref(fmt) == 2 && release(fmt) == 1, 44);
+
+        // What CreateTextFormat refuses (measured). A family name is only
+        // a string: empty, unknown, and a thousand characters long are
+        // all taken, and NULL is not. The weight runs 1..=999, and a
+        // value between the enumeration's is kept as it is; the style
+        // runs 0..=2 and the stretch 1..=9; the size must be a positive
+        // number.
+        check(make(core::ptr::null(), 400, 0, 5, 16.0, enus).0 == E_INVALIDARG, 45);
+        let mut eb = [0u16; 64];
+        let empty = w("", &mut eb);
+        for family in [empty, w("No Such Family 42", &mut nb)] {
+            let (r, made) = make(family, 400, 0, 5, 16.0, enus);
+            check(r == 0, 45);
+            drop_com(made);
+        }
+        // One thread; the only reference to LONG_NAME.
+        let long = core::slice::from_raw_parts_mut((&raw mut LONG_NAME).cast::<u16>(), 1024);
+        for c in long.iter_mut().take(1000) {
+            *c = u16::from(b'a');
+        }
+        let (r, made) = make(long.as_ptr(), 400, 0, 5, 16.0, enus);
+        check(r == 0, 45);
+        let long_length: GetU32 = method(made, 20);
+        check(long_length(made) == 1000, 45);
+        drop_com(made);
+        for size in [0.0, -1.0, f32::NAN] {
+            check(make(arial, 400, 0, 5, size, enus).0 == E_INVALIDARG, 45);
+        }
+        for size in [0.0001, 1e30] {
+            let (r, made) = make(arial, 400, 0, 5, size, enus);
+            check(r == 0, 45);
+            drop_com(made);
+        }
+        for (wt, st, sr) in [(0, 0, 5), (1000, 0, 5), (400, 3, 5), (400, 0, 0), (400, 0, 10)] {
+            check(make(arial, wt, st, sr, 16.0, enus).0 == E_INVALIDARG, 45);
+        }
+        for (wt, st, sr) in [(1, 0, 5), (999, 0, 5), (400, 2, 5), (400, 0, 1), (400, 0, 9)] {
+            let (r, made) = make(arial, wt, st, sr, 16.0, enus);
+            check(r == 0, 45);
+            drop_com(made);
+        }
+        let (r, odd) = make(arial, 450, 0, 5, 16.0, enus);
+        check(r == 0, 45);
+        let odd_weight: GetU32 = method(odd, 22);
+        check(odd_weight(odd) == 450, 45);
+        drop_com(odd);
+        check(make(arial, 400, 0, 5, 16.0, core::ptr::null()).0 == E_INVALIDARG, 45);
+        let (r, made) = make(arial, 400, 0, 5, 16.0, empty);
+        check(r == 0, 45);
+        drop_com(made);
+
+        // What a locale name may look like, which is measured and is not
+        // a length: hyphen-separated runs of one to eight characters,
+        // BCP-47's shape. Two runs of eight are taken where one run of
+        // nine is not, and a name may not begin or end with a hyphen or
+        // hold two running. What is inside a run is not looked at.
+        for locale in ["a", "aaaaaaaa", "aaaaaaaa-aaaaaaaa", "en_us", "zz-not-a-locale"] {
+            let (r, made) = make(arial, 400, 0, 5, 16.0, w(locale, &mut nb));
+            check(r == 0, 46);
+            drop_com(made);
+        }
+        for locale in ["aaaaaaaaa", "aaaaaaaaaaaa", "en-", "-en", "en--us"] {
+            check(make(arial, 400, 0, 5, 16.0, w(locale, &mut nb)).0 == E_INVALIDARG, 46);
+        }
+
+        // The settable half: each setter takes the enumeration's values
+        // and refuses the first past it, a refused call leaves the old
+        // value, and every getter reads back what was set. The tab stop
+        // must be positive; a uniform line spacing takes a spacing of
+        // zero or more with any baseline at all; trimming takes a
+        // granularity, a delimiter and a count, and no options at all is
+        // E_INVALIDARG.
+        let set_text_alignment: SetU32 = method(fmt, 3);
+        let set_paragraph_alignment: SetU32 = method(fmt, 4);
+        let set_word_wrapping: SetU32 = method(fmt, 5);
+        let set_reading_direction: SetU32 = method(fmt, 6);
+        let set_flow_direction: SetU32 = method(fmt, 7);
+        let set_tab_stop: SetF32 = method(fmt, 8);
+        let set_trimming: extern "system" fn(*mut c_void, *const [u32; 3], *mut c_void) -> HResult =
+            method(fmt, 9);
+        let set_line_spacing: extern "system" fn(*mut c_void, u32, f32, f32) -> HResult =
+            method(fmt, 10);
+        check(set_text_alignment(fmt, 2) == 0 && text_alignment(fmt) == 2, 47);
+        check(set_text_alignment(fmt, 3) == 0 && text_alignment(fmt) == 3, 47);
+        check(set_text_alignment(fmt, 4) == E_INVALIDARG && text_alignment(fmt) == 3, 47);
+        check(set_paragraph_alignment(fmt, 2) == 0 && paragraph_alignment(fmt) == 2, 47);
+        check(set_paragraph_alignment(fmt, 3) == E_INVALIDARG && paragraph_alignment(fmt) == 2, 47);
+        check(set_word_wrapping(fmt, 4) == 0 && word_wrapping(fmt) == 4, 47);
+        check(set_word_wrapping(fmt, 5) == E_INVALIDARG && word_wrapping(fmt) == 4, 47);
+        check(set_reading_direction(fmt, 3) == 0 && reading_direction(fmt) == 3, 47);
+        check(set_reading_direction(fmt, 4) == E_INVALIDARG && reading_direction(fmt) == 3, 47);
+        check(set_flow_direction(fmt, 3) == 0 && flow_direction(fmt) == 3, 47);
+        check(set_flow_direction(fmt, 4) == E_INVALIDARG && flow_direction(fmt) == 3, 47);
+        check(set_tab_stop(fmt, 40.0) == 0 && tab_stop(fmt) == 40.0, 47);
+        check(set_tab_stop(fmt, 0.0) == E_INVALIDARG && tab_stop(fmt) == 40.0, 47);
+        check(set_tab_stop(fmt, -1.0) == E_INVALIDARG && tab_stop(fmt) == 40.0, 47);
+        check(set_line_spacing(fmt, 1, 20.0, 16.0) == 0, 47);
+        check(get_line_spacing(fmt, &mut spacing_method, &mut spacing, &mut baseline) == 0, 47);
+        check(spacing_method == 1 && spacing == 20.0 && baseline == 16.0, 47);
+        check(set_line_spacing(fmt, 1, -1.0, 0.0) == E_INVALIDARG, 47);
+        check(set_line_spacing(fmt, 3, 20.0, 16.0) == E_INVALIDARG, 47);
+        check(set_line_spacing(fmt, 7, 20.0, 16.0) == E_INVALIDARG, 47);
+        check(get_line_spacing(fmt, &mut spacing_method, &mut spacing, &mut baseline) == 0, 47);
+        check(spacing_method == 1 && spacing == 20.0 && baseline == 16.0, 47);
+        check(set_line_spacing(fmt, 2, 20.0, 16.0) == 0, 47);
+        check(set_line_spacing(fmt, 1, 0.0, 0.0) == 0, 47);
+        check(set_line_spacing(fmt, 1, 20.0, -1.0) == 0, 47);
+        check(set_trimming(fmt, &[1, 0, 0], core::ptr::null_mut()) == 0, 47);
+        check(get_trimming(fmt, &mut trimming, &mut sign) == 0, 47);
+        check(trimming == [1, 0, 0] && sign.is_null(), 47);
+        check(set_trimming(fmt, core::ptr::null(), core::ptr::null_mut()) == E_INVALIDARG, 47);
+        check(set_trimming(fmt, &[3, 0, 0], core::ptr::null_mut()) == E_INVALIDARG, 47);
+        check(set_trimming(fmt, &[2, 0, 0], core::ptr::null_mut()) == 0, 47);
+        check(set_trimming(fmt, &[1, u32::from(b','), 7], core::ptr::null_mut()) == 0, 47);
+        check(get_trimming(fmt, &mut trimming, &mut sign) == 0, 47);
+        check(trimming == [1, u32::from(b','), 7] && sign.is_null(), 47);
+        // The read-only half is untouched by all of that.
+        check(family_name_length(fmt) == 5 && font_weight(fmt) == 400, 47);
+        check(font_size(fmt) == 16.0 && font_stretch(fmt) == 5, 47);
+        drop_com(fmt);
+
+        // Typography (CreateTypography, 16): an empty set of font
+        // features that takes them one at a time, by tag and parameter,
+        // and reads them back in the order they went in. A tag is four
+        // bytes and is not looked at; an index past the end is
+        // E_INVALIDARG.
+        let create_typography: GetPtr = method(factory, 16);
+        let mut typography: *mut c_void = core::ptr::null_mut();
+        check(create_typography(factory, &mut typography) == 0 && !typography.is_null(), 48);
+        let feature_count: GetU32 = method(typography, 4);
+        let add_feature: extern "system" fn(*mut c_void, [u32; 2]) -> HResult =
+            method(typography, 3);
+        let get_feature: extern "system" fn(*mut c_void, u32, *mut [u32; 2]) -> HResult =
+            method(typography, 5);
+        check(feature_count(typography) == 0, 48);
+        check(add_feature(typography, [KERNING, 1]) == 0 && feature_count(typography) == 1, 48);
+        let mut feature = [9u32; 2];
+        check(get_feature(typography, 0, &mut feature) == 0 && feature == [KERNING, 1], 48);
+        check(get_feature(typography, 1, &mut feature) == E_INVALIDARG, 48);
+        check(add_feature(typography, [0, 0]) == 0 && feature_count(typography) == 2, 48);
+        check(get_feature(typography, 1, &mut feature) == 0 && feature == [0, 0], 48);
+        check(get_feature(typography, 0, &mut feature) == 0 && feature == [KERNING, 1], 48);
+        check(get_feature(typography, 2, &mut feature) == E_INVALIDARG, 48);
+        drop_com(typography);
+
+        // Number substitution (CreateNumberSubstitution, 22): a method,
+        // a locale and whether the user's own override is ignored. The
+        // method runs 0..=4 (FROM_CULTURE to TRADITIONAL) and the locale
+        // is not looked at -- but only NONE (2) may be given no locale at
+        // all, measured, the others having nothing to substitute from.
+        let create_substitution: extern "system" fn(
+            *mut c_void,
+            u32,
+            *const u16,
+            i32,
+            *mut *mut c_void,
+        ) -> HResult = method(factory, 22);
+        let mut substitution: *mut c_void = core::ptr::null_mut();
+        for (wanted, locale, ignore) in [
+            (2u32, enus, 0i32),
+            (3, w("ar-eg", &mut nb), 1),
+            (0, w("zz-not-a-locale", &mut nb), 0),
+            (4, enus, 0),
+            (2, core::ptr::null(), 0),
+        ] {
+            check(create_substitution(factory, wanted, locale, ignore, &mut substitution) == 0, 49);
+            check(!substitution.is_null(), 49);
+            drop_com(substitution);
+        }
+        for wanted in [0u32, 1, 3, 4] {
+            check(
+                create_substitution(factory, wanted, core::ptr::null(), 0, &mut substitution)
+                    == E_INVALIDARG,
+                49,
+            );
+            check(create_substitution(factory, wanted, empty, 0, &mut substitution) == 0, 49);
+            drop_com(substitution);
+        }
+        for wanted in [5u32, 9] {
+            check(
+                create_substitution(factory, wanted, enus, 0, &mut substitution) == E_INVALIDARG,
+                49,
+            );
+        }
+
+        // The GDI interop object's LOGFONT conversions (4, 5): how a
+        // program that draws through GDI asks for the font it holds as
+        // DirectWrite's. The height, the width, the escapement and the
+        // orientation are zero -- a LOGFONT of a font and not of a size
+        // -- the weight is the font's own, the character set is
+        // DEFAULT_CHARSET (1) and the precision OUT_OUTLINE_PRECIS (8),
+        // and the face name is the family's own name, whichever family
+        // the collection answered with (so the name is read from the
+        // collection here and not written down: gala's family is
+        // Selawik where Windows' is Arial). A font of the system
+        // collection is a system font.
+        let get_interop: GetPtr = method(factory, 17);
+        let mut interop: *mut c_void = core::ptr::null_mut();
+        check(get_interop(factory, &mut interop) == 0 && !interop.is_null(), 50);
+        let to_logfont: extern "system" fn(
+            *mut c_void,
+            *mut c_void,
+            *mut LogFont,
+            *mut i32,
+        ) -> HResult = method(interop, 4);
+        let face_to_logfont: extern "system" fn(*mut c_void, *mut c_void, *mut LogFont) -> HResult =
+            method(interop, 5);
+        let mut family_text = [0u16; 64];
+        let family_string: extern "system" fn(*mut c_void, u32, *mut u16, u32) -> HResult =
+            method(names, 8);
+        check(family_string(names, 0, family_text.as_mut_ptr(), 64) == 0, 50);
+        let mut lf = LogFont::EMPTY;
+        let mut is_system = 0i32;
+        check(to_logfont(interop, font, &mut lf, &mut is_system) == 0 && is_system != 0, 50);
+        check(lf.height == 0 && lf.width == 0 && lf.escapement == 0 && lf.orientation == 0, 50);
+        check(lf.weight == weight(font) as i32 && lf.italic == 0 && lf.underline == 0, 50);
+        check(lf.strike_out == 0 && lf.charset == 1 && lf.out_precision == 8, 50);
+        check(lf.clip_precision == 0 && lf.quality == 0 && lf.pitch_and_family == 0, 50);
+        check(chars(&lf.face_name) == chars(&family_text), 50);
+        check(
+            to_logfont(interop, core::ptr::null_mut(), &mut lf, &mut is_system) == E_INVALIDARG,
+            50,
+        );
+
+        // The same LOGFONT for that font's face (ConvertFontFaceToLOGFONT
+        // reports no system flag: a face is one either way). The family
+        // name and the weight are read from where step 50 read them,
+        // because a refused conversion leaves its LOGFONT as it likes --
+        // real DirectWrite clears the whole structure before it refuses.
+        let mut face_lf = LogFont::EMPTY;
+        check(face_to_logfont(interop, face, &mut face_lf) == 0, 51);
+        check(face_lf.height == 0 && face_lf.weight == weight(font) as i32, 51);
+        check(face_lf.charset == 1 && face_lf.out_precision == 8, 51);
+        check(
+            face_lf.pitch_and_family == 0 && chars(&face_lf.face_name) == chars(&family_text),
+            51,
+        );
+        check(face_to_logfont(interop, core::ptr::null_mut(), &mut face_lf) == E_INVALIDARG, 51);
+        drop_com(interop);
 
         // Release what we were given (each Release is slot 2).
         for o in
