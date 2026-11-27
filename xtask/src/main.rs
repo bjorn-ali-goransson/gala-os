@@ -1650,6 +1650,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("ole32_test", "user32.dll", "Windows/System32"),
     ("ole32_test", "gdi32.dll", "Windows/System32"),
     ("ole32_test", "user/bin/ole32_test.exe", "gala"),
+    ("stg_test", "ntdll.dll", "Windows/System32"),
+    ("stg_test", "kernel32.dll", "Windows/System32"),
+    ("stg_test", "msvcrt.dll", "Windows/System32"),
+    ("stg_test", "ole32.dll", "Windows/System32"),
+    ("stg_test", "advapi32.dll", "Windows/System32"),
+    ("stg_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("stg_test", "user/bin/stg_test.exe", "gala"),
     ("moniker_test", "ntdll.dll", "Windows/System32"),
     ("moniker_test", "kernel32.dll", "Windows/System32"),
     ("moniker_test", "msvcrt.dll", "Windows/System32"),
@@ -10541,6 +10548,19 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=ole32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["ole32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: ole32's compound files (MS-CFB) as Windows reads them --
+        // StgOpenStorage's modes and errors, a root storage's Stat and
+        // interfaces, lookups and enumeration in the directory tree,
+        // streams on both the FAT and the mini FAT chain -- on a file
+        // the test builds byte by byte. Office's Mso20win32client.dll
+        // delay-loads StgOpenStorage and WWLIB.DLL calls it on start-up
+        // (user/stg_test/main.c, mingw).
+        name: "stg_test",
+        cmdline: "qemu_exit run=stg_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["stg_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: shell32's ShellExecuteExW, dropped files, DragAcceptFiles

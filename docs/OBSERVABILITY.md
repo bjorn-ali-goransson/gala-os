@@ -615,6 +615,23 @@ took.
   `ole32.dll!CoGetClassObject(the activation filter kept replacing the
   class)`, "unsupported", with that limit as its detail. Scenario
   `ole32_test`.
+  Compound files (ole32): the open of one leaves
+  `ole32.dll!StgOpenStorage(opened)`, "reached", with the STGM mode as
+  the detail, so a run says which modes a program asked a compound file
+  for before anything inside it is read, and a file gala cannot read
+  says why in its own row (`(corrupt allocation table)`, `(corrupt mini
+  allocation table)`, `(no root entry)`, `(flags gala has not built)`,
+  the mode again as the detail). The read-only storage's refusals are
+  rows of their own, named after the method they refuse and bounded by
+  one row per kind: a write (`IStream::Write(read-only storage)`,
+  `IStream::SetSize(read-only storage)` and the IStorage calls beside
+  them), a CopyTo or MoveElementTo, an interface Windows' storage
+  answers and gala's does not
+  (`IStorage::QueryInterface(IPropertySetStorage)`, `(IRootStorage)`,
+  `(IMarshal)`), an exclusion list, a priority storage, and the limit on
+  how many elements may be held open at once
+  (`IStorage::OpenStream(too many elements open)`, the limit as the
+  detail). Scenario `stg_test`; ARCHITECTURE "Compound files".
   A message box: `user32.dll!MessageBoxW(<the text>)`, "unsupported",
   with the kind (MB_*) as the detail, because **a program that gives up
   says so in a box and leaves nothing else behind**: Word's startup ends

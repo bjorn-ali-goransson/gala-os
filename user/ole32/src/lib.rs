@@ -13,6 +13,11 @@
 //!   from ProcessPrng); StringFromGUID2.
 //! - CreateStreamOnHGlobal / GetHGlobalFromStream: an IStream on a global
 //!   memory block, the caller's or its own (stream.rs).
+//! - Compound files, read-only (storage.rs): StgOpenStorage and
+//!   StgIsStorageFile over a file on disk, with the IStorage, IStream
+//!   and IEnumSTATSTG objects they hand out. Writing one, and the
+//!   transactions and exclusion lists that go with writing, is not
+//!   built (recorded in the ledger).
 //! - CoCreateFreeThreadedMarshaler: an aggregatable object with IMarshal,
 //!   whose marshaling methods are not there yet (E_NOTIMPL, recorded),
 //!   like CoMarshalInterface and friends (no cross-apartment calls yet).
@@ -40,6 +45,7 @@ mod moniker;
 mod persist;
 mod props;
 mod roerror;
+mod storage;
 mod stream;
 mod unimplemented;
 mod winrt;

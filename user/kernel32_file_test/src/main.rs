@@ -22,6 +22,11 @@
 //! an empty path (ERROR_PATH_NOT_FOUND from GetFileAttributes(Ex)W,
 //! FindFirstFileW, CreateFileW, DeleteFileW, RemoveDirectoryW and
 //! CreateDirectoryW, as Wine's conformance tests give Windows' results),
+//! a name that ends in a backslash (it asks for a directory, on a create
+//! as much as on an open: ERROR_PATH_NOT_FOUND over one, ERROR_DIRECTORY
+//! over a file and over a name nothing is at yet, where the same names
+//! without the separator give the access denial and the open, and
+//! CreateDirectoryW is content either way),
 //! all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
 
@@ -179,15 +184,20 @@ const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const SHARE_ALL: u32 = 7;
 const CREATE_NEW: u32 = 1;
+const CREATE_ALWAYS: u32 = 2;
 const OPEN_EXISTING: u32 = 3;
+const OPEN_ALWAYS: u32 = 4;
+const TRUNCATE_EXISTING: u32 = 5;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const INVALID_FILE_ATTRIBUTES: u32 = 0xffff_ffff;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
+const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_NO_MORE_FILES: u32 = 18;
 const ERROR_FILE_EXISTS: u32 = 80;
 const ERROR_ALREADY_EXISTS: u32 = 183;
+const ERROR_DIRECTORY: u32 = 267;
 const FILE_ID_BOTH_DIRECTORY_RESTART_INFO: u32 = 11;
 const FILE_FULL_DIRECTORY_RESTART_INFO: u32 = 15;
 const FILE_FULL_DIRECTORY_INFO: u32 = 14;
@@ -496,6 +506,200 @@ fn run() -> Result<(), u32> {
         SetLastError(0);
         c.eq(CreateDirectoryW(empty.as_ptr(), core::ptr::null_mut()) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
+
+        // A name that ends in a backslash asks for a directory. Windows
+        // reads the name as the caller wrote it, not the path it
+        // canonicalizes to: "<dir>\\" is ERROR_PATH_NOT_FOUND, where
+        // "<dir>" and "<dir>\\." are the access denial a directory opened
+        // without FILE_FLAG_BACKUP_SEMANTICS gives, and a trailing
+        // forward slash is not a trailing backslash. The NTSTATUS behind
+        // all three is the same STATUS_FILE_IS_A_DIRECTORY: the Win32
+        // layer makes the difference, not the file system. With the flag
+        // the open succeeds. Over a file the file system itself refuses
+        // the name (STATUS_NOT_A_DIRECTORY, ERROR_DIRECTORY), and a
+        // missing last component is still ERROR_FILE_NOT_FOUND. Office's
+        // ole32 turns the ERROR_PATH_NOT_FOUND into STG_E_PATHNOTFOUND
+        // (user/stg_test).
+        const FILE_IS_A_DIRECTORY: u64 = 0xc000_00ba;
+        const NOT_A_DIRECTORY: u64 = 0xc000_0103;
+        const OBJECT_NAME_NOT_FOUND: u64 = 0xc000_0034;
+        for (path, error, status) in [
+            (Path::new(temp, b"gala_k32"), ERROR_ACCESS_DENIED, FILE_IS_A_DIRECTORY),
+            (Path::new(temp, b"gala_k32\\"), ERROR_PATH_NOT_FOUND, FILE_IS_A_DIRECTORY),
+            (Path::new(temp, b"gala_k32\\."), ERROR_ACCESS_DENIED, FILE_IS_A_DIRECTORY),
+            (Path::new(temp, b"gala_k32/"), ERROR_ACCESS_DENIED, FILE_IS_A_DIRECTORY),
+            (Path::new(temp, b"gala_k32\\a.txt\\"), ERROR_DIRECTORY, NOT_A_DIRECTORY),
+            (Path::new(temp, b"gala_k32\\missing\\"), ERROR_FILE_NOT_FOUND, OBJECT_NAME_NOT_FOUND),
+        ] {
+            SetLastError(0);
+            let h = CreateFileW(
+                path.ptr(),
+                GENERIC_READ,
+                7,
+                core::ptr::null_mut(),
+                OPEN_EXISTING,
+                0,
+                core::ptr::null_mut(),
+            );
+            c.eq(h as isize as u64, INVALID_HANDLE_VALUE as isize as u64)?;
+            c.eq(GetLastError().into(), error.into())?;
+            c.eq(RtlGetLastNtStatus().into(), status)?;
+        }
+        // The same directory, named with the trailing backslash, opens
+        // with FILE_FLAG_BACKUP_SEMANTICS.
+        let h = CreateFileW(
+            Path::new(temp, b"gala_k32\\").ptr(),
+            GENERIC_READ,
+            7,
+            core::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            core::ptr::null_mut(),
+        );
+        c.ok(h != INVALID_HANDLE_VALUE, 0)?;
+        c.ok(CloseHandle(h) != 0, 0)?;
+
+        // The name asks for a directory on every disposition, not only on
+        // an open: a create under it is refused by the file system itself
+        // (STATUS_NOT_A_DIRECTORY, ERROR_DIRECTORY) even where nothing
+        // exists, so no file is left behind -- while the same name
+        // without the separator creates one. TRUNCATE_EXISTING creates
+        // nothing, so it reports the missing name instead.
+        const OBJECT_NAME_COLLISION: u64 = 0xc000_0035;
+        const OBJECT_PATH_NOT_FOUND: u64 = 0xc000_003a;
+        for (disposition, error, status) in [
+            (CREATE_NEW, ERROR_DIRECTORY, NOT_A_DIRECTORY),
+            (CREATE_ALWAYS, ERROR_DIRECTORY, NOT_A_DIRECTORY),
+            (OPEN_ALWAYS, ERROR_DIRECTORY, NOT_A_DIRECTORY),
+            (TRUNCATE_EXISTING, ERROR_FILE_NOT_FOUND, OBJECT_NAME_NOT_FOUND),
+        ] {
+            SetLastError(0);
+            let h = CreateFileW(
+                Path::new(temp, b"gala_k32\\new.txt\\").ptr(),
+                GENERIC_WRITE,
+                SHARE_ALL,
+                core::ptr::null_mut(),
+                disposition,
+                0,
+                core::ptr::null_mut(),
+            );
+            c.eq(h as isize as u64, INVALID_HANDLE_VALUE as isize as u64)?;
+            c.eq(GetLastError().into(), error.into())?;
+            c.eq(RtlGetLastNtStatus().into(), status)?;
+            c.eq(
+                GetFileAttributesW(Path::new(temp, b"gala_k32\\new.txt").ptr()).into(),
+                INVALID_FILE_ATTRIBUTES.into(),
+            )?;
+        }
+        let h = CreateFileW(
+            Path::new(temp, b"gala_k32\\new.txt").ptr(),
+            GENERIC_WRITE,
+            SHARE_ALL,
+            core::ptr::null_mut(),
+            CREATE_NEW,
+            0,
+            core::ptr::null_mut(),
+        );
+        c.ok(h != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        c.ok(CloseHandle(h) != 0, 0)?;
+        c.ok(DeleteFileW(Path::new(temp, b"gala_k32\\new.txt").ptr()) != 0, 0)?;
+
+        // Over the file that is there, and over the directory: the same
+        // two answers as an open gives, on a creating disposition too.
+        for (path, disposition, error, status) in [
+            (&b"gala_k32\\a.txt\\"[..], CREATE_ALWAYS, ERROR_DIRECTORY, NOT_A_DIRECTORY),
+            (b"gala_k32\\a.txt\\", OPEN_ALWAYS, ERROR_DIRECTORY, NOT_A_DIRECTORY),
+            (b"gala_k32\\", CREATE_NEW, ERROR_PATH_NOT_FOUND, FILE_IS_A_DIRECTORY),
+            (b"gala_k32\\", CREATE_ALWAYS, ERROR_PATH_NOT_FOUND, FILE_IS_A_DIRECTORY),
+            (b"gala_k32\\", OPEN_ALWAYS, ERROR_PATH_NOT_FOUND, FILE_IS_A_DIRECTORY),
+            (b"gala_k32\\nope\\new.txt\\", CREATE_NEW, ERROR_PATH_NOT_FOUND, OBJECT_PATH_NOT_FOUND),
+        ] {
+            SetLastError(0);
+            let h = CreateFileW(
+                Path::new(temp, path).ptr(),
+                GENERIC_WRITE,
+                SHARE_ALL,
+                core::ptr::null_mut(),
+                disposition,
+                0,
+                core::ptr::null_mut(),
+            );
+            c.eq(h as isize as u64, INVALID_HANDLE_VALUE as isize as u64)?;
+            c.eq(GetLastError().into(), error.into())?;
+            c.eq(RtlGetLastNtStatus().into(), status)?;
+        }
+
+        // Over something that is already there, a create is told what
+        // the name and the open insist on before it is told the name is
+        // taken: the file named through a separator is ERROR_DIRECTORY
+        // where the same name without one is ERROR_FILE_EXISTS, and the
+        // directory an open asks no kind of collides whether or not the
+        // name carries the separator.
+        for (path, flags, error, status) in [
+            (&b"gala_k32\\a.txt\\"[..], 0, ERROR_DIRECTORY, NOT_A_DIRECTORY),
+            (b"gala_k32\\a.txt", 0, ERROR_FILE_EXISTS, OBJECT_NAME_COLLISION),
+            (b"gala_k32\\", FILE_FLAG_BACKUP_SEMANTICS, ERROR_FILE_EXISTS, OBJECT_NAME_COLLISION),
+            (b"gala_k32", FILE_FLAG_BACKUP_SEMANTICS, ERROR_FILE_EXISTS, OBJECT_NAME_COLLISION),
+        ] {
+            SetLastError(0);
+            let h = CreateFileW(
+                Path::new(temp, path).ptr(),
+                GENERIC_READ,
+                SHARE_ALL,
+                core::ptr::null_mut(),
+                CREATE_NEW,
+                flags,
+                core::ptr::null_mut(),
+            );
+            c.eq(h as isize as u64, INVALID_HANDLE_VALUE as isize as u64)?;
+            c.eq(GetLastError().into(), error.into())?;
+            c.eq(RtlGetLastNtStatus().into(), status)?;
+        }
+
+        // With FILE_FLAG_BACKUP_SEMANTICS the directory is the open's
+        // subject, so a creating disposition answers about it: OPEN_ALWAYS
+        // opens it and says it was already there, while CREATE_ALWAYS --
+        // which would truncate -- collides with the name instead of
+        // reporting an invalid parameter.
+        SetLastError(0);
+        let h = CreateFileW(
+            Path::new(temp, b"gala_k32\\").ptr(),
+            GENERIC_READ,
+            SHARE_ALL,
+            core::ptr::null_mut(),
+            OPEN_ALWAYS,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            core::ptr::null_mut(),
+        );
+        c.ok(h != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        c.eq(GetLastError().into(), ERROR_ALREADY_EXISTS.into())?;
+        c.ok(CloseHandle(h) != 0, 0)?;
+        SetLastError(0);
+        let h = CreateFileW(
+            Path::new(temp, b"gala_k32\\").ptr(),
+            GENERIC_READ,
+            SHARE_ALL,
+            core::ptr::null_mut(),
+            CREATE_ALWAYS,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            core::ptr::null_mut(),
+        );
+        c.eq(h as isize as u64, INVALID_HANDLE_VALUE as isize as u64)?;
+        c.eq(GetLastError().into(), ERROR_FILE_EXISTS.into())?;
+        c.eq(RtlGetLastNtStatus().into(), OBJECT_NAME_COLLISION)?;
+
+        // A directory is what the name asks for, so creating one under it
+        // is no refusal at all.
+        c.ok(
+            CreateDirectoryW(Path::new(temp, b"gala_k32\\sub\\").ptr(), core::ptr::null_mut()) != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(
+            GetFileAttributesW(Path::new(temp, b"gala_k32\\sub").ptr()) & FILE_ATTRIBUTE_DIRECTORY
+                != 0,
+            0,
+        )?;
+        c.ok(RemoveDirectoryW(Path::new(temp, b"gala_k32\\sub").ptr()) != 0, 0)?;
 
         // FindFirstFileW/FindNextFileW: a.txt is listed; then no more.
         let mut find = [0u16; 296]; // WIN32_FIND_DATAW

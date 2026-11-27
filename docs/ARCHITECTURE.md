@@ -2653,6 +2653,48 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   builds a folder from an unset value asks whether "" exists before it
   deletes "<folder>\*" recursively (ODT's setup.exe does); a "yes" from
   the platform makes that `\*`, the drive's root, and wipes C:.
+- **A name that asks for a directory** (`kernel32_file_test`, measured
+  against Windows): a name whose last character is a backslash asks for
+  a directory, and it counts as the caller wrote it rather than as it
+  canonicalises -- a trailing `/` is not one, nor is `<dir>\.`, and a
+  `\\?\` name counts like any other. The demand holds on every
+  disposition, not only on an open: ramfs refuses such a name over a
+  file whatever the open asked for (STATUS_NOT_A_DIRECTORY, kernel32's
+  ERROR_DIRECTORY), and refuses a create that would make anything but a
+  directory under it with the same status even where nothing is there
+  yet -- so no file is left behind by one, while the same name without
+  the separator creates one, and a create that does make a directory
+  (CreateDirectoryW, or FILE_CREATE with FILE_DIRECTORY_FILE) is content
+  either way. A missing last component is still
+  STATUS_OBJECT_NAME_NOT_FOUND, a missing parent
+  STATUS_OBJECT_PATH_NOT_FOUND, and over a directory the status is the
+  same STATUS_FILE_IS_A_DIRECTORY that the name without the separator
+  gives. The difference between those two names is Win32's alone:
+  CreateFileW reports ERROR_PATH_NOT_FOUND for the name that asked for
+  a directory and the access denial for the one that did not, which is
+  why `full_path` keeps a trailing separator the caller wrote. With
+  FILE_FLAG_BACKUP_SEMANTICS the open succeeds either way. Office's
+  ole32 turns that ERROR_PATH_NOT_FOUND into STG_E_PATHNOTFOUND, which
+  Word reads as "no such document" ("Compound files").
+- **What an open is refused for first** (`kernel32_file_test`, measured
+  against Windows): over something that is already there the refusals
+  are not symmetric. The name's own demand (a trailing separator over a
+  non-directory) and FILE_NON_DIRECTORY_FILE over a directory both come
+  before the collision a FILE_CREATE would report, while
+  FILE_DIRECTORY_FILE over a file loses to it -- that create collides
+  (STATUS_OBJECT_NAME_COLLISION) rather than reporting the kind. ramfs
+  answers them in that order.
+- **A disposition that truncates** (FILE_SUPERSEDE, FILE_OVERWRITE,
+  FILE_OVERWRITE_IF; `kernel32_file_test`, measured against Windows) has
+  nothing to truncate in a directory. Asked together with
+  FILE_DIRECTORY_FILE it is STATUS_INVALID_PARAMETER before the name is
+  read at all: a missing last component, a missing parent and the
+  volume's root all give that one status rather than the error the name
+  would earn. Over a directory that is there it collides with the name
+  instead (STATUS_OBJECT_NAME_COLLISION, kernel32's ERROR_FILE_EXISTS),
+  which is what CREATE_ALWAYS with FILE_FLAG_BACKUP_SEMANTICS reads,
+  where OPEN_ALWAYS on the same name opens the directory and reports
+  ERROR_ALREADY_EXISTS.
 - **Access checks** on opens and creates: "Access checks".
 
 #### Directory change notification
@@ -4122,8 +4164,15 @@ reads like a gap in the DLL and not a gap in the list.
 
 `user/kernel32` implements Win32 functions on top of ntdll's exports
 (imported with `raw-dylib`): failures return the documented failure
-value and set the last error (TEB+0x68) from the NTSTATUS. Names ntdll
-also exports (the `Rtl*` unwind functions) are export forwarders
+value and set the last error (TEB+0x68) from the NTSTATUS through
+RtlNtStatusToDosError, which is also what leaves the status in
+TEB.LastStatusValue for RtlGetLastNtStatus. Invariant: a function that
+reports an error of its own instead of the mapped one (CreateFileW's
+ERROR_PATH_NOT_FOUND for a name that asks for a directory, its
+ERROR_FILE_EXISTS for CREATE_NEW) maps the status first and overrides
+only what the mapping returned, never what it recorded -- a program that
+reads the status reads the one the file system gave (ole32 does). Names
+ntdll also exports (the `Rtl*` unwind functions) are export forwarders
 (`build.rs`), as on Windows: defining them in kernel32 would shadow the
 ntdll imports.
 
@@ -5746,6 +5795,51 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   and nothing acts on it, which the row `ole32.dll!IGlobalOptions::Set
   (kept, no effect)` says: gala has no exception handling to turn off,
   no RPC thread pool and no unmarshaling to police.
+- **Compound files** (`storage.rs`, `stg_test`, measured against
+  Windows 11), read-only: StgOpenStorage and StgIsStorageFile over a
+  file on disk (MS-CFB), with the IStorage, IStream and IEnumSTATSTG
+  objects they hand out. Office's Mso20win32client delay-loads the
+  first and WWLIB calls it on start-up. The format is 512-byte sectors,
+  a FAT of sector chains reached through the DIFAT, 128-byte directory
+  entries in a tree, and a mini FAT of 64-byte sectors inside the root
+  entry's stream for everything below the header's cutoff; a stream's
+  size alone decides which chain holds it, at or above the cutoff the
+  FAT and below it the mini FAT. The open works before any
+  CoInitialize and checks the mode hard: a share mode is required,
+  write access demands STGM_SHARE_EXCLUSIVE, STGM_DELETEONRELEASE is
+  STG_E_INVALIDFUNCTION and an unknown bit STG_E_INVALIDFLAG, and a
+  non-zero `reserved` is the one refusal that leaves the caller's
+  pointer untouched where every other writes NULL through it. The
+  file's own errors arrive mapped into the STG_E_ facility, so they
+  follow kernel32's CreateFileW: a file that is not a compound file, or
+  is too short for the header, is STG_E_FILEALREADYEXISTS, a missing
+  one STG_E_FILENOTFOUND, a directory STG_E_ACCESSDENIED, and a missing
+  parent, a trailing separator or the empty name STG_E_PATHNOTFOUND
+  ("A name that asks for a directory"). The root storage's Stat gives
+  the file's full path whatever name it was opened by, STGTY_STORAGE
+  and size 0 where the directory entry says 5; an element's gives the
+  bare entry name and the entry's own times, which are zero in a file
+  nothing has set them in. Names fold case-insensitively
+  (RtlUpcaseUnicodeChar) and are neither trimmed nor prefix-matched,
+  and the tree is ordered by name length before name, so an
+  enumeration is in the format's order and not alphabetical. An element
+  may be open once -- a second open of it is STG_E_ACCESSDENIED until
+  the first is released, and a Clone shares the hold -- and a child
+  open takes STGM_READ with STGM_SHARE_EXCLUSIVE, a deny-write share
+  being STG_E_INVALIDFUNCTION and anything else STG_E_INVALIDFLAG.
+  Reads stop at the end of a stream with S_OK and a short count, Seek
+  may go past it, and a negative result or an unknown origin is
+  STG_E_INVALIDFUNCTION.
+
+  **Limits**, each recorded where it is reached (OBSERVABILITY): every
+  call that would change a compound file is STG_E_ACCESSDENIED, which
+  is what Windows answers for a storage opened for reading -- what gala
+  lacks is the write-capable open behind it, which hands out a
+  read-only storage and records that it did, so a program that means to
+  write finds out at the write and not at the open; IStorage::CopyTo
+  and MoveElementTo; the IPropertySetStorage, IRootStorage and IMarshal
+  interfaces Windows' storage answers (E_NOINTERFACE here); an
+  exclusion list (refused) and a priority storage (ignored).
 - **Objects in streams and storages** (`persist.rs`): a persisted
   object is its
   class id and then whatever the object writes. WriteClassStm writes
