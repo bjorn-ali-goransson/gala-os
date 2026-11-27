@@ -1792,21 +1792,24 @@ install, WebView2, MSIX) are worked as the analysis ranks them.
 Office survey"; Microsoft 365 Apps 16.0.20527.20150, Current channel,
 x64: 1486 PE files, 867 of them x64, 529 DLLs of Office's own). What
 Word, Excel and PowerPoint load (`import_survey.py --dumps ... --roots
-WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE`): 114 files at start, 85 more
-through delay imports. Office carries its own UCRT and VC runtime
-(app-local `ucrtbase.dll`, `vcruntime140.dll`), so the apps do not
-need gala's.
-- **To load** (static imports of the 114; no DLL is missing, only
-  functions): kernel32's CreateFile2 (15 files), the activation-context
-  queries FindActCtxSectionStringW and QueryActCtxW (11), CreateMutexExW,
-  FindFirstFileNameW/FindNextFileNameW, GetShortPathNameA,
-  GetThreadIOPendingFlag, GetVolumePathNamesForVolumeNameW,
-  IsSystemResumeAutomatic, OpenSemaphoreA, QueueUserWorkItem,
-  WerRegisterMemoryBlock/WerUnregisterMemoryBlock (5 each) and ten more
-  used once; ntdll's AVL generic tables (RtlInitializeGenericTableAvl
-  and its seven companions), NtNotifyChangeMultipleKeys, NtRenameKey,
-  RtlIntegerToUnicodeString, RtlIsNameInExpression (5 each). Each must
-  work, not only exist.
+WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE`): 114 files at start, 87 more
+through delay imports (85 on the build first surveyed). Office carries
+its own UCRT and VC runtime (app-local `ucrtbase.dll`,
+`vcruntime140.dll`), so the apps do not need gala's. What the import
+tables cannot rank -- a COM class, an interface method, a function
+reached through GetProcAddress -- a run's ledger does, and
+`tools/gap_rank.py` is what orders it (WORKFLOW "Ranking a run's
+gaps"): survey, one run, rank, implement a batch, verify.
+- **To load**: answered. The static imports of the files Word loads at
+  start (`import_survey.py --static --roots WINWORD.EXE,WWLIB.DLL`) are
+  all bound by gala's DLLs: no DLL and no function is missing, where the
+  first analysis wanted kernel32's CreateFile2, the activation-context
+  queries, the AVL generic tables and some thirty more. What the survey
+  still reports is six kernel32 functions of Click-to-Run's AppV shim
+  (the private namespaces and boundary descriptors) which only the
+  survey's newer build imports -- build drift, not work (WORKFLOW "The
+  Office survey"). Each must work, not only exist, which is what the
+  tests and the run say, not the import tables.
 - **Then, as the apps draw and work** (delay imports, files needing
   each): gdiplus (13), Direct2D `d2d1` (7), `mscms` colour management
   (5), Media Foundation `mfplat`/`mf` (4/2), `propsys` (4), `cryptui`
