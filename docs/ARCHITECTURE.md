@@ -13531,6 +13531,74 @@ tag and a parameter) and number substitution (the method and its
 locale, kept for the layout that will read it). Test: `dwrite_test`
 step 13.
 
+Text layouts (`layout.rs`, IDWriteTextLayout), a string, a format and a
+box, measured: the busiest object of Word's start-up, which asks the
+factory for a GDI-compatible one 414 times and for the plain
+`CreateTextLayout` never. A layout is two things at once. It is a text
+format, carrying a format's own prefix and answering its 28 slots from
+`format.rs` itself over a copy of the values it was made with, so what
+the format is told afterwards does not reach the layout (and so a
+layout asked for IDWriteTextFormat answers with itself, where Windows
+hands back an object of its own -- measured). And it is a measurement:
+the lines the text broke into, the clusters those lines are made of,
+the box the text fills inside the layout's own, and the places in it a
+point or a position names.
+
+What a layout adds to a format is ranges: every value a format holds
+for the whole text a layout holds over a range of it -- the family,
+weight, style, stretch, em size and locale, the underline and the
+strikethrough, the collection, the drawing effect, an inline object and
+the typography -- and reports with the run it found it in, what no
+range covers being the format's own value over a run that reaches
+UINT32_MAX. Twelve sorted lists of non-overlapping spans, a set
+splitting the spans it lands in the middle of.
+
+Measuring: each character becomes a cluster (a surrogate pair one
+cluster, a default-ignorable character none of its own, a tab advancing
+the pen to the next incremental stop), the clusters break into lines
+greedily at the last place a break may happen before the box's width
+runs out, a word too wide for the box alone on a line of its own, and
+the line's height and baseline come from the face's Windows ascent,
+descent and line gap. The box the text fills, the three hit tests and
+the narrowest box the text fits in without breaking a word
+(`DetermineMinWidth`) are read off that, and the whole of it is cached
+and thrown away by every setter it was computed from -- this file's and
+the eight of the format's that change how text is laid out. What
+"GDI-compatible" means is a number and not a manner: the height, the
+baseline and the width are GDI's own `tmHeight`, `tmAscent` and
+`GetTextExtentPoint32W` for the same face at the same pixel size, so
+this file reproduces gdi32's integer arithmetic (the em in whole
+pixels, every advance rounded on that grid) rather than scaling the
+design metrics, and the pixels per DIP are a scale on the grid and
+nothing more: an em of `e` at `p` pixels per DIP measures what GDI
+measures at `e * p` pixels, reported divided by `p` again. The plain
+layout is the unrounded one, the design metrics scaled. Beside it the
+ellipsis trimming sign a trimmed line would end with
+(`CreateEllipsisTrimmingSign`), an inline object whose width is the
+face's own ellipsis, or three periods where it has none. The vtable is
+IDWriteTextLayout4's whole length for the reason the format's is
+IDWriteTextFormat3's.
+
+Not there yet, each recorded as it is reached: drawing, so `Draw` is
+refused on a layout as on an inline object and nothing here rasterizes;
+the alignments and the directions other than the defaults; trimming
+(the options are kept and the sign is built, but no line is cut); line
+spacing methods other than DEFAULT; bidirectional text; shaping, a
+cluster being a character; the family name of a range choosing a face,
+which the weight does instead (`font::nearest`, which snaps to one of
+Selawik's four faces by a nearest rule of its own where gdi32's
+`snap_weight` has its own); and the methods of the later revisions.
+Two more divergences are recorded where they are read: the overhang is
+the text's box and not the glyphs' ink, and the metrics' bidi depth is
+always 1. Unmeasured choices, kept until a program reads them: a text
+ending in a newline has an empty last line, and tab stops are measured
+from the paragraph's start rather than from the line's. Test:
+`dwrite_test` step 14, eighteen checks of the numbers real DirectWrite
+answers; the last of them lays the same string out through gdi32's own
+device context and requires the two to agree, which is the guard
+against this file and gdi32 drifting apart -- they carry the same
+default-ignorable table and the same rounding, in two copies.
+
 GDI logical fonts (`logfont.rs`): IDWriteGdiInterop's
 ConvertFontToLOGFONT and ConvertFontFaceToLOGFONT, which a program calls
 when it holds a DirectWrite font and has to name it to the GDI half of
@@ -13564,14 +13632,19 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
   compatible targets, effects or command lists ("Direct2D" lists them).
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
-  rotation, skew or sideways runs; no text layout. Text analysis
-  itemizes every bidi run at level 0 and reports a hard line break as
-  one that may happen rather than one that must, and the
+  rotation, skew or sideways runs. Text layouts measure but do not
+  draw; they lay text out in the default alignments and directions
+  only, do not cut a line to its trimming, keep one cluster per
+  character and itemize no bidi, a range's family name does not pick a
+  face (its weight does) and the overhang is the text's box. Text
+  analysis itemizes every bidi run at level 0 and reports a hard line
+  break as one that may happen rather than one that must, and the
   GDI-compatible glyph placements are refused. The later factory
   revisions are refused (none of their methods is implemented), the
-  methods the later text format revisions (IDWriteTextFormat1 through 3)
-  add are not implemented either, and of the GDI interop object's own
-  methods only the two LOGFONT conversions are ("DirectWrite").
+  methods the later text format and text layout revisions
+  (IDWriteTextFormat1 through 3, IDWriteTextLayout1 through 4) add are
+  not implemented either, and of the GDI interop object's own methods
+  only the two LOGFONT conversions are ("DirectWrite").
 - Mitigation policies are kept, not enforced; no sandbox (stage 3).
 - One Windows Runtime class (PackageManager, with no packages); no
   shell namespace objects, no COM proxies (see their sections).

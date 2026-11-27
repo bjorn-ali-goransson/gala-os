@@ -49,19 +49,19 @@ pub const IID_NUMBER_SUBSTITUTION: Iid =
 
 /// ERROR_INSUFFICIENT_BUFFER as an HRESULT, which is what a string
 /// getter says when the buffer has no room for the terminator too.
-const E_NOT_SUFFICIENT_BUFFER: HResult = 0x8007_007a_u32 as i32;
+pub(crate) const E_NOT_SUFFICIENT_BUFFER: HResult = 0x8007_007a_u32 as i32;
 
 /// The weights DirectWrite takes: 1 to 999, which is wider than
 /// DWRITE_FONT_WEIGHT's own values and keeps whatever is given (450 is
 /// taken and read back) -- measured, where 0 and 1000 are E_INVALIDARG.
-const WEIGHT_MIN: u32 = 1;
-const WEIGHT_MAX: u32 = 999;
+pub(crate) const WEIGHT_MIN: u32 = 1;
+pub(crate) const WEIGHT_MAX: u32 = 999;
 /// The last DWRITE_FONT_STYLE (ITALIC).
-const STYLE_LAST: u32 = 2;
+pub(crate) const STYLE_LAST: u32 = 2;
 /// DWRITE_FONT_STRETCH's values, 1 (ULTRA_CONDENSED) to 9
 /// (ULTRA_EXPANDED); UNDEFINED (0) is refused.
-const STRETCH_MIN: u32 = 1;
-const STRETCH_MAX: u32 = 9;
+pub(crate) const STRETCH_MIN: u32 = 1;
+pub(crate) const STRETCH_MAX: u32 = 9;
 /// The last DWRITE_TEXT_ALIGNMENT (JUSTIFIED).
 const TEXT_ALIGNMENT_LAST: u32 = 3;
 /// The last DWRITE_PARAGRAPH_ALIGNMENT (CENTER).
@@ -90,43 +90,48 @@ const SUBSTITUTION_LAST: u32 = 4;
 /// (measured -- with a NULL locale they are E_INVALIDARG).
 const SUBSTITUTION_NONE: u32 = 2;
 
-/// What a format holds and a program sets on it. The strings are not
-/// here: they follow the object in its own allocation, because they have
-/// no length limit of their own (a thousand characters is taken).
+/// What a format holds and a program sets on it, and what a text layout
+/// copies out of the format it was made with. The strings are not here:
+/// they are the two fields beside this one in `Format`, because they
+/// have no length limit of their own (a thousand characters is taken) --
+/// a format keeps them in its own allocation, a layout in vectors.
 #[derive(Clone, Copy)]
-struct Values {
-    weight: u32,
-    style: u32,
-    stretch: u32,
-    size: f32,
-    text_alignment: u32,
-    paragraph_alignment: u32,
-    wrapping: u32,
-    reading: u32,
-    flow: u32,
-    tab_stop: f32,
-    spacing_method: u32,
-    spacing: f32,
-    baseline: f32,
+pub(crate) struct Values {
+    pub(crate) weight: u32,
+    pub(crate) style: u32,
+    pub(crate) stretch: u32,
+    pub(crate) size: f32,
+    pub(crate) text_alignment: u32,
+    pub(crate) paragraph_alignment: u32,
+    pub(crate) wrapping: u32,
+    pub(crate) reading: u32,
+    pub(crate) flow: u32,
+    pub(crate) tab_stop: f32,
+    pub(crate) spacing_method: u32,
+    pub(crate) spacing: f32,
+    pub(crate) baseline: f32,
     /// DWRITE_TRIMMING: the granularity, the delimiter and the count.
-    trimming: [u32; 3],
+    pub(crate) trimming: [u32; 3],
     /// The trimming sign, an inline object of the caller's, held with a
     /// reference of our own.
-    sign: *const c_void,
+    pub(crate) sign: *const c_void,
     /// The collection the format was made with, or NULL for the
     /// system's (which is what a NULL collection means).
-    collection: *const c_void,
+    pub(crate) collection: *const c_void,
 }
 
-/// A text format: the values, then the family name and the locale name,
-/// each NUL-terminated, in the same allocation after it.
+/// A text format: the values and the two strings, each a pointer and a
+/// length. A format of its own keeps them NUL-terminated in the same
+/// allocation after it; a text layout, which is a text format as well,
+/// keeps this same prefix at its start and points these at strings of
+/// its own, so that the 25 methods below answer for either (`layout`).
 #[repr(C)]
-struct Format {
-    vtbl: *const (),
-    refs: AtomicU32,
-    values: Values,
-    family_len: usize,
-    locale_len: usize,
+pub(crate) struct Format {
+    pub(crate) vtbl: *const (),
+    pub(crate) refs: AtomicU32,
+    pub(crate) values: Values,
+    pub(crate) family: (*const u16, usize),
+    pub(crate) locale: (*const u16, usize),
 }
 
 static FORMAT_VTBL: VTable<43> = VTable([
@@ -246,7 +251,7 @@ fn make(
 ) -> HResult {
     let family_len = wide_len(family);
     let locale_len = wide_len(locale);
-    let Some(layout) = format_layout(family_len, locale_len) else {
+    let Some(layout) = format_alloc(family_len, locale_len) else {
         return E_OUTOFMEMORY;
     };
     // SAFETY: a non-zero-sized layout.
@@ -257,16 +262,16 @@ fn make(
     hold(values.collection);
     // SAFETY: fresh memory for one Format and the two strings after it.
     unsafe {
+        let text = p.add(1).cast::<u16>();
+        copy_wide(family, text, family_len);
+        copy_wide(locale, text.add(family_len + 1), locale_len);
         p.write(Format {
             vtbl: vt(&FORMAT_VTBL),
             refs: AtomicU32::new(1),
             values,
-            family_len,
-            locale_len,
+            family: (text, family_len),
+            locale: (text.add(family_len + 1), locale_len),
         });
-        let text = p.add(1).cast::<u16>();
-        copy_wide(family, text, family_len);
-        copy_wide(locale, text.add(family_len + 1), locale_len);
     }
     // SAFETY: the caller's output.
     unsafe { *out = p.cast() };
@@ -276,14 +281,14 @@ fn make(
 /// The allocation one format needs: the object, then the two strings
 /// with their terminators. None if the two lengths do not fit a layout
 /// at all (a string long enough to overflow it).
-fn format_layout(family_len: usize, locale_len: usize) -> Option<core::alloc::Layout> {
+fn format_alloc(family_len: usize, locale_len: usize) -> Option<core::alloc::Layout> {
     let text = family_len.checked_add(1)?.checked_add(locale_len)?.checked_add(1)?;
     let size = core::mem::size_of::<Format>().checked_add(text.checked_mul(2)?)?;
     core::alloc::Layout::from_size_align(size, core::mem::align_of::<Format>()).ok()
 }
 
 /// The characters of a NUL-terminated string the caller gave us.
-fn wide_len(s: *const u16) -> usize {
+pub(crate) fn wide_len(s: *const u16) -> usize {
     let mut n = 0;
     // SAFETY: the caller's string, which is NUL-terminated as every
     // Win32 string argument is.
@@ -297,7 +302,7 @@ fn wide_len(s: *const u16) -> usize {
 ///
 /// # Safety
 /// `from` has `n` characters; `to` has room for `n + 1`.
-unsafe fn copy_wide(from: *const u16, to: *mut u16, n: usize) {
+pub(crate) unsafe fn copy_wide(from: *const u16, to: *mut u16, n: usize) {
     // SAFETY: as the caller promises.
     unsafe {
         core::ptr::copy_nonoverlapping(from, to, n);
@@ -311,7 +316,7 @@ unsafe fn copy_wide(from: *const u16, to: *mut u16, n: usize) {
 /// leading or trailing hyphen and none doubled. What is inside a run is
 /// never looked at -- "zz-not-a-locale" and "en_us" are both taken --
 /// and an empty name is taken as well.
-fn locale_shaped(locale: *const u16) -> bool {
+pub(crate) fn locale_shaped(locale: *const u16) -> bool {
     let mut run = 0usize;
     let mut any = false;
     let mut i = 0usize;
@@ -339,7 +344,7 @@ fn locale_shaped(locale: *const u16) -> bool {
 ///
 /// # Safety
 /// `o` is a COM object whose vtable has that slot with that type.
-unsafe fn method<F: Copy>(o: *const c_void, slot: usize) -> F {
+pub(crate) unsafe fn method<F: Copy>(o: *const c_void, slot: usize) -> F {
     // SAFETY: as the caller promises.
     unsafe {
         let vtbl = *o.cast::<*const usize>();
@@ -347,11 +352,11 @@ unsafe fn method<F: Copy>(o: *const c_void, slot: usize) -> F {
     }
 }
 
-type Counted = extern "system" fn(*const c_void) -> u32;
+pub(crate) type Counted = extern "system" fn(*const c_void) -> u32;
 
 /// Takes a reference of an object a format holds (its collection, its
 /// trimming sign): the caller may let go of its own.
-fn hold(o: *const c_void) {
+pub(crate) fn hold(o: *const c_void) {
     if o.is_null() {
         return;
     }
@@ -361,7 +366,7 @@ fn hold(o: *const c_void) {
 }
 
 /// Lets go of a reference a format holds.
-fn drop_held(o: *const c_void) {
+pub(crate) fn drop_held(o: *const c_void) {
     if o.is_null() {
         return;
     }
@@ -370,7 +375,7 @@ fn drop_held(o: *const c_void) {
     release(o);
 }
 
-fn values(this: *const c_void) -> Values {
+pub(crate) fn values(this: *const c_void) -> Values {
     // SAFETY: one of our formats.
     unsafe { (*this.cast::<Format>()).values }
 }
@@ -380,27 +385,38 @@ fn values(this: *const c_void) -> Values {
 /// # Safety
 /// `this` is one of our formats, and nothing else holds a reference to
 /// its values (a COM object is the caller's to keep to one thread).
-unsafe fn values_mut(this: *const c_void) -> *mut Values {
+pub(crate) unsafe fn values_mut(this: *const c_void) -> *mut Values {
     // SAFETY: as the caller promises.
     unsafe { &raw mut (*this.cast_mut().cast::<Format>()).values }
 }
 
-/// A format's family name and locale name, each with its length.
-fn strings(this: *const c_void) -> ((*const u16, usize), (*const u16, usize)) {
-    // SAFETY: one of our formats, whose strings follow it.
+/// A format's family name and locale name, each with its length. They
+/// are a text layout's own where `this` is one.
+pub(crate) fn strings(this: *const c_void) -> ((*const u16, usize), (*const u16, usize)) {
+    // SAFETY: one of our formats (or one of our layouts, which begins
+    // with the same prefix).
     unsafe {
         let p = this.cast::<Format>();
-        let family_len = (*p).family_len;
-        let locale_len = (*p).locale_len;
-        let text = p.add(1).cast::<u16>();
-        ((text, family_len), (text.add(family_len + 1), locale_len))
+        ((*p).family, (*p).locale)
     }
+}
+
+/// Whether `o` is one of our text formats, which is the only object
+/// whose prefix the methods here may read. A layout has the prefix too
+/// and answers with a vtable of its own, so this is false for one.
+pub(crate) fn ours(o: *const c_void) -> bool {
+    if o.is_null() {
+        return false;
+    }
+    // SAFETY: a COM object of the caller's, whose first word is its
+    // vtable.
+    unsafe { *o.cast::<*const ()>() == vt(&FORMAT_VTBL) }
 }
 
 /// Writes a string of a format into the caller's buffer, which must have
 /// room for the terminator as well (measured: a buffer of exactly the
 /// length is E_NOT_SUFFICIENT_BUFFER).
-fn give_string(from: (*const u16, usize), to: *mut u16, size: u32) -> HResult {
+pub(crate) fn give_string(from: (*const u16, usize), to: *mut u16, size: u32) -> HResult {
     if to.is_null() {
         return E_POINTER;
     }
@@ -414,7 +430,7 @@ fn give_string(from: (*const u16, usize), to: *mut u16, size: u32) -> HResult {
     S_OK
 }
 
-extern "system" fn format_qi(
+pub(crate) extern "system" fn format_qi(
     this: *const c_void,
     riid: *const Iid,
     out: *mut *const c_void,
@@ -426,12 +442,12 @@ extern "system" fn format_qi(
     r
 }
 
-extern "system" fn format_add_ref(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_add_ref(this: *const c_void) -> u32 {
     // SAFETY: one of our formats.
     unsafe { (*this.cast::<Format>()).refs.fetch_add(1, Ordering::Relaxed) + 1 }
 }
 
-extern "system" fn format_release(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_release(this: *const c_void) -> u32 {
     // SAFETY: one of our formats.
     let left = unsafe { (*this.cast::<Format>()).refs.fetch_sub(1, Ordering::AcqRel) } - 1;
     if left == 0 {
@@ -442,9 +458,9 @@ extern "system" fn format_release(this: *const c_void) -> u32 {
         // whose layout the two lengths give again.
         unsafe {
             let p = this.cast_mut().cast::<Format>();
-            let (family_len, locale_len) = ((*p).family_len, (*p).locale_len);
+            let (family_len, locale_len) = ((*p).family.1, (*p).locale.1);
             core::ptr::drop_in_place(p);
-            if let Some(layout) = format_layout(family_len, locale_len) {
+            if let Some(layout) = format_alloc(family_len, locale_len) {
                 alloc::alloc::dealloc(p.cast(), layout);
             }
         }
@@ -464,7 +480,7 @@ fn set_enum(this: *const c_void, value: u32, last: u32, write: fn(*mut Values, u
     S_OK
 }
 
-extern "system" fn format_SetTextAlignment(this: *const c_void, value: u32) -> HResult {
+pub(crate) extern "system" fn format_SetTextAlignment(this: *const c_void, value: u32) -> HResult {
     reached!(b"IDWriteTextFormat::SetTextAlignment");
     set_enum(this, value, TEXT_ALIGNMENT_LAST, |v, value| {
         // SAFETY: the values of one of our formats.
@@ -472,7 +488,10 @@ extern "system" fn format_SetTextAlignment(this: *const c_void, value: u32) -> H
     })
 }
 
-extern "system" fn format_SetParagraphAlignment(this: *const c_void, value: u32) -> HResult {
+pub(crate) extern "system" fn format_SetParagraphAlignment(
+    this: *const c_void,
+    value: u32,
+) -> HResult {
     reached!(b"IDWriteTextFormat::SetParagraphAlignment");
     set_enum(this, value, PARAGRAPH_ALIGNMENT_LAST, |v, value| {
         // SAFETY: the values of one of our formats.
@@ -480,7 +499,7 @@ extern "system" fn format_SetParagraphAlignment(this: *const c_void, value: u32)
     })
 }
 
-extern "system" fn format_SetWordWrapping(this: *const c_void, value: u32) -> HResult {
+pub(crate) extern "system" fn format_SetWordWrapping(this: *const c_void, value: u32) -> HResult {
     reached!(b"IDWriteTextFormat::SetWordWrapping");
     set_enum(this, value, WORD_WRAPPING_LAST, |v, value| {
         // SAFETY: the values of one of our formats.
@@ -488,7 +507,10 @@ extern "system" fn format_SetWordWrapping(this: *const c_void, value: u32) -> HR
     })
 }
 
-extern "system" fn format_SetReadingDirection(this: *const c_void, value: u32) -> HResult {
+pub(crate) extern "system" fn format_SetReadingDirection(
+    this: *const c_void,
+    value: u32,
+) -> HResult {
     reached!(b"IDWriteTextFormat::SetReadingDirection");
     set_enum(this, value, READING_DIRECTION_LAST, |v, value| {
         // SAFETY: the values of one of our formats.
@@ -496,7 +518,7 @@ extern "system" fn format_SetReadingDirection(this: *const c_void, value: u32) -
     })
 }
 
-extern "system" fn format_SetFlowDirection(this: *const c_void, value: u32) -> HResult {
+pub(crate) extern "system" fn format_SetFlowDirection(this: *const c_void, value: u32) -> HResult {
     reached!(b"IDWriteTextFormat::SetFlowDirection");
     set_enum(this, value, FLOW_DIRECTION_LAST, |v, value| {
         // SAFETY: the values of one of our formats.
@@ -506,7 +528,10 @@ extern "system" fn format_SetFlowDirection(this: *const c_void, value: u32) -> H
 
 /// SetIncrementalTabStop(tabStop) (8): a tab stop must be a positive
 /// number; a refused one leaves the old stop (measured).
-extern "system" fn format_SetIncrementalTabStop(this: *const c_void, tab_stop: f32) -> HResult {
+pub(crate) extern "system" fn format_SetIncrementalTabStop(
+    this: *const c_void,
+    tab_stop: f32,
+) -> HResult {
     reached!(b"IDWriteTextFormat::SetIncrementalTabStop");
     if tab_stop.is_nan() || tab_stop <= 0.0 {
         return E_INVALIDARG;
@@ -520,7 +545,7 @@ extern "system" fn format_SetIncrementalTabStop(this: *const c_void, tab_stop: f
 /// how many of it to count, with an inline object to draw where the text
 /// was cut. No trimming options at all is E_INVALIDARG (measured); the
 /// sign is optional, and a format holds a reference of its own to it.
-extern "system" fn format_SetTrimming(
+pub(crate) extern "system" fn format_SetTrimming(
     this: *const c_void,
     trimming: *const [u32; 3],
     sign: *const c_void,
@@ -549,7 +574,7 @@ extern "system" fn format_SetTrimming(
 /// SetLineSpacing(method, lineSpacing, baseline) (10): the spacing must
 /// be zero or more, the baseline is whatever it is (measured: -1 is
 /// taken), and the method must be one of DWRITE_LINE_SPACING_METHOD's.
-extern "system" fn format_SetLineSpacing(
+pub(crate) extern "system" fn format_SetLineSpacing(
     this: *const c_void,
     spacing_method: u32,
     spacing: f32,
@@ -570,39 +595,39 @@ extern "system" fn format_SetLineSpacing(
     S_OK
 }
 
-extern "system" fn format_GetTextAlignment(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetTextAlignment(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetTextAlignment");
     values(this).text_alignment
 }
 
-extern "system" fn format_GetParagraphAlignment(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetParagraphAlignment(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetParagraphAlignment");
     values(this).paragraph_alignment
 }
 
-extern "system" fn format_GetWordWrapping(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetWordWrapping(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetWordWrapping");
     values(this).wrapping
 }
 
-extern "system" fn format_GetReadingDirection(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetReadingDirection(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetReadingDirection");
     values(this).reading
 }
 
-extern "system" fn format_GetFlowDirection(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetFlowDirection(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetFlowDirection");
     values(this).flow
 }
 
-extern "system" fn format_GetIncrementalTabStop(this: *const c_void) -> f32 {
+pub(crate) extern "system" fn format_GetIncrementalTabStop(this: *const c_void) -> f32 {
     reached!(b"IDWriteTextFormat::GetIncrementalTabStop");
     values(this).tab_stop
 }
 
 /// GetTrimming(&trimming, &sign) (17): the options and a reference to
 /// the sign, which is NULL unless one was set.
-extern "system" fn format_GetTrimming(
+pub(crate) extern "system" fn format_GetTrimming(
     this: *const c_void,
     trimming: *mut [u32; 3],
     sign: *mut *const c_void,
@@ -621,7 +646,7 @@ extern "system" fn format_GetTrimming(
     S_OK
 }
 
-extern "system" fn format_GetLineSpacing(
+pub(crate) extern "system" fn format_GetLineSpacing(
     this: *const c_void,
     spacing_method: *mut u32,
     spacing: *mut f32,
@@ -643,7 +668,7 @@ extern "system" fn format_GetLineSpacing(
 
 /// GetFontCollection(&collection) (19): the collection the format was
 /// made with, or the system's where a NULL one asked for it.
-extern "system" fn format_GetFontCollection(
+pub(crate) extern "system" fn format_GetFontCollection(
     this: *const c_void,
     out: *mut *const c_void,
 ) -> HResult {
@@ -668,12 +693,12 @@ extern "system" fn format_GetFontCollection(
     }
 }
 
-extern "system" fn format_GetFontFamilyNameLength(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetFontFamilyNameLength(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetFontFamilyNameLength");
     strings(this).0.1 as u32
 }
 
-extern "system" fn format_GetFontFamilyName(
+pub(crate) extern "system" fn format_GetFontFamilyName(
     this: *const c_void,
     name: *mut u16,
     size: u32,
@@ -682,32 +707,36 @@ extern "system" fn format_GetFontFamilyName(
     give_string(strings(this).0, name, size)
 }
 
-extern "system" fn format_GetFontWeight(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetFontWeight(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetFontWeight");
     values(this).weight
 }
 
-extern "system" fn format_GetFontStyle(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetFontStyle(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetFontStyle");
     values(this).style
 }
 
-extern "system" fn format_GetFontStretch(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetFontStretch(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetFontStretch");
     values(this).stretch
 }
 
-extern "system" fn format_GetFontSize(this: *const c_void) -> f32 {
+pub(crate) extern "system" fn format_GetFontSize(this: *const c_void) -> f32 {
     reached!(b"IDWriteTextFormat::GetFontSize");
     values(this).size
 }
 
-extern "system" fn format_GetLocaleNameLength(this: *const c_void) -> u32 {
+pub(crate) extern "system" fn format_GetLocaleNameLength(this: *const c_void) -> u32 {
     reached!(b"IDWriteTextFormat::GetLocaleNameLength");
     strings(this).1.1 as u32
 }
 
-extern "system" fn format_GetLocaleName(this: *const c_void, name: *mut u16, size: u32) -> HResult {
+pub(crate) extern "system" fn format_GetLocaleName(
+    this: *const c_void,
+    name: *mut u16,
+    size: u32,
+) -> HResult {
     reached!(b"IDWriteTextFormat::GetLocaleName");
     give_string(strings(this).1, name, size)
 }
@@ -726,6 +755,8 @@ macro_rules! revision_not_impl {
         )*
     };
 }
+
+pub(crate) use revision_not_impl;
 
 revision_not_impl! {
     format1_SetVerticalGlyphOrientation(u32) -> HResult

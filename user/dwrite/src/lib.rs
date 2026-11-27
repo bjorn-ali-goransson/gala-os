@@ -57,9 +57,18 @@
 //! as a LOGFONT, which is how a program carries a font through the GDI
 //! half of its own drawing.
 //!
-//! Not there yet (each reported to the ledger, E_NOTIMPL): text layouts
-//! (the formats above are what a layout is made from), ellipsis
-//! trimming signs, the rest of the GDI interop object's methods (the
+//! Text layouts (`layout`): a string, a format and a box, measured --
+//! the lines it broke into, the clusters they are made of, the box the
+//! text fills and the places a point or a position names, with every
+//! value a format holds for the whole text held over ranges of it
+//! instead. A GDI-compatible layout, which is the only kind Word asks
+//! for, measures on GDI's pixel grid and reports in DIPs; the plain one
+//! is the design metrics scaled. The ellipsis trimming sign a trimmed
+//! line would end with is built and measured there too.
+//!
+//! Not there yet (each reported to the ledger, E_NOTIMPL): drawing --
+//! nothing here rasterizes, so `Draw` is refused on a layout as on an
+//! inline object -- the rest of the GDI interop object's methods (the
 //! object itself answers for itself), and the IDWriteFactory1+
 //! interfaces (QueryInterface says E_NOINTERFACE, which Skia accepts).
 
@@ -71,6 +80,7 @@ mod analyze;
 mod font;
 mod format;
 mod glyphs;
+mod layout;
 mod logfont;
 mod params;
 
@@ -219,9 +229,9 @@ static FACTORY_VTBL: VTable<57> = VTable([
     format::factory_CreateTextFormat as *const (),
     format::factory_CreateTypography as *const (),
     factory_GetGdiInterop as *const (),
-    factory_CreateTextLayout as *const (),
-    factory_CreateGdiCompatibleTextLayout as *const (),
-    factory_CreateEllipsisTrimmingSign as *const (),
+    layout::factory_CreateTextLayout as *const (),
+    layout::factory_CreateGdiCompatibleTextLayout as *const (),
+    layout::factory_CreateEllipsisTrimmingSign as *const (),
     analyze::factory_CreateTextAnalyzer as *const (),
     format::factory_CreateNumberSubstitution as *const (),
     glyphs::create_glyph_run_analysis as *const (),
@@ -612,9 +622,6 @@ macro_rules! not_impl {
 }
 
 not_impl! {
-    factory_CreateTextLayout as "IDWriteFactory::CreateTextLayout"
-    factory_CreateGdiCompatibleTextLayout as "IDWriteFactory::CreateGdiCompatibleTextLayout"
-    factory_CreateEllipsisTrimmingSign as "IDWriteFactory::CreateEllipsisTrimmingSign"
     factory1_GetEudcFontCollection as "IDWriteFactory1::GetEudcFontCollection"
     factory1_CreateCustomRenderingParams as "IDWriteFactory1::CreateCustomRenderingParams"
     factory2_GetSystemFontFallback as "IDWriteFactory2::GetSystemFontFallback"

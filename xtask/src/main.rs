@@ -1253,6 +1253,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
+    ("dwrite_test", "gdi32.dll", "Windows/System32"),
     ("dwrite_test", "fonts/selawik/selawk.ttf", "Windows/Fonts"),
     ("dwrite_test", "fonts/selawik/selawksl.ttf", "Windows/Fonts"),
     ("dwrite_test", "fonts/selawik/selawksb.ttf", "Windows/Fonts"),

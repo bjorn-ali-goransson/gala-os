@@ -586,7 +586,7 @@ extern "system" fn family_names(_this: *const c_void, out: *mut *const c_void) -
 }
 
 /// The font nearest weight `weight` (all are upright and of normal width).
-fn nearest(weight: u32) -> usize {
+pub(crate) fn nearest(weight: u32) -> usize {
     (0..FONTS).min_by_key(|&i| WEIGHTS[i].abs_diff(weight)).unwrap_or(REGULAR)
 }
 
@@ -735,23 +735,34 @@ extern "system" fn font_create_face(this: *const c_void, out: *mut *const c_void
     give(out, (&raw const FACE_OBJS[i]).cast())
 }
 
+/// The four numbers a line of text is built from, in design units: the
+/// em, the Windows ascent and descent (OS/2, the face's own ascender and
+/// descender where it has no OS/2 table) and the line gap (hhea). Taking
+/// the parsed face rather than an index so that a caller which already
+/// has one does not parse it twice; `layout` measures with these.
+pub(crate) fn design(f: &ttf_parser::Face<'_>) -> (i32, i32, i32, i32) {
+    let (ascent, descent) = match f.tables().os2 {
+        Some(os2) => (os2.windows_ascender(), os2.windows_descender().unsigned_abs() as i16),
+        None => (f.ascender(), f.descender().abs()),
+    };
+    (i32::from(f.units_per_em()), i32::from(ascent), i32::from(descent), i32::from(f.line_gap()))
+}
+
 /// DWRITE_FONT_METRICS of font `i` (design units): the Windows ascent and
 /// descent (OS/2), the line gap (hhea), cap and x heights, underline
 /// (post) and strikethrough (OS/2).
 fn metrics(i: usize) -> [u8; 20] {
     let mut m = [0u8; 20];
     let Some(f) = face(i) else { return m };
-    let (ascent, descent) = match f.tables().os2 {
-        Some(os2) => (os2.windows_ascender(), os2.windows_descender().unsigned_abs() as i16),
-        None => (f.ascender(), f.descender().abs()),
-    };
+    let (upem, ascent, descent, line_gap) = design(&f);
+    let (ascent, descent) = (ascent as i16, descent as i16);
     let under = f.underline_metrics();
     let strike = f.strikeout_metrics();
     let fields: [i16; 10] = [
-        f.units_per_em() as i16,
+        upem as i16,
         ascent,
         descent,
-        f.line_gap(),
+        line_gap as i16,
         f.capital_height().unwrap_or(ascent),
         f.x_height().unwrap_or(ascent / 2),
         under.map_or(-(ascent / 10), |u| u.position),
