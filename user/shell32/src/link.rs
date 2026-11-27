@@ -1187,15 +1187,16 @@ static DATA_LIST_VTABLE: VTable<8> = VTable([
 // Property records in `props`: FMTID (16), pid (4), length (4), then a
 // TypedPropertyValue ([MS-OLEPS] 2.15) of that many bytes.
 
-const VT_EMPTY: u16 = 0;
+// The variant types this store and the namespace's one both write.
+pub(crate) const VT_EMPTY: u16 = 0;
 const VT_I4: u16 = 3;
 const VT_BSTR: u16 = 8;
 const VT_BOOL: u16 = 11;
-const VT_UI4: u16 = 19;
+pub(crate) const VT_UI4: u16 = 19;
 const VT_I8: u16 = 20;
-const VT_UI8: u16 = 21;
-const VT_LPWSTR: u16 = 31;
-const VT_FILETIME: u16 = 64;
+pub(crate) const VT_UI8: u16 = 21;
+pub(crate) const VT_LPWSTR: u16 = 31;
+pub(crate) const VT_FILETIME: u16 = 64;
 const VT_CLSID: u16 = 72;
 
 fn rd32(b: &[u8], at: usize) -> Option<u32> {
@@ -1276,7 +1277,7 @@ extern "system" fn ps_get_at(this: *mut c_void, index: u32, out: *mut [u8; 20]) 
 }
 
 /// A PROPVARIANT (24 bytes: vt, three reserved words, the value).
-fn write_variant(pv: *mut u8, vt: u16, value: u64) {
+pub(crate) fn write_variant(pv: *mut u8, vt: u16, value: u64) {
     // SAFETY: the caller's PROPVARIANT.
     unsafe {
         core::ptr::write_bytes(pv, 0, 24);

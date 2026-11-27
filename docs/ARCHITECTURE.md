@@ -17174,6 +17174,25 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   0 writes nothing and leaves the last error alone, which with a NULL
   list is the one way to tell "no room" from "no path", a list that has
   none being FALSE with the empty string and the last error 0).
+- **Properties** (SHGetPropertyStoreFromParsingName, which Word
+  delay-loads as it starts up and dies 0xc06d007f without): a read-only
+  IPropertyStore over the readings a parsing name already resolves to --
+  System.ItemNameDisplay, System.FileName, System.ItemFolderPathDisplay,
+  System.ItemType (the extension with its dot, "Directory" for a
+  folder), System.ItemTypeText (`fileinfo`'s `type_name`, the text
+  SHGetFileInfoW's SHGFI_TYPENAME gives), System.Size (a file's only),
+  System.FileAttributes and the three times, of which System.DateModified
+  is FindFirstFileW's ftLastWriteTime to the tick, so a program that
+  compares it with its own find data sees one number. GetCount and GetAt
+  walk them (E_FAIL past the last); a property the item has not got is
+  S_OK with VT_EMPTY, and a row in the ledger unless Windows has none
+  either (System.ParsingPath, System.Title); SetValue and Commit are
+  STG_E_ACCESSDENIED. The flags that ask for a store which is not the
+  item's own are answered as Windows answers them where there is nothing
+  to give: GPS_HANDLERPROPERTIESONLY and GPS_READWRITE want a property
+  handler's store, which is the file format's business (E_FAIL for a
+  file, E_NOINTERFACE for a folder), and GPS_EXTRINSICPROPERTIESONLY the
+  shell's extrinsic one (E_FAIL).
 - **Opening a file** (ShellExecuteW/ExW, `shellops.rs`): a document runs
   its association's command (AssocQueryStringW's ASSOCSTR_COMMAND for
   the verb, "open" by default, from the user's classes then HKCR; `%1`
@@ -17186,9 +17205,14 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
 - **Limits** (each ledgered where met): BindToStorage,
   CreateViewObject and GetUIObjectOf (context menus, data objects,
   icons, IShellView), handlers other than the folder and its items
-  (`shell32.dll!IShellItem::BindToHandler`), IShellItem2 and property
-  stores, the Recycle Bin, network locations and libraries; the desktop
-  does not list the files of the user's Desktop directory;
+  (`shell32.dll!IShellItem::BindToHandler`), IShellItem2 (and so an
+  item's own GetPropertyStore, a parsing name's store being the one
+  there is), the empty stores of their own GPS_TEMPORARY and
+  GPS_VOLATILEPROPERTIESONLY ask for, a registry of file types for the
+  type text to read a description of the extension out of, the Recycle
+  Bin, network locations and libraries; a relative parsing name is
+  E_INVALIDARG where Windows reads one against the desktop folder; the
+  desktop does not list the files of the user's Desktop directory;
   SHBrowseForFolderW and IFileDialog do not use it yet (step 2's rest).
 
 ### The program (step 2)
