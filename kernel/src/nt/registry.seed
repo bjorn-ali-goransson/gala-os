@@ -172,6 +172,17 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A08-F192-11D4-A65F-0040963251E5}\InprocServer32]
 @=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
+; CMultiLanguage (mlang.h's CLSID_CMultiLanguage): Multi Language
+; Support, which Windows serves from mlang.dll and gala from user/mlang.
+; MSO's shared code creates it on the way to laying text out, for the
+; code pages of a code page and of a font. No WOW6432Node registration,
+; because there is no 32-bit mlang.dll yet: a 32-bit program asking for
+; the class leaves the absent-key row that says so.
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{275C23E2-3747-11D0-9FEA-00AA003F8646}]
+@=sz:CMultiLanguage Class
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{275C23E2-3747-11D0-9FEA-00AA003F8646}\InprocServer32]
+@=expand:%SystemRoot%\System32\mlang.dll
+"ThreadingModel"=sz:Both
 ; The Windows Imaging Component (wincodec.h's CLSID_WICImagingFactory1
 ; and 2, the PNG and BMP decoders, CLSID_WICDefaultFormatConverter;
 ; user/windowscodecs). Both models: the factory is free-threaded.

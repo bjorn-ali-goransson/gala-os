@@ -1558,6 +1558,15 @@ name = "missing_import_test"
 version = "0.1.0"
 
 [[package]]
+name = "mlang"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "gala_lock",
+ "ntrt",
+]
+
+[[package]]
 name = "mpr"
 version = "0.1.0"
 dependencies = [

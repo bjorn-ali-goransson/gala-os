@@ -838,6 +838,27 @@ took.
   detail). Each QueryInterface
   msxml6 does not answer: `msxml6.dll!QI? <node|list|map|error|cache|
   XSLTemplate|XSLProcessor> {<the whole IID>}`, "other", its first dword as detail.
+  Multi Language Support (mlang, ARCHITECTURE "mlang"): what a program
+  asked for and did not get -- `mlang.dll!<interface>::<method>`, "not
+  implemented", for the conversion and enumeration methods, and
+  `mlang.dll!QI? CMultiLanguage {<the whole IID>}` (and `QI?
+  CMultiLanguage class object`), "other", with the IID's first dword as
+  detail, for an interface it does not answer. What it did answer is
+  there too, one row for the first call that reached each method and
+  none after it: `mlang.dll!CMultiLanguage(created)`,
+  `CodePageToCodePages`, `CodePagesToCodePage`, `CodePageToScriptID`,
+  `GetFontCodePages`, `MapFont`, `ReleaseFont` and
+  `ResetFontMapping`, all "reached" with a zero detail -- a bit per
+  method in the DLL, because a row per call would be a row per argument
+  value (the ledger's key is the detail as well as the name) and would
+  crowd the table out. So a run says which half of mlang a program used
+  before it stopped, and the rows stay bounded however hard it leans on
+  them. A code page with no bit or no script is Windows' own E_FAIL and
+  leaves no row; a font that does not cover the code pages asked for
+  does: `mlang.dll!MapFont(no face covers the code pages)`,
+  "unsupported", with the uncovered FONTSIGNATURE bits as detail, which
+  is the row that names a script gala ships no font for. Scenario
+  `mlang_test`.
   XmlLite's reader (xmllite, ARCHITECTURE "xmllite"): every document
   refused, `xmllite.dll!IXmlReader::Read <what the reader was looking
   for>`, "other", with the line as detail -- and

@@ -353,6 +353,10 @@ const USER_DLLS: &[Dll] = &[
     // Windows.UI.dll: the Windows Runtime class UISettings, the system's
     // colours and UI preferences (uisettings_test; ODT's setup.exe).
     Dll { package: "windows_ui", file: "windows.ui.dll", exported_as: "testwindows.ui.dll" },
+    // mlang.dll: Multi Language Support, the code-page and font-link
+    // tables (mlang_test; MSO asks for its class on the way to laying
+    // text out).
+    Dll { package: "mlang", file: "mlang.dll", exported_as: "testmlang.dll" },
     // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
     // WindowsCodecs.dll: the Windows Imaging Component, its factory,
@@ -1650,6 +1654,18 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("ole32_test", "user32.dll", "Windows/System32"),
     ("ole32_test", "gdi32.dll", "Windows/System32"),
     ("ole32_test", "user/bin/ole32_test.exe", "gala"),
+    ("mlang_test", "ntdll.dll", "Windows/System32"),
+    ("mlang_test", "kernel32.dll", "Windows/System32"),
+    ("mlang_test", "msvcrt.dll", "Windows/System32"),
+    ("mlang_test", "ole32.dll", "Windows/System32"),
+    ("mlang_test", "advapi32.dll", "Windows/System32"),
+    ("mlang_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("mlang_test", "user32.dll", "Windows/System32"),
+    ("mlang_test", "gdi32.dll", "Windows/System32"),
+    // mlang.dll is loaded by the class CoCreateInstance asks for, not
+    // imported: it is here because the registry points at it.
+    ("mlang_test", "mlang.dll", "Windows/System32"),
+    ("mlang_test", "user/bin/mlang_test.exe", "gala"),
     ("stg_test", "ntdll.dll", "Windows/System32"),
     ("stg_test", "kernel32.dll", "Windows/System32"),
     ("stg_test", "msvcrt.dll", "Windows/System32"),
@@ -10548,6 +10564,19 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=ole32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["ole32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OF: Multi Language Support (mlang.dll) as Windows serves it --
+        // the class object and factory, the interfaces its object answers
+        // and the tear-offs they come back on, the code-page and script
+        // tables, and the code pages of a font in a DC. Word's
+        // Mso20win32client.dll asks CoCreateInstance for the class on the
+        // way to laying text out, and an unregistered class ends it
+        // (user/mlang_test/main.c, mingw).
+        name: "mlang_test",
+        cmdline: "qemu_exit run=mlang_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["mlang_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: ole32's compound files (MS-CFB) as Windows reads them --

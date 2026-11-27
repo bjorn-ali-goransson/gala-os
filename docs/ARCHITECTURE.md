@@ -3868,7 +3868,7 @@ own name).
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs"), gdiplus (GDI+'s flat API: bitmaps, PNG, solid fills, "Other DLLs"), windows.ui (Windows.UI.ViewManagement.UISettings, "Other DLLs") |
-| COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
+| COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, mlang (Multi Language Support's code-page, script and font-link tables, "mlang"), appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
 | other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices (Windows Web Services' XML reader, "Other DLLs"), wintrust, clusapi, resutils, msi (Windows Installer: nothing installed, and reading a database, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), sppc (the Software Protection Platform's client over gala's license store, "Other DLLs"), slc (the Software Licensing Client, sppc's API under its older name, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
@@ -11149,6 +11149,71 @@ then riched20.dll).
   hears that there are no adapters, and finds lavapipe in the registry
   after it -- `vk_test` expects the row that says it heard so beside
   the device it then used.
+
+### mlang (Multi Language Support)
+
+What Office's shared code asks for on the way to laying text out: which
+code pages a code page or a font covers, and a font for a character the
+selected one does not cover (`mlang_test`; ROADMAP OF). `user/mlang`,
+built for x64 only -- there is no 32-bit mlang.dll yet, so a 32-bit
+program asking for the class leaves the absent-key row that says so.
+
+- **Registration**: CMultiLanguage ({275C23E2-3747-11D0-9FEA-00AA003F8646},
+  no ProgID) under `HKLM\SOFTWARE\Classes\CLSID` (the registry seed),
+  InprocServer32 `%SystemRoot%\System32\mlang.dll`, ThreadingModel Both;
+  ole32's CoCreateInstance loads it and calls DllGetClassObject. The
+  class object answers IUnknown and IClassFactory only (every other IID
+  is recorded); LockServer counts nothing, because the DLL never unloads
+  (DllCanUnloadNow is S_FALSE); CreateInstance with an outer unknown is
+  CLASS_E_NOAGGREGATION, which is Windows' own answer and is recorded as
+  unsupported, since an inner object that delegates is the half gala
+  does not have.
+- **Objects** (`com.rs`): one object per creation, each with its own
+  references. IUnknown and IMultiLanguage are the object itself;
+  IMultiLanguage2, IMultiLanguage3, IMLangCodePages, IMLangFontLink,
+  IMLangFontLink2 and IMLangLineBreakConsole each come back on a
+  tear-off -- a separate object, with its own references, holding one on
+  the object -- which is the shape Windows' own answers have. The
+  methods three of those interfaces share (the code-page and font-link
+  pairs) are one implementation behind all of them.
+- **Tables** (`tables.rs`): one row per code page, each with its
+  FONTSIGNATURE bit and its SCRIPT_ID where it has one.
+  CodePageToCodePages gives the bit of the code pages that have one (874,
+  932, 936, 949, 950, 1250-1258) and E_FAIL for every other, 1200, 1201,
+  65001 and 20127 among them. CodePagesToCodePage gives the caller's
+  default code page when the mask covers it, otherwise the page of the
+  lowest bit in the mask, otherwise the default -- so an empty mask with
+  no default is E_FAIL and an empty mask with one gives it back.
+  CodePageToScriptID gives the script of a code page (437 and the Latin
+  pages sidAsciiLatin, 932 sidKana, 936 sidHan, 949 sidHangul, 950
+  sidBopomofo, and Thai, Cyrillic, Greek, Hebrew and Arabic their own)
+  and for every other code page leaves the caller's byte untouched and
+  answers E_FAIL. Measured against Windows' mlang.dll, which is what
+  `mlang_test` keeps.
+- **Fonts** (`fonts.rs`): gdi32 is the only source of answers.
+  GetFontCodePages selects the font into the DC and reads fsCsb[0] out of
+  GetTextCharsetInfo ("gdi32"), so a face gala ships answers FS_LATIN1; a
+  handle that is not a font, a DC that is not one and a NULL argument
+  are each E_FAIL with the out zeroed, as Windows has them. MapFont
+  copies the DC's current font (GetObjectW into a LOGFONTW,
+  CreateFontIndirectW out of it), because gala ships one Latin family
+  and there is no other face to map to: a mask that face does not cover
+  is E_FAIL and a recorded gap naming the uncovered bits, which is what
+  a program needing a script gala has no font for will leave behind. The
+  handles MapFont hands out are remembered on the object, under a
+  `gala_lock` lock named `mlang.dll!mapped fonts`, and deleted by
+  ReleaseFont, by ResetFontMapping or when the object goes; the lock is
+  let go before gdi32 is called.
+- **What it does not answer**: the conversion and enumeration half --
+  ConvertString and its Unicode, stream and Ex forms, GetCodePageInfo
+  and the code-page and script enumerations, the RFC 1766 pairs, code
+  page detection and validation, the line-break console -- is E_NOTIMPL,
+  recorded with the interface and method that was asked for. Guessing
+  them is worse than refusing them: a conversion needs per-code-page
+  tables gala does not have, and a program told a conversion succeeded
+  would carry the wrong bytes on silently. Which of them a program
+  reaches is in the ledger (OBSERVABILITY), and that is what decides the
+  next chunk (ROADMAP OF).
 
 ### shell32, ole32, dbghelp and normaliz helpers
 
