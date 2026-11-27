@@ -4,6 +4,8 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+use crate::paths_more::{chars, fold};
+
 #[cfg_attr(
     target_arch = "x86",
     link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
@@ -135,6 +137,100 @@ pub extern "system" fn PathFindFileNameW(path: *const u16) -> *const u16 {
         Some(i) => path.wrapping_add(i + 1),
         None => path,
     }
+}
+
+/// A drive letter: a letter of Latin-1. (Build 26300 answers so over
+/// all of U+0001 to U+FFFF: `Ä:\` is a root and Greek `Α:\` is not. The
+/// two signs that sit among those letters, `×` and `÷`, are not ones.)
+fn is_drive_letter(c: u16) -> bool {
+    match c {
+        0x41..=0x5a | 0x61..=0x7a => true,
+        0xc0..=0xff => c != 0xd7 && c != 0xf7,
+        _ => false,
+    }
+}
+
+/// `X:\` and nothing after it.
+fn is_drive_root(s: &[u16]) -> bool {
+    matches!(s, [drive, colon, slash]
+        if is_drive_letter(*drive) && *colon == u16::from(b':') && *slash == BACKSLASH)
+}
+
+/// What follows two backslashes is a root while at most one backslash
+/// separates the server from the share and none ends it: `\\`,
+/// `\\server` and `\\server\share` are roots, `\\server\`,
+/// `\\server\share\` and `\\server\share\dir` are not. Only backslashes
+/// separate, so a `/` and a trailing space are part of a name.
+fn is_unc_body_root(body: &[u16]) -> bool {
+    body.last() != Some(&BACKSLASH) && body.iter().filter(|&&c| c == BACKSLASH).count() < 2
+}
+
+/// `s` without `prefix` (lower-case ASCII, matched with the case of
+/// `s` folded), or None if it does not start with it.
+fn strip_fold<'a>(s: &'a [u16], prefix: &[u8]) -> Option<&'a [u16]> {
+    if s.len() < prefix.len() {
+        return None;
+    }
+    let (head, rest) = s.split_at(prefix.len());
+    head.iter().zip(prefix).all(|(&c, &p)| fold(c) == u16::from(p)).then_some(rest)
+}
+
+/// A volume's own root after the extended prefix: `Volume{`, a GUID of
+/// 8-4-4-4-12 hex digits (either case), `}` and one backslash, and
+/// nothing else.
+fn is_volume_root(s: &[u16]) -> bool {
+    let Some(guid) = strip_fold(s, b"volume{") else {
+        return false;
+    };
+    let Some(guid) = guid.strip_suffix(&[u16::from(b'}'), BACKSLASH]) else {
+        return false;
+    };
+    let mut at = 0;
+    for (group, digits) in [8, 4, 4, 4, 12].into_iter().enumerate() {
+        if group > 0 {
+            if guid.get(at) != Some(&u16::from(b'-')) {
+                return false;
+            }
+            at += 1;
+        }
+        for _ in 0..digits {
+            match guid.get(at) {
+                Some(&c) if u8::try_from(c).is_ok_and(|b| b.is_ascii_hexdigit()) => at += 1,
+                _ => return false,
+            }
+        }
+    }
+    at == guid.len()
+}
+
+/// PathIsRootW: whether the path is a root and nothing under one, read
+/// from the string alone - it never looks at the file system and does
+/// not care how long the path is. A drive's `X:\` (and not `X:`), one
+/// backslash by itself, or two backslashes and a UNC body
+/// (`is_unc_body_root`); after the extended prefix, which is exactly
+/// `\\?\`, a drive's `X:\`, a volume's `Volume{<guid>}\` or `UNC\` and
+/// a body read as two backslashes' body is. A `?` right after the two
+/// backslashes starts that prefix and nothing else, so `\\?a` is not a
+/// root where `\\.a` is. NULL and the empty string are not roots.
+/// (Measured on build 26300; shlwapi_test's `root_checks` holds the
+/// shapes, since the documentation says only "a root".)
+#[unsafe(no_mangle)]
+pub extern "system" fn PathIsRootW(path: *const u16) -> i32 {
+    let s = chars(path);
+    let question = u16::from(b'?');
+    let answer = if let Some(rest) = s.strip_prefix(&[BACKSLASH, BACKSLASH, question, BACKSLASH]) {
+        match strip_fold(rest, b"unc\\") {
+            Some(body) => is_unc_body_root(body),
+            None => is_drive_root(rest) || is_volume_root(rest),
+        }
+    } else if s.starts_with(&[BACKSLASH, BACKSLASH, question]) {
+        false
+    } else if let Some(body) = s.strip_prefix(&[BACKSLASH, BACKSLASH]) {
+        is_unc_body_root(body)
+    } else {
+        is_drive_root(s) || s == [BACKSLASH]
+    };
+    i32::from(answer)
 }
 
 /// PathFileExistsW: whether the file or directory exists.

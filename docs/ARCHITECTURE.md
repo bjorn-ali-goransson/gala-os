@@ -6874,7 +6874,14 @@ of their own, clients of it) is the yardstick.
   Go and the JVM) succeed; timers run on the 1 ms tick whatever is asked.
 - **shlwapi** (`shlwapi_test`): path and string functions
   (PathCanonicalize splits components at backslashes only, PathCombine
-  resolves a file part against the directory's drive, comparisons go
+  resolves a file part against the directory's drive, PathIsRootW reads
+  the string alone and never the file system -- `X:\` for a letter of
+  Latin-1, a lone backslash, or two backslashes and a body holding at
+  most one more and not ending in one, and after exactly `\\?\` a
+  drive's `X:\`, a volume's `Volume{<guid>}\` or `UNC\` and such a
+  body (a `?` right after the two backslashes only ever starts that
+  prefix, so `\\?a` is not a root where `\\.a` is; measured on 26300,
+  the shapes kept by `shlwapi_test`), comparisons go
   through kernel32's CompareStringW in the user's locale, StrCmpLogicalW
   compares digit runs by value; SHDeleteKeyW finds RegDeleteTreeW at run
   time so loading shlwapi does not pull in advapi32), URL functions
