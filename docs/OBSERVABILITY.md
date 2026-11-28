@@ -1285,7 +1285,43 @@ with, `(no return yet)` for one that had not, and a run of the same call
 and status as one entry with its count. An exception a program raises
 itself can carry nothing else at all -- Office's 0xE0000002 names no
 parameters -- and then what the thread called last is the only account
-of what it gave up on. Scenario `crash_raise` pins it. ntdll reports an exception no handler took before it calls the
+of what it gave up on. Scenario `crash_raise` pins it.
+
+An access violation's next question is what was at the address, and
+neither the registers nor the program can answer it. The report reads
+the process's own map for it (`nt::vad::Vad::query`, taken with
+`try_lock` so that writing a crash report can never wait on a lock) and
+says which of four the address is:
+
+```
+crash report:   at 0x14000204c (crash.exe+0x204c), writing address 0x11000
+crash report:   0x11000 is committed in private memory, and allows reading (0x1000 bytes of it from this page); reserved at 0x10000 for reading and writing
+crash report:   nothing is mapped at 0x0: free for 0x100000 bytes from this page onwards, with nothing mapped below it
+```
+
+A write to a page committed for writing is a bug in whatever computed
+the address; one to a page committed for reading is memory whose
+protection someone else changed; one to a reserved page is memory the
+program believes it committed; and a free address is a pointer that was
+never memory. They want different questions asked next, and the
+registers look the same in all four. The line names the kind of memory
+(private, a mapped section, an image -- with the image's name), says
+when the page is a guard page, gives the extent of the run the address
+is in and the base the allocation was reserved at with the protection
+it was reserved for.
+
+For an address nothing is mapped at there is one question more, and the
+map answers that too (`vad::nearest_below`): the free run is reported
+from the faulting page onwards, because that is where `query` starts it
+-- Windows' VirtualQuery answers a free address the same way -- so the
+line names the nearest mapping *below* the address and how far below it
+ends. A gap that starts 0x40 past the end of a live mapping is an
+overrun; one far from anything is an address that was never a pointer.
+Scenarios `crash` (nothing mapped, and nothing below it) and
+`crash_region` (committed for reading only, inside a larger
+reservation).
+
+ntdll reports an exception no handler took before it calls the
 top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
@@ -1364,8 +1400,9 @@ does write over this one. That is also the only case left where a
 withdrawal can meet a note which is not its own, and it leaves it, for
 the crash report. Scenarios `crash`, `crash_dispatched`,
 `crash_filtered`, `crash_continued`, `crash_continued_other`,
-`crash_unhandled_both` and `crash_delay` (two threads, a delay-loaded
-function and a delay-loaded DLL), each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
+`crash_unhandled_both`, `crash_delay` (two threads, a delay-loaded
+function and a delay-loaded DLL) and `crash_region` (what is at the
+faulting address), the first seven each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
 eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`

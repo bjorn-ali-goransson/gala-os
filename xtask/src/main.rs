@@ -13701,11 +13701,40 @@ const BASE_SCENARIOS: &[Scenario] = &[
              (access violation) in thread",
             "(crash.exe+0x",
             "writing address 0x0",
+            // What is at the address: nothing, which is what says the
+            // pointer was never memory (`crash_region` is the other
+            // answer).
+            "nothing is mapped at 0x0: free for 0x",
+            "from this page onwards, with nothing mapped below it",
             // The personality (ROADMAP LX seam 2) and session.
             "crash report:   personality nt, session ",
             "crash report:   rax=",
             "crash report:   [rsp+0x00]",
             "stack values above those point into an image)",
+            "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // What is at the address a fault touched (nt::crashreport::Region,
+        // read out of the kernel's own map): a write to a page committed
+        // for reading only, inside a reservation larger than it, so the
+        // report has a protection that is not the reservation's, a run
+        // smaller than it and a base that is not the faulting page. The
+        // `crash` scenario above is the same line for an address nothing
+        // is mapped at. Which of the two a crash is decides where to look
+        // and the registers do not say (ROADMAP OF: Word's write to
+        // 0x11e0040 inside d3d11.dll).
+        name: "crash_region",
+        cmdline: "qemu_exit run=crash.exe args=region",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to a read-only page inside a larger reservation",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "is committed in private memory, and allows reading (0x1000 bytes of it from this \
+             page); reserved at 0x",
+            " for reading and writing",
             "process crash.exe (pid 4) exited with status 0xc0000005",
             BOOT_OK_MARKER,
         ],

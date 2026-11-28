@@ -506,6 +506,18 @@ impl Vad {
         Some(a.run_at((addr - a.base) / PAGE).state)
     }
 
+    /// The allocation nearest below `addr`: its base, its end and its
+    /// kind. `query` only answers upwards -- a free run it reports
+    /// starts at the page asked about and ends at the next reservation
+    /// -- and for an address nothing is mapped at the question is the
+    /// other way: a gap that starts right after a live mapping is an
+    /// overrun past its end, and one far from anything is an address
+    /// that was never memory (nt::crashreport::Region).
+    pub fn nearest_below(&self, addr: u64) -> Option<(u64, u64, u32)> {
+        let i = self.allocs.partition_point(|a| a.end() <= addr);
+        self.allocs[..i].last().map(|a| (a.base, a.end(), a.kind))
+    }
+
     /// MEMORY_BASIC_INFORMATION for `addr`.
     pub fn query(&self, addr: u64) -> Result<RegionInfo, NtStatus> {
         if addr >= USER_MAX {

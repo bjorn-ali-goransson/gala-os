@@ -463,16 +463,44 @@ fn run() -> Result<(), u32> {
         c.eq(signed as u64, k32 as u64)?;
         c.ok(FreeLibrary(signed) != 0, 0)?;
 
-        // VirtualQuery.
+        // VirtualQuery, for each of the three answers an address has:
+        // committed, reserved and free. What a crash report says about
+        // a faulting address is read out of this
+        // (nt::crashreport::Region), so the difference between the
+        // three is a contract and not a detail.
         let p = VirtualAlloc(core::ptr::null_mut(), 0x10000, 0x3000, 4);
         let mut mbi = MemoryBasicInformation::default();
         let size = core::mem::size_of::<MemoryBasicInformation>();
         c.eq(VirtualQuery(p, &mut mbi, size) as u64, size as u64)?;
         c.eq(mbi.base_address as u64, p as u64)?;
+        c.eq(mbi.allocation_base as u64, p as u64)?;
         c.eq(mbi.region_size as u64, 0x10000)?;
         c.eq(mbi.state.into(), 0x1000)?; // MEM_COMMIT
         c.eq(mbi.protect.into(), 4)?;
+        c.eq(mbi.allocation_protect.into(), 4)?;
+        c.eq(mbi.kind.into(), 0x20000)?; // MEM_PRIVATE
         VirtualFree(p, 0, 0x8000);
+
+        // A reservation with nothing committed in it reports no
+        // protection at all -- 0, not the protection it was reserved
+        // for, which stays in allocation_protect (measured on the
+        // pinned build). Nothing is mapped at such a page, so a
+        // protection for it would say a write could be allowed there.
+        let r = VirtualAlloc(core::ptr::null_mut(), 0x10000, 0x2000, 4); // MEM_RESERVE
+        c.eq(VirtualQuery(r, &mut mbi, size) as u64, size as u64)?;
+        c.eq(mbi.state.into(), 0x2000)?; // MEM_RESERVE
+        c.eq(mbi.protect.into(), 0)?;
+        c.eq(mbi.allocation_protect.into(), 4)?;
+        c.eq(mbi.kind.into(), 0x20000)?; // MEM_PRIVATE
+        // Released, the same address is free again: no allocation base,
+        // no type, and PAGE_NOACCESS for a page that is not there.
+        VirtualFree(r, 0, 0x8000);
+        c.eq(VirtualQuery(r, &mut mbi, size) as u64, size as u64)?;
+        c.eq(mbi.state.into(), 0x10000)?; // MEM_FREE
+        c.eq(mbi.protect.into(), 1)?; // PAGE_NOACCESS
+        c.eq(mbi.allocation_base as u64, 0)?;
+        c.eq(mbi.allocation_protect.into(), 0)?;
+        c.eq(mbi.kind.into(), 0)?;
 
         SwitchToThread();
 
