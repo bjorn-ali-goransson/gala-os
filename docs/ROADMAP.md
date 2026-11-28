@@ -1361,7 +1361,7 @@ the kernel.
   loader needs it; `gpu_stub_test`); ntdll resolves `.` and `..` in DLL
   paths (`loader_test`); `vk_test` (a triangle read back, then presented
   through VK_KHR_win32_surface and checked on the screen).
-- G2, Direct3D 11: DXVK 3.1.1 (PREBUILT `dxvk`) over that Vulkan stack,
+- G2, Direct3D 11: DXVK 3.2 (PREBUILT `dxvk`) over that Vulkan stack,
   its `d3d11.dll` and `dxgi.dll` beside the program (System32's dxgi
   stays gala's, the one the Vulkan loader calls); gdi32's 19 `D3DKMT*`
   thunks (STATUS_NOT_SUPPORTED, in the ledger) and ucrtbase's
@@ -1371,6 +1371,12 @@ the kernel.
   so no HLSL compiler yet. `office_word` ships the same pair beside
   WINWORD.EXE and Word creates a D3D_FEATURE_LEVEL_11_0 device there,
   which is how a program other than a test gets one (ROADMAP OF).
+  The version is 3.2 because of that program: lavapipe has no
+  VK_KHR_external_memory_win32, so a shared texture can get no
+  shared handle, and 3.1.1 answered that with an access violation
+  inside its own d3d11.dll where 3.2 answers E_INVALIDARG (both
+  measured on Windows 11 with the pinned binaries over the pinned
+  lavapipe, which is why no gala gap explains that crash).
 - G2, Direct3D 10.1: gala's own `d3d10_1.dll` (`user/d3d10_1`,
   ARCHITECTURE "Direct3D 10.1") over whichever `d3d11.dll` the program
   brought, since DXVK dropped Direct3D 10 in 2.0: a merged device and

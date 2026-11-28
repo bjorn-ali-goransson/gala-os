@@ -1126,8 +1126,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d3d11_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("d3d11_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("d3d11_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("d3d11_test", "user/bin/d3d11_test.exe", "gala"),
     // d2d1_device_test (GPU G2): Direct2D on the program's own Direct3D
     // 11 device, so it ships d3d11_test's stack (DXVK beside the program,
@@ -1156,8 +1156,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d2d1_device_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("d2d1_device_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("d2d1_device_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("d2d1_device_test", "user/bin/d2d1_device_test.exe", "gala"),
     // d3d10_1_test (GPU G2): Direct3D 10.1 over the program's own
     // Direct3D 11 and Direct2D 1.0 over that, the path Word takes when
@@ -1188,8 +1188,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d3d10_1_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("d3d10_1_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("d3d10_1_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("d3d10_1_test", "user/bin/d3d10_1_test.exe", "gala"),
     // trace_from_d3d10_test: d3d10_1_test's disk, with the trace armed.
     ("trace_from_d3d10_test", "ntdll.dll", "Windows/System32"),
@@ -1217,8 +1217,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("trace_from_d3d10_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("trace_from_d3d10_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("trace_from_d3d10_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("trace_from_d3d10_test", "user/bin/d3d10_1_test.exe", "gala"),
     // trace_from_across_test: the same disk, with the trace armed in
     // the other DLL of the two the program calls into.
@@ -1247,8 +1247,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("trace_from_across_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("trace_from_across_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("trace_from_across_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("trace_from_across_test", "user/bin/d3d10_1_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
@@ -3044,12 +3044,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // and Mesa's lavapipe in System32, lavapipe registered.
     (
         "office_word",
-        "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll",
+        "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll",
         "Program Files/Microsoft Office/root/Office16",
     ),
     (
         "office_word",
-        "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll",
+        "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll",
         "Program Files/Microsoft Office/root/Office16",
     ),
     (
