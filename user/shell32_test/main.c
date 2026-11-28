@@ -49,6 +49,77 @@
  *   KF_FLAG_CREATE) is %LOCALAPPDATA%\Programs and exists afterwards;
  *   CSIDL_COMMON_PROGRAMS is under %ProgramData%.
  *
+ * - SHGetPathFromIDListEx(list, path, cch, flags) (Word delay-loads it
+ *   while it reads its recent documents, and dies with
+ *   0xc06d007f -- a delay-loaded function not found -- where it is
+ *   missing; measured on the pinned host): the path of a list that has
+ *   one, TRUE, with the last error set to 0. The flags make no
+ *   difference to a plain file-system path (GPFIDL_DEFAULT,
+ *   GPFIDL_ALTNAME, GPFIDL_UNCPRINTER and an unknown bit all answer
+ *   alike). A buffer of the path's length and a NUL is enough; one
+ *   character short is FALSE and leaves a path cut to cch - 1
+ *   characters in the buffer, a cch of 1 is FALSE and an empty string,
+ *   and a cch of 0 is FALSE with the buffer and the last error both as
+ *   they were found. A virtual folder (This PC) is FALSE with an empty
+ *   string, as SHGetPathFromIDListW is; a NULL list is FALSE with an
+ *   empty string and the last error untouched, and so is NULL with a
+ *   NULL buffer and a cch of 0. (A NULL buffer with a cch that is not 0
+ *   faults on Windows, so this does not call it.)
+ *
+ * - SHGetPropertyStoreFromParsingName (Word delay-loads it as it starts
+ *   up and dies 0xc06d007f without it; measured on the pinned build with
+ *   Microsoft's IPropertyStore, PROPERTYKEY and GETPROPERTYSTOREFLAGS
+ *   pages beside it): a desktop-absolute parsing name with GPS_DEFAULT
+ *   gives a read-only IPropertyStore of the item -- a file, a folder, a
+ *   drive (with or without its trailing separator, in either case) or
+ *   the empty name's virtual folder -- and a bind context changes
+ *   nothing. The store answers GetCount with the shell's whole property
+ *   list (how long that list is is the machine's business), GetAt for
+ *   every place in it and E_FAIL past the last one, and GetValue with
+ *   the item's System.ItemNameDisplay, System.FileName,
+ *   System.ItemFolderPathDisplay, System.ItemType (the extension, or
+ *   "Directory" for a folder), System.ItemTypeText, System.Size (VT_UI8,
+ *   a file's only), System.FileAttributes and the three times, of which
+ *   System.DateModified is FindFirstFileW's ftLastWriteTime to the tick
+ *   (the other two are that reading rounded to the second). The type
+ *   text is the registry's description of the extension, so only a
+ *   folder's "File folder" and a drive's "Local Disk" are checked, and a
+ *   drive is named as Explorer names it, ending in "(C:)". A property
+ *   the item has not got, and a property set nothing names, are S_OK
+ *   with VT_EMPTY -- System.ParsingPath and System.Title among them,
+ *   for a file as much as for a folder. The store is read-only: SetValue
+ *   and Commit are STG_E_ACCESSDENIED. QueryInterface for IPropertyStore
+ *   and for IUnknown gives the store itself, anything else is
+ *   E_NOINTERFACE, and a NULL out parameter is E_POINTER.
+ *   GPS_HANDLERPROPERTIESONLY and GPS_READWRITE have no store to give
+ *   (E_FAIL for a file, E_NOINTERFACE for a folder), nor has
+ *   GPS_EXTRINSICPROPERTIESONLY (E_FAIL for both); a flag outside
+ *   GPS_MASK_VALID is E_INVALIDARG. GPS_FASTPROPERTIESONLY,
+ *   GPS_OPENSLOWITEM, GPS_DELAYCREATION, GPS_BESTEFFORT, GPS_NO_OPLOCK,
+ *   GPS_PREFERQUERYPROPERTIES, GPS_EXTRINSICPROPERTIES and
+ *   GPS_VOLATILEPROPERTIES all give the same read-only store as
+ *   GPS_DEFAULT. A name that is not there is
+ *   HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND); a name that is no parsing
+ *   name (NULL, ".", "..", an extended "?" path, a path with ".." in the
+ *   middle) is E_INVALIDARG; *ppv is NULL either way. (Three divergences
+ *   are limits rather than checks here: Windows reads a relative name
+ *   against the desktop folder and so answers ERROR_FILE_NOT_FOUND where
+ *   gala, which parses no relative names, answers E_INVALIDARG; a DOS
+ *   device name is ERROR_BAD_PATHNAME on Windows; and the call wants an
+ *   initialized apartment on Windows, CO_E_NOTINITIALIZED without one,
+ *   while gala's shell32 does not depend on ole32. Every NULL out
+ *   parameter but riid's faults on Windows, so this does not call it
+ *   that way.)
+ *
+ *   Two flags ask for a store that is not the item's own, which gala has
+ *   not got (it records them and answers E_NOTIMPL, docs/ROADMAP.md OF):
+ *   GPS_TEMPORARY (and so GPS_MASK_VALID, which holds it) gives an empty
+ *   writable store of its own -- none of the item's properties, SetValue
+ *   and Commit S_OK, what is set readable back and counted -- and
+ *   GPS_VOLATILEPROPERTIESONLY gives an empty one with SetValue
+ *   E_NOTIMPL and Commit STG_E_ACCESSDENIED. (A flags value of all ones
+ *   quirkily gives S_OK, which is not worth modelling either.)
+ *
  * - Shell links (CLSID_ShellLink; Microsoft's IShellLinkW, IPersistFile,
  *   IShellLinkDataList pages, [MS-SHLLINK] for the file, [MS-PROPSTORE]
  *   for its property store, and the checks Wine's shell32/tests/
@@ -379,6 +450,392 @@ static void links(const wchar_t *self) {
 }
 
 /* SHAddToRecentDocs: a link in the Recent folder named after the file. */
+/* SHGetPathFromIDListEx, as Word calls it: the path of a list, the
+ * flags, a buffer too small, and the lists that have no path. */
+static void path_from_list_ex(void) {
+    HMODULE shell = GetModuleHandleA("shell32.dll");
+    BOOL (WINAPI *get_ex)(LPCITEMIDLIST, PWSTR, DWORD, DWORD) =
+        (void *)GetProcAddress(shell, "SHGetPathFromIDListEx");
+    CHECK(get_ex != NULL);
+
+    LPITEMIDLIST (WINAPI *il_from_path)(LPCWSTR) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(190));
+    void (WINAPI *il_free)(LPITEMIDLIST) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(155));
+    CHECK(il_from_path != NULL && il_free != NULL);
+    LPITEMIDLIST windows = il_from_path(L"C:\\Windows");
+    CHECK(windows != NULL);
+    const DWORD len = 10; /* lstrlenW(L"C:\\Windows") */
+
+    WCHAR path[MAX_PATH];
+    DWORD flags[] = { GPFIDL_DEFAULT, GPFIDL_ALTNAME, GPFIDL_UNCPRINTER, 0xff00 };
+    for (int i = 0; i < 4; i++) {
+        for (DWORD j = 0; j < MAX_PATH; j++) {
+            path[j] = 0x4242;
+        }
+        SetLastError(0xdeadbeef);
+        CHECK(get_ex(windows, path, MAX_PATH, flags[i]));
+        CHECK(GetLastError() == 0);
+        CHECK(lstrcmpiW(path, L"C:\\Windows") == 0);
+    }
+
+    /* The path and its NUL, exactly. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(get_ex(windows, path, len + 1, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0 && lstrcmpiW(path, L"C:\\Windows") == 0);
+
+    /* One character short: FALSE, and what fits is left behind. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(windows, path, len, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0);
+    CHECK((DWORD)lstrlenW(path) == len - 1 && memcmp(path, L"C:\\Window", (len - 1) * sizeof(WCHAR)) == 0);
+
+    /* Room for the NUL alone: FALSE, and an empty string. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(windows, path, 1, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0 && path[0] == 0);
+
+    /* No room at all: the buffer and the last error stand. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(windows, path, 0, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0xdeadbeef && path[0] == 0x4242);
+
+    /* A virtual folder has no path, as SHGetPathFromIDListW says too. */
+    LPITEMIDLIST drives = NULL;
+    CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &drives) == S_OK && drives != NULL);
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(drives, path, MAX_PATH, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0 && path[0] == 0);
+    WCHAR old_way[MAX_PATH];
+    old_way[0] = 0x4242;
+    CHECK(!SHGetPathFromIDListW(drives, old_way) && old_way[0] == 0);
+    il_free(drives);
+
+    /* The desktop's empty list has one, the same either way. */
+    LPITEMIDLIST desktop = NULL;
+    CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &desktop) == S_OK && desktop != NULL);
+    path[0] = 0x4242;
+    CHECK(get_ex(desktop, path, MAX_PATH, GPFIDL_DEFAULT));
+    old_way[0] = 0x4242;
+    CHECK(SHGetPathFromIDListW(desktop, old_way) && lstrcmpiW(path, old_way) == 0 && path[0] != 0);
+    il_free(desktop);
+
+    /* No list: FALSE, an empty string, and the last error untouched. */
+    path[0] = 0x4242;
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(NULL, path, MAX_PATH, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0xdeadbeef && path[0] == 0);
+    SetLastError(0xdeadbeef);
+    CHECK(!get_ex(NULL, NULL, 0, GPFIDL_DEFAULT));
+    CHECK(GetLastError() == 0xdeadbeef);
+
+    il_free(windows);
+}
+
+/* Looked up by name, so that a shell32 without it fails a check here
+   instead of stopping the program from loading at all. */
+static HRESULT (WINAPI *get_store)(const wchar_t *, IBindCtx *, GETPROPERTYSTOREFLAGS,
+                                   const GUID *, void **);
+
+/* The Storage property set, System.ItemNameDisplay and the rest. */
+#define STORAGE_SET {0xb725f130, 0x47ef, 0x101a, {0xa5, 0xf1, 0x02, 0x60, 0x8c, 0x9e, 0xeb, 0xac}}
+static const PROPERTYKEY key_name_display = {STORAGE_SET, 10};
+static const PROPERTYKEY key_type_text = {STORAGE_SET, 4};
+static const PROPERTYKEY key_size = {STORAGE_SET, 12};
+static const PROPERTYKEY key_attributes = {STORAGE_SET, 13};
+static const PROPERTYKEY key_modified = {STORAGE_SET, 14};
+static const PROPERTYKEY key_created = {STORAGE_SET, 15};
+static const PROPERTYKEY key_accessed = {STORAGE_SET, 16};
+static const PROPERTYKEY key_parsing_path = {STORAGE_SET, 30};
+/* System.ItemType, System.FileName, System.ItemFolderPathDisplay,
+   System.Title, and a set nothing names. */
+static const PROPERTYKEY key_item_type = {{0x28636aa6, 0x953d, 0x11d2, {0xb5, 0xd6, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0xd0}}, 11};
+static const PROPERTYKEY key_file_name = {{0x41cf5ae0, 0xf75a, 0x4806, {0xbd, 0x87, 0x59, 0xc7, 0xd9, 0x24, 0x8e, 0xb9}}, 100};
+static const PROPERTYKEY key_folder_path = {{0xe3e0584c, 0xb788, 0x4a5a, {0xbb, 0x20, 0x7f, 0x5a, 0x44, 0xc9, 0xac, 0xdd}}, 6};
+static const PROPERTYKEY key_title = {{0xf29f85e0, 0x4ff9, 0x1068, {0xab, 0x91, 0x08, 0x00, 0x2b, 0x27, 0xb3, 0xd9}}, 2};
+static const PROPERTYKEY key_nothing = {{0x1f0c9a71, 0x5b25, 0x4d9a, {0x97, 0x3e, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66}}, 7};
+static const GUID iid_unknown = {0x00000000, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+static const GUID iid_shell_item2 = {0x7e9fb0d3, 0x919f, 0x4307, {0xab, 0x2e, 0x9b, 0x18, 0x60, 0x31, 0x0c, 0x93}};
+static const GUID iid_nothing = {0x1f0c9a72, 0x5b25, 0x4d9a, {0x97, 0x3e, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66}};
+
+/* The string value of `k` in `out` (empty when the key has no value). */
+static void str_prop(IPropertyStore *ps, const PROPERTYKEY *k, wchar_t *out, int cch) {
+    PROPVARIANT pv;
+    PropVariantInit(&pv);
+    out[0] = 0;
+    CHECK(ps->lpVtbl->GetValue(ps, k, &pv) == S_OK);
+    if (pv.vt == VT_LPWSTR) {
+        CHECK(pv.pwszVal != NULL);
+        lstrcpynW(out, pv.pwszVal, cch);
+    } else {
+        CHECK(pv.vt == VT_EMPTY);
+    }
+    PropVariantClear(&pv);
+}
+
+/* The 32-bit value of `k`, which must be VT_UI4. */
+static ULONG u4_prop(IPropertyStore *ps, const PROPERTYKEY *k) {
+    PROPVARIANT pv;
+    PropVariantInit(&pv);
+    CHECK(ps->lpVtbl->GetValue(ps, k, &pv) == S_OK);
+    CHECK(pv.vt == VT_UI4);
+    ULONG v = pv.ulVal;
+    PropVariantClear(&pv);
+    return v;
+}
+
+/* That `k` has no value: S_OK and VT_EMPTY, as Windows answers for a
+   property the item has not got. */
+static void no_prop(IPropertyStore *ps, const PROPERTYKEY *k) {
+    PROPVARIANT pv;
+    PropVariantInit(&pv);
+    CHECK(ps->lpVtbl->GetValue(ps, k, &pv) == S_OK);
+    CHECK(pv.vt == VT_EMPTY);
+    PropVariantClear(&pv);
+}
+
+/* A store of the parsing name `name`, with the flags `flags`. */
+static IPropertyStore *store_of(const wchar_t *name, GETPROPERTYSTOREFLAGS flags) {
+    IPropertyStore *ps = (IPropertyStore *)(ULONG_PTR)0x4242;
+    HRESULT h = get_store(name, NULL, flags, &iid_property_store, (void **)&ps);
+    CHECK(h == S_OK);
+    CHECK(ps != NULL && ps != (IPropertyStore *)(ULONG_PTR)0x4242);
+    return ps;
+}
+
+/* That `name` with `flags` fails with `want` and leaves no store. */
+static void no_store(const wchar_t *name, GETPROPERTYSTOREFLAGS flags, HRESULT want) {
+    IPropertyStore *ps = (IPropertyStore *)(ULONG_PTR)0x4242;
+    HRESULT h = get_store(name, NULL, flags, &iid_property_store, (void **)&ps);
+    CHECK(h == want);
+    CHECK(ps == NULL);
+}
+
+/* SHGetPropertyStoreFromParsingName, which Word delay-loads as it starts
+ * (and dies 0xc06d007f without): the store of a file, of a folder, of a
+ * drive and of a virtual folder, the values it answers, the flags, the
+ * interfaces and the names that have no store. */
+static void property_store(void) {
+    HMODULE shell = GetModuleHandleA("shell32.dll");
+    get_store = (void *)GetProcAddress(shell, "SHGetPropertyStoreFromParsingName");
+    CHECK(get_store != NULL);
+
+    /* A folder of our own with a 10-byte file in it. */
+    wchar_t dir[MAX_PATH], file[MAX_PATH], gone[MAX_PATH];
+    CHECK(GetCurrentDirectoryW(MAX_PATH, dir) > 0);
+    wcscat(dir, L"\\sh_props");
+    CHECK(CreateDirectoryW(dir, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+    wcscpy(file, dir);
+    wcscat(file, L"\\props.txt");
+    wcscpy(gone, dir);
+    wcscat(gone, L"\\no_such.txt");
+    HANDLE f = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    CHECK(f != INVALID_HANDLE_VALUE);
+    DWORD wrote = 0;
+    CHECK(WriteFile(f, "0123456789", 10, &wrote, NULL) && wrote == 10);
+    CHECK(FlushFileBuffers(f));
+    CloseHandle(f);
+    WIN32_FIND_DATAW fd;
+    HANDLE found = FindFirstFileW(file, &fd);
+    CHECK(found != INVALID_HANDLE_VALUE);
+    FindClose(found);
+
+    /* The file's store: the shell's whole property list (how long it is
+       is the machine's business), each key by its place, and E_FAIL past
+       the last one. */
+    IPropertyStore *ps = store_of(file, GPS_DEFAULT);
+    DWORD count = 0;
+    CHECK(ps->lpVtbl->GetCount(ps, &count) == S_OK && count >= 1);
+    PROPERTYKEY k;
+    memset(&k, 0, sizeof k);
+    CHECK(ps->lpVtbl->GetAt(ps, 0, &k) == S_OK);
+    CHECK(ps->lpVtbl->GetAt(ps, count, &k) == E_FAIL);
+
+    /* The file's name, its folder, and its type. (The type text is the
+       registry's description of the extension -- "Text Document" on the
+       host, gala's own "TXT File" -- so only that it is there.) */
+    wchar_t got[MAX_PATH];
+    str_prop(ps, &key_name_display, got, MAX_PATH);
+    CHECK(lstrcmpW(got, L"props.txt") == 0);
+    str_prop(ps, &key_file_name, got, MAX_PATH);
+    CHECK(lstrcmpW(got, L"props.txt") == 0);
+    str_prop(ps, &key_folder_path, got, MAX_PATH);
+    CHECK(lstrcmpiW(got, dir) == 0);
+    str_prop(ps, &key_item_type, got, MAX_PATH);
+    CHECK(lstrcmpiW(got, L".txt") == 0);
+    str_prop(ps, &key_type_text, got, MAX_PATH);
+    CHECK(got[0] != 0);
+
+    /* Its size and attributes. */
+    PROPVARIANT pv;
+    PropVariantInit(&pv);
+    CHECK(ps->lpVtbl->GetValue(ps, &key_size, &pv) == S_OK);
+    CHECK(pv.vt == VT_UI8 && pv.uhVal.QuadPart == 10);
+    PropVariantClear(&pv);
+    ULONG attrs = u4_prop(ps, &key_attributes);
+    CHECK((attrs & FILE_ATTRIBUTE_ARCHIVE) != 0 && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+
+    /* The time it was written, to the tick the file system keeps it.
+       (The created and accessed times are the same reading rounded up to
+       the second, so only that they are there.) */
+    PropVariantInit(&pv);
+    CHECK(ps->lpVtbl->GetValue(ps, &key_modified, &pv) == S_OK);
+    CHECK(pv.vt == VT_FILETIME);
+    CHECK(pv.filetime.dwLowDateTime == fd.ftLastWriteTime.dwLowDateTime);
+    CHECK(pv.filetime.dwHighDateTime == fd.ftLastWriteTime.dwHighDateTime);
+    PropVariantClear(&pv);
+    const PROPERTYKEY *times[] = { &key_created, &key_accessed };
+    for (int i = 0; i < 2; i++) {
+        PropVariantInit(&pv);
+        CHECK(ps->lpVtbl->GetValue(ps, times[i], &pv) == S_OK);
+        CHECK(pv.vt == VT_FILETIME);
+        CHECK(pv.filetime.dwLowDateTime != 0 || pv.filetime.dwHighDateTime != 0);
+        PropVariantClear(&pv);
+    }
+
+    /* A property the item has not got, and a set nothing names: S_OK
+       and no value either way. */
+    no_prop(ps, &key_parsing_path);
+    no_prop(ps, &key_title);
+    no_prop(ps, &key_nothing);
+
+    /* Read-only: nothing is written and nothing is committed. */
+    PropVariantInit(&pv);
+    pv.vt = VT_UI4;
+    pv.ulVal = 1;
+    CHECK(ps->lpVtbl->SetValue(ps, &key_attributes, &pv) == STG_E_ACCESSDENIED);
+    CHECK(ps->lpVtbl->Commit(ps) == STG_E_ACCESSDENIED);
+    PropVariantClear(&pv);
+    CHECK(u4_prop(ps, &key_attributes) == attrs);
+
+    /* IPropertyStore and IUnknown are the store itself; nothing else is
+       answered, and there is nowhere to put an answer. */
+    IPropertyStore *again = NULL;
+    CHECK(ps->lpVtbl->QueryInterface(ps, &iid_property_store, (void **)&again) == S_OK);
+    CHECK(again == ps);
+    CHECK(again->lpVtbl->Release(again) == 1);
+    IUnknown *unk = NULL;
+    CHECK(ps->lpVtbl->QueryInterface(ps, &iid_unknown, (void **)&unk) == S_OK);
+    CHECK((void *)unk == (void *)ps);
+    CHECK(unk->lpVtbl->Release(unk) == 1);
+    void *none = (void *)(ULONG_PTR)0x4242;
+    CHECK(ps->lpVtbl->QueryInterface(ps, &iid_nothing, &none) == E_NOINTERFACE);
+    CHECK(none == NULL);
+    CHECK(ps->lpVtbl->QueryInterface(ps, &iid_property_store, NULL) == E_POINTER);
+    CHECK(ps->lpVtbl->AddRef(ps) == 2);
+    CHECK(ps->lpVtbl->Release(ps) == 1);
+    CHECK(ps->lpVtbl->Release(ps) == 0);
+
+    /* A folder: no size, the directory attribute, and its own type. */
+    ps = store_of(dir, GPS_DEFAULT);
+    str_prop(ps, &key_name_display, got, MAX_PATH);
+    CHECK(lstrcmpW(got, L"sh_props") == 0);
+    str_prop(ps, &key_file_name, got, MAX_PATH);
+    CHECK(lstrcmpW(got, L"sh_props") == 0);
+    str_prop(ps, &key_item_type, got, MAX_PATH);
+    CHECK(lstrcmpiW(got, L"Directory") == 0);
+    str_prop(ps, &key_type_text, got, MAX_PATH);
+    CHECK(lstrcmpiW(got, L"File folder") == 0);
+    no_prop(ps, &key_size);
+    CHECK((u4_prop(ps, &key_attributes) & FILE_ATTRIBUTE_DIRECTORY) != 0);
+    CHECK(ps->lpVtbl->Release(ps) == 0);
+
+    /* A drive, named as Explorer names it, with no extension and no
+       parent folder. A trailing separator and the case make no
+       difference (C: alone is the drive, not its current directory). */
+    const wchar_t *drives[] = { L"C:\\", L"C:", L"c:\\" };
+    for (int i = 0; i < 3; i++) {
+        ps = store_of(drives[i], GPS_DEFAULT);
+        str_prop(ps, &key_name_display, got, MAX_PATH);
+        int n = lstrlenW(got);
+        CHECK(n > 4 && lstrcmpiW(got + n - 4, L"(C:)") == 0);
+        str_prop(ps, &key_type_text, got, MAX_PATH);
+        CHECK(lstrcmpiW(got, L"Local Disk") == 0);
+        no_prop(ps, &key_item_type);
+        no_prop(ps, &key_size);
+        no_prop(ps, &key_folder_path);
+        CHECK(ps->lpVtbl->Release(ps) == 0);
+    }
+
+    /* The empty name is a virtual folder (the host's is This PC, gala's
+       the desktop): a name, and none of a file's properties. */
+    ps = store_of(L"", GPS_DEFAULT);
+    str_prop(ps, &key_name_display, got, MAX_PATH);
+    CHECK(got[0] != 0);
+    no_prop(ps, &key_size);
+    no_prop(ps, &key_attributes);
+    no_prop(ps, &key_file_name);
+    no_prop(ps, &key_folder_path);
+    CHECK(ps->lpVtbl->Release(ps) == 0);
+
+    /* A bind context changes nothing. */
+    IBindCtx *bind = NULL;
+    CHECK(CreateBindCtx(0, &bind) == S_OK && bind != NULL);
+    ps = NULL;
+    CHECK(get_store(file, bind, GPS_DEFAULT, &iid_property_store, (void **)&ps) == S_OK);
+    CHECK(ps != NULL);
+    str_prop(ps, &key_name_display, got, MAX_PATH);
+    CHECK(lstrcmpW(got, L"props.txt") == 0);
+    CHECK(ps->lpVtbl->Release(ps) == 0);
+    bind->lpVtbl->Release(bind);
+
+    /* The flags that ask for the item's own properties all give the same
+       read-only store. (GPS_TEMPORARY and GPS_VOLATILEPROPERTIESONLY ask
+       for a store of another kind, and GPS_MASK_VALID holds
+       GPS_TEMPORARY: the header comment says what they give.) */
+    DWORD plain[] = { 0x0, 0x8, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x800 };
+    for (int i = 0; i < 9; i++) {
+        ps = store_of(file, plain[i]);
+        CHECK(ps->lpVtbl->GetCount(ps, &count) == S_OK && count >= 1);
+        PropVariantInit(&pv);
+        pv.vt = VT_UI4;
+        pv.ulVal = 1;
+        CHECK(ps->lpVtbl->SetValue(ps, &key_attributes, &pv) == STG_E_ACCESSDENIED);
+        PropVariantClear(&pv);
+        CHECK(ps->lpVtbl->Release(ps) == 0);
+    }
+
+    /* A handler-only or writable store there is none of: E_FAIL for a
+       file and E_NOINTERFACE for a folder. 0x400 is
+       GPS_EXTRINSICPROPERTIESONLY, which mingw has not got: E_FAIL for
+       both. A flag outside GPS_MASK_VALID is E_INVALIDARG. */
+    no_store(file, GPS_HANDLERPROPERTIESONLY, E_FAIL);
+    no_store(file, GPS_READWRITE, E_FAIL);
+    no_store(file, 0x400, E_FAIL);
+    no_store(dir, GPS_HANDLERPROPERTIESONLY, E_NOINTERFACE);
+    no_store(dir, GPS_READWRITE, E_NOINTERFACE);
+    no_store(dir, 0x400, E_FAIL);
+    no_store(file, 0x2000, E_INVALIDARG);
+    no_store(file, 0x8000, E_INVALIDARG);
+
+    /* An interface the store has not got, asked for by the name. */
+    void *other = (void *)(ULONG_PTR)0x4242;
+    CHECK(get_store(file, NULL, GPS_DEFAULT, &iid_shell_item2, &other) == E_NOINTERFACE);
+    CHECK(other == NULL);
+    other = (void *)(ULONG_PTR)0x4242;
+    CHECK(get_store(file, NULL, GPS_DEFAULT, &iid_nothing, &other) == E_NOINTERFACE);
+    CHECK(other == NULL);
+
+    /* The names that have no store: nothing there is
+       HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), and a name that is no
+       desktop-absolute parsing name is E_INVALIDARG. (A relative name is
+       the desktop folder's child on the host, so ERROR_FILE_NOT_FOUND
+       there and E_INVALIDARG on gala, which parses no relative names:
+       not called here.) */
+    no_store(gone, GPS_DEFAULT, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+    no_store(NULL, GPS_DEFAULT, E_INVALIDARG);
+    no_store(L".", GPS_DEFAULT, E_INVALIDARG);
+    no_store(L"..", GPS_DEFAULT, E_INVALIDARG);
+    no_store(L"\\\\?\\C:\\Windows", GPS_DEFAULT, E_INVALIDARG);
+    no_store(L"C:\\Windows\\..\\Windows", GPS_DEFAULT, E_INVALIDARG);
+
+    DeleteFileW(file);
+    RemoveDirectoryW(dir);
+}
+
 static void recent_docs(void) {
     wchar_t doc[MAX_PATH], recent[MAX_PATH];
     CHECK(GetCurrentDirectoryW(MAX_PATH, doc) > 0);
@@ -605,6 +1062,8 @@ int main(int argc, char **argv) {
     stream->lpVtbl->Release(stream);
 
     links(self);
+    path_from_list_ex();
+    property_store();
     recent_docs();
 
     printf("shell32_test: ok\n");

@@ -113,6 +113,15 @@
  *   CoGetCurrentProcess: non-zero, the same on each call in a thread,
  *   another number in another thread.
  *
+ * - OleInitialize keeps a count of its own, per thread, saturating at
+ *   zero and separate from the COM count in both directions;
+ *   OleSetClipboard is refused with CO_E_NOTINITIALIZED until that
+ *   count stands, and the first OleInitialize answers S_OK however many
+ *   CoInitializeEx are already held. The other three clipboard calls
+ *   never gate at all, and OleIsCurrentClipboard is S_FALSE in every
+ *   state, a NULL argument included -- Word's WWLIB delay-loads it. The
+ *   section itself says the rest; none of it opens the clipboard.
+ *
  * - A server process's lifetime (Delphi's ComServer looks these up; Inno
  *   Setup): CoAddRefServerProcess returns the new count (1, 2),
  *   CoReleaseServerProcess the count after it (1, 0);
@@ -1179,6 +1188,140 @@ static IActivationFilterVtbl FILTER_VTBL = {f_qi, f_addref, f_release, f_handle}
 static IActivationFilter the_filter = {&FILTER_VTBL};
 static IActivationFilter another_filter = {&FILTER_VTBL};
 
+/* ---- OleInitialize's own count, and the gate OleSetClipboard keeps on
+   it (ROADMAP OF). Word's WWLIB reaches OleIsCurrentClipboard through a
+   delay load, which is why all four clipboard exports have to exist as
+   functions at all: a delay load sees an honest absence and raises
+   0xc06d007f, where a static import of a stub would only have been
+   refused by GetProcAddress.
+
+   None of what follows opens the clipboard, which is what makes it one
+   contract everywhere: CO_E_NOTINITIALIZED is the gate refusing before
+   the clipboard is reached, and any other answer is the gate passed. A
+   machine whose clipboard cannot be opened at all (a restricted window
+   station: OpenClipboard fails with ERROR_ACCESS_DENIED) answers
+   CLIPBRD_E_CANT_OPEN past the gate where a plain one answers S_OK, so a
+   passed gate is asserted as "not the gate's error" and never as S_OK.
+   OleSetClipboard(NULL), the documented way to clear the clipboard, is
+   the call used throughout: the gate comes before the argument is looked
+   at, so no data object is needed to read it.
+
+   Of the four, only OleSetClipboard gates. OleGetClipboard,
+   OleFlushClipboard and OleIsCurrentClipboard never look at the count,
+   and OleIsCurrentClipboard answers S_FALSE in every state, a NULL
+   argument included -- which is the answer Word's delay load is after.
+
+   The count itself: per thread and not per process, a count and not a
+   flag, and saturating at zero, so an unbalanced OleUninitialize is
+   survived and the next OleInitialize arms the gate again. It is
+   separate from the COM count in both directions: CoInitializeEx alone
+   never arms the gate, OleUninitialize disarms it while the apartment
+   still stands, and the gate goes on passing with the COM count torn
+   down to nothing under it. OleInitialize does raise the COM count as
+   well as its own, so one CoUninitialize undoes a CoInitializeEx and
+   OleInitialize pair only halfway; but its return value tracks its own
+   count alone -- S_OK when the OLE count was 0 however many
+   CoInitializeEx stand, S_FALSE when it was not, and the COM error when
+   CoInitializeEx fails (an MTA thread: RPC_E_CHANGED_MODE, arming
+   nothing). An OleUninitialize with the count already at zero does
+   nothing whatever, the COM count included. */
+
+/* Is a COM count standing on this thread? Asked without changing it. */
+static BOOL com_held(void) {
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    BOOL held = (hr == S_FALSE);
+    if (hr == S_OK || hr == S_FALSE)
+        CoUninitialize();
+    return held;
+}
+
+static DWORD WINAPI gate_with_no_init(void *out) {
+    *(HRESULT *)out = OleSetClipboard(NULL);
+    return 0;
+}
+
+static DWORD WINAPI gate_with_com_only(void *out) {
+    HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    *(HRESULT *)out = OleSetClipboard(NULL);
+    if (init == S_OK || init == S_FALSE)
+        CoUninitialize();
+    return 0;
+}
+
+static void ole_init_count(void) {
+    IDataObject *data = NULL;
+    HRESULT theirs;
+    HANDLE t;
+
+    /* The three that never gate, with no OleInitialize anywhere. */
+    CHECK(OleIsCurrentClipboard(NULL) == S_FALSE);
+    CHECK(OleGetClipboard(&data) != CO_E_NOTINITIALIZED);
+    if (data)
+        IDataObject_Release(data);
+    CHECK(OleFlushClipboard() != CO_E_NOTINITIALIZED);
+
+    /* And the one that does. The apartment this program has held since
+       its first line is not what the gate reads. */
+    CHECK(com_held());
+    CHECK(OleSetClipboard(NULL) == CO_E_NOTINITIALIZED);
+
+    /* The first OleInitialize on the thread is S_OK although COM is
+       already initialized: the answer is its own count, not the
+       apartment's. The second is S_FALSE, and one release of two leaves
+       the gate armed. */
+    CHECK(OleInitialize(NULL) == S_OK);
+    CHECK(OleInitialize(NULL) == S_FALSE);
+    CHECK(OleSetClipboard(NULL) != CO_E_NOTINITIALIZED);
+    CHECK(OleIsCurrentClipboard(NULL) == S_FALSE);
+    OleUninitialize();
+    CHECK(OleSetClipboard(NULL) != CO_E_NOTINITIALIZED);
+    OleUninitialize();
+    CHECK(OleSetClipboard(NULL) == CO_E_NOTINITIALIZED);
+    /* Each pair took its own COM count back with it and left this
+       thread's apartment where it was. */
+    CHECK(com_held());
+
+    /* Per thread: a thread of its own is refused while this one holds
+       the count, and a CoInitializeEx of its own does not stand in for
+       one. */
+    CHECK(OleInitialize(NULL) == S_OK);
+    CHECK(OleSetClipboard(NULL) != CO_E_NOTINITIALIZED);
+    theirs = S_OK;
+    t = CreateThread(NULL, 0, gate_with_no_init, &theirs, 0, NULL);
+    CHECK(t != NULL && WaitForSingleObject(t, 10000) == WAIT_OBJECT_0);
+    CloseHandle(t);
+    CHECK(theirs == CO_E_NOTINITIALIZED);
+    theirs = S_OK;
+    t = CreateThread(NULL, 0, gate_with_com_only, &theirs, 0, NULL);
+    CHECK(t != NULL && WaitForSingleObject(t, 10000) == WAIT_OBJECT_0);
+    CloseHandle(t);
+    CHECK(theirs == CO_E_NOTINITIALIZED);
+    OleUninitialize();
+    CHECK(OleSetClipboard(NULL) == CO_E_NOTINITIALIZED);
+
+    /* Saturating at zero, and an extra release that costs the apartment
+       nothing: were the count at -1 the OleInitialize below would bring
+       it only to 0 and still refuse. */
+    OleUninitialize();
+    CHECK(com_held());
+    CHECK(OleSetClipboard(NULL) == CO_E_NOTINITIALIZED);
+    CHECK(OleInitialize(NULL) == S_OK);
+    CHECK(OleSetClipboard(NULL) != CO_E_NOTINITIALIZED);
+
+    /* The gate is the OLE count alone: pulling the apartment out from
+       under it -- its own COM count and this thread's both -- changes
+       nothing, and the count is still there to be released after. */
+    CoUninitialize();
+    CoUninitialize();
+    CHECK(!com_held());
+    CHECK(OleSetClipboard(NULL) != CO_E_NOTINITIALIZED);
+    OleUninitialize();
+    CHECK(OleSetClipboard(NULL) == CO_E_NOTINITIALIZED);
+    CHECK(!com_held());
+    /* The apartment back, for the rest of the program. */
+    CHECK(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK);
+}
+
 /* ---- The OLE clipboard, as far as a system that owns none can be asked
    about it: OleIsCurrentClipboard (ROADMAP OF). Word's OART.DLL
    delay-loads this one, so its absence is not a ledger line and a
@@ -1199,17 +1342,18 @@ static IActivationFilter another_filter = {&FILTER_VTBL};
    clipboard, which the window station this was measured on refuses --
    OpenClipboard(NULL) fails with ERROR_ACCESS_DENIED however often it is
    retried -- so what they answered there is the station's answer and not
-   the contract, and they stay unimplemented until they can be measured
-   from a desktop. Two of their edges did survive it, because the
-   argument check precedes the clipboard: OleGetClipboard(NULL) is
-   E_INVALIDARG in every state, and OleSetClipboard(NULL) is
-   CO_E_NOTINITIALIZED without an apartment. Neither is checked here,
-   because both functions still end the process, which is the honest
-   answer while the rest of them is unknown. */
+   the contract. What survives that refusal is everything decided before
+   the clipboard is touched at all, and that is what is asserted: the
+   gate OleSetClipboard keeps on OleInitialize's own count
+   (ole_init_count above) and OleGetClipboard(NULL), E_INVALIDARG in
+   every state. Their success paths -- which formats a data object
+   publishes, what OleFlushClipboard renders -- wait on a measurement
+   from a desktop. */
 static void not_the_clipboard(void) {
     CHECK(OleIsCurrentClipboard(NULL) == S_FALSE);
     CHECK(OleIsCurrentClipboard((IDataObject *)(UINT_PTR)1) == S_FALSE);
     CHECK(OleIsCurrentClipboard((IDataObject *)(UINT_PTR)0xdeadbeef) == S_FALSE);
+    CHECK(OleGetClipboard(NULL) == E_INVALIDARG);
 }
 
 /* The same answer with OLE up and after it has gone again. */
@@ -1627,6 +1771,7 @@ int main(void) {
     class_object_more();
     class_object_edges();
     time_and_numbers();
+    ole_init_count();
 
     CoUninitialize();
     not_the_clipboard();

@@ -1,7 +1,8 @@
 //! XmlLite's reader (xmllite.dll's `CreateXmlReader` and `IXmlReader`),
 //! as Windows answers it. Word delay-loads `CreateXmlReader` and ends on
 //! 0xc06d007f without it (ROADMAP OF), so this is the shape gala's
-//! xmllite.dll has to have.
+//! xmllite.dll has to have. The writer is the other half of the same
+//! DLL, and of the same stop: its cases are in [`writer`].
 //!
 //! The input is this program's own `IStream` over a byte buffer, and
 //! every method but QueryInterface, AddRef, Release and Read answers
@@ -195,6 +196,10 @@ const BADS: &[Bad] = &[
     b(b"<a/><b/>", WC_E_ROOTELEMENT, 2, "a second root element"),
     b(b"text<a/>", WC_E_SYNTAX, 1, "text before the root element"),
     b(b"<a/>text", WC_E_SYNTAX, 2, "text after the root element"),
+    b(b"<a/>\0", WC_E_SYNTAX, 2, "a NUL after the root element"),
+    b(b"<a/>\0\0\0\0\0\0\0\0", WC_E_SYNTAX, 2, "the NULs a buffer read to its capacity ends in"),
+    b(b"<a/>  \0", WC_E_SYNTAX, 2, "white space after the root element and then a NUL"),
+    b(b"<a/>  junk", WC_E_SYNTAX, 2, "white space after the root element and then text"),
     b(b"<!DOCTYPE a><a/>", WC_E_DTDPROHIBITED, 1, "a document type declaration"),
     b(b"<a>", MX_E_INPUTEND, 2, "the text ends inside an element"),
     b(b"<a", NC_E_QNAMECHARACTER, 1, "the text ends inside a start tag"),
@@ -242,13 +247,13 @@ macro_rules! call {
 }
 
 struct Line {
-    buf: [u8; 300],
+    buf: [u8; 512],
     n: usize,
 }
 
 impl Line {
     fn new() -> Self {
-        Self { buf: [0; 300], n: 0 }
+        Self { buf: [0; 512], n: 0 }
     }
 
     fn s(mut self, s: &[u8]) -> Self {
@@ -310,6 +315,26 @@ impl Line {
                 _ => self.s(b"?"),
             };
             i += 1;
+        }
+        self
+    }
+
+    /// Bytes as they were written, with white space escaped (a line
+    /// end would end the line) and anything else that is not printable
+    /// ASCII as `\xNN`: what a writer left on its stream, to read in
+    /// the transcript.
+    fn esc(mut self, bytes: &[u8]) -> Self {
+        for &b in bytes {
+            self = match b {
+                b'\n' => self.s(b"\\n"),
+                b'\r' => self.s(b"\\r"),
+                b'\t' => self.s(b"\\t"),
+                0x20..=0x7e => self.s(&[b]),
+                _ => {
+                    let d = b"0123456789abcdef";
+                    self.s(&[b'\\', b'x', d[(b >> 4) as usize], d[(b & 0xf) as usize]])
+                }
+            };
         }
         self
     }
@@ -907,6 +932,9 @@ fn attributes(c: &mut Checks, reader: Obj) -> Result<(), u32> {
     c.text(p, len, "r")
 }
 
+mod props;
+mod writer;
+
 /// Returns how many checks held, which the `ok` line prints.
 fn run() -> Result<u32, u32> {
     let mut c = Checks(0, 0);
@@ -1045,6 +1073,11 @@ fn run() -> Result<u32, u32> {
 
     // Release gives up the last reference.
     c.eq(u64::from(call!(reader, RELEASE, fn() -> u32,)), 0)?;
+
+    // The writer, which is the half of xmllite.dll Word reaches next.
+    props::check(&mut c)?;
+    writer::check(&mut c)?;
+
     if c.1 != 0 {
         return Err(c.1);
     }

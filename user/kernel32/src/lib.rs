@@ -84,8 +84,11 @@ const CURRENT_PROCESS: isize = -1;
 const STATUS_SUCCESS: u32 = 0;
 const STATUS_TIMEOUT: u32 = 0x102;
 const STATUS_PENDING: u32 = 0x103;
+const STATUS_FILE_IS_A_DIRECTORY: u32 = 0xc000_00ba;
 const STATUS_OBJECT_NAME_EXISTS: u32 = 0x4000_0000;
 const ERROR_ALREADY_EXISTS: u32 = 183;
+const ERROR_PATH_NOT_FOUND: u32 = 3;
+const ERROR_FILE_EXISTS: u32 = 80;
 const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
@@ -1175,8 +1178,35 @@ fn open_path(
     open_path_sa(path, access, share, disposition, options, attributes, core::ptr::null_mut())
 }
 
-/// open_path with SECURITY_ATTRIBUTES (descriptor, inheritance).
-fn open_path_sa(
+/// Why an open failed: the status NtCreateFile gave, or the Win32 error
+/// the name itself was refused with, before any open.
+#[derive(Clone, Copy)]
+enum OpenFailed {
+    Status(u32),
+    Name(u32),
+}
+
+impl OpenFailed {
+    /// The Win32 error to report (what every caller that does not read
+    /// the status itself wants). Mapping a status is also what keeps it
+    /// in TEB.LastStatusValue for RtlGetLastNtStatus (Windows records it
+    /// in RtlNtStatusToDosError), so a caller that substitutes an error
+    /// of its own asks for this one first and overrides what it returns,
+    /// never what it recorded.
+    fn error(self) -> u32 {
+        match self {
+            // SAFETY: plain function call.
+            Self::Status(status) => unsafe { RtlNtStatusToDosError(status) },
+            Self::Name(error) => error,
+        }
+    }
+}
+
+/// open_path_sa, keeping the NT status an open failed with: the Win32
+/// error CreateFileW reports for a directory depends on it (and on how
+/// the caller named the directory), and the status is the only thing
+/// that says the open was refused for being one.
+fn open_path_status(
     path: *const u16,
     access: u32,
     share: u32,
@@ -1184,7 +1214,7 @@ fn open_path_sa(
     options: u32,
     attributes: u32,
     sa: *mut c_void,
-) -> Result<(Handle, usize), u32> {
+) -> Result<(Handle, usize), OpenFailed> {
     let (mut h, mut iosb) = (core::ptr::null_mut(), [0usize; 2]);
     let status = with_object_attributes_sa(path, sa, |oa| {
         // SAFETY: valid pointers for the call.
@@ -1203,12 +1233,37 @@ fn open_path_sa(
                 0,
             )
         }
-    })?;
+    })
+    .map_err(OpenFailed::Name)?;
     if status != STATUS_SUCCESS {
-        // SAFETY: plain call.
-        return Err(unsafe { RtlNtStatusToDosError(status) });
+        return Err(OpenFailed::Status(status));
     }
     Ok((h, iosb[1]))
+}
+
+/// open_path with SECURITY_ATTRIBUTES (descriptor, inheritance).
+fn open_path_sa(
+    path: *const u16,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    options: u32,
+    attributes: u32,
+    sa: *mut c_void,
+) -> Result<(Handle, usize), u32> {
+    open_path_status(path, access, share, disposition, options, attributes, sa)
+        .map_err(OpenFailed::error)
+}
+
+/// Whether the caller's name ends in a backslash, which asks for a
+/// directory: an open that may not have one then reports
+/// ERROR_PATH_NOT_FOUND rather than the access denial the same directory
+/// named without the separator gives. The name counts as the caller
+/// wrote it, not as it canonicalizes: a trailing `/` is not a trailing
+/// backslash, `C:\\dir\\.` is not one either, and a `\\\\?\\` name counts
+/// like any other (measured against Windows; `user/kernel32_file_test`).
+fn names_a_directory(path: *const u16) -> bool {
+    !path.is_null() && wide_slice(path).last() == Some(&BACKSLASH)
 }
 
 /// CreateFileW: Win32 dispositions and flags mapped to NtCreateFile.
@@ -1232,7 +1287,7 @@ pub extern "system" fn CreateFileW(
     // SAFETY: the caller's NUL-terminated path (its first unit).
     if !path.is_null() && unsafe { *path } == 0 {
         // An empty name: no such path (Windows; Wine's test_CreateFile2).
-        return fail_with(3, INVALID_HANDLE_VALUE); // ERROR_PATH_NOT_FOUND
+        return fail_with(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
     }
     let nt_disposition = match disposition {
         1 => 2, // CREATE_NEW -> FILE_CREATE
@@ -1285,7 +1340,7 @@ pub extern "system" fn CreateFileW(
     // installers open their temporary data file so).
     let delete = if flags & FILE_FLAG_DELETE_ON_CLOSE != 0 { 0x0001_0000 } else { 0 };
     let access = access | synchronize | FILE_READ_ATTRIBUTES | delete;
-    match open_path_sa(path, access, share, nt_disposition, options, flags & 0x7fff, security) {
+    match open_path_status(path, access, share, nt_disposition, options, flags & 0x7fff, security) {
         Ok((h, information)) => {
             // OPEN_ALWAYS/CREATE_ALWAYS on an existing file: success, with
             // ERROR_ALREADY_EXISTS (FILE_OPENED = 1, FILE_OVERWRITTEN = 3).
@@ -1296,9 +1351,37 @@ pub extern "system" fn CreateFileW(
             }
             h
         }
-        // CREATE_NEW on an existing file: ERROR_FILE_EXISTS, not 183.
-        Err(ERROR_ALREADY_EXISTS) if disposition == 1 => fail_with(80, INVALID_HANDLE_VALUE),
-        Err(e) => fail_with(e, INVALID_HANDLE_VALUE),
+        Err(e) => {
+            // The status is mapped first, whichever error is reported:
+            // that is what records it for RtlGetLastNtStatus, and a
+            // program that reads the status (ole32 does) must see the
+            // one the file system gave even where the error below is
+            // not the one it maps to.
+            let error = e.error();
+            match (e, error) {
+                // A name that ends in a backslash asks for a directory,
+                // and an open without FILE_FLAG_BACKUP_SEMANTICS may not
+                // have one: the name then does not name a file, which
+                // Windows reports as ERROR_PATH_NOT_FOUND, where the
+                // same directory named without the separator is an
+                // access denial. The file system gives the one status
+                // for both (STATUS_FILE_IS_A_DIRECTORY); the difference
+                // is made here. Office's ole32 turns the error into
+                // STG_E_PATHNOTFOUND, which Word reads as "no such
+                // document".
+                (OpenFailed::Status(STATUS_FILE_IS_A_DIRECTORY), _) if names_a_directory(path) => {
+                    fail_with(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE)
+                }
+                // A name already taken is ERROR_FILE_EXISTS, not the
+                // 183 the status maps to: 183 is what a successful open
+                // of a name that was already there leaves behind, so an
+                // open that failed never reports it (CREATE_NEW over a
+                // file, CREATE_ALWAYS over a directory, which has
+                // nothing to truncate).
+                (_, ERROR_ALREADY_EXISTS) => fail_with(ERROR_FILE_EXISTS, INVALID_HANDLE_VALUE),
+                (_, error) => fail_with(error, INVALID_HANDLE_VALUE),
+            }
+        }
     }
 }
 
@@ -2917,7 +3000,6 @@ pub extern "system" fn GetTempFileNameW(
 ) -> u32 {
     const MAX_PATH: usize = 260;
     const ERROR_BUFFER_OVERFLOW: u32 = 111;
-    const ERROR_FILE_EXISTS: u32 = 80;
     if path.is_null() || buf.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
     }

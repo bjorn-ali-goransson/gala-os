@@ -1698,7 +1698,7 @@ fn map_image_view_at(
 }
 
 /// Unmaps the view containing `addr`.
-pub fn unmap_view(process: &Process, addr: u64) -> Result<(), NtStatus> {
+pub fn unmap_view(process: &Process, addr: u64, by: vad::By) -> Result<(), NtStatus> {
     // The view, its VAD range and its pages go together, under the locks
     // (in their order: views, VAD, space): a view mapped at once at the
     // same place, or a fault there, never finds this one's pages.
@@ -1710,6 +1710,11 @@ pub fn unmap_view(process: &Process, addr: u64) -> Result<(), NtStatus> {
     let mut vad = process.vad.lock();
     vad.release(views[i].base, 0)?;
     let view = views.swap_remove(i);
+    // A pointer into an unmapped image is the shape of fault this is
+    // kept for: the module is gone and nothing else remembers it was
+    // ever there (vad::Gone).
+    let image = section_of(&view.section).image.is_some();
+    vad.record_gone(view.base, view.base + view.size, vad::How::View { image }, by);
     // The pages mapped (most of a large image's never are): in time of
     // those, not of the view's size.
     let space_of = process.live_space()?;

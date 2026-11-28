@@ -435,7 +435,9 @@ pub fn release_thread(process: &Process, teb: u64, teb32: u64) {
     let stack = process.read_u64(teb + teb::DEALLOCATION_STACK);
     for (what, base) in [("64-bit stack", stack.ok()), ("TEB32", Some(teb32))] {
         let Some(base) = base.filter(|&b| b != 0) else { continue };
-        if let Err(e) = super::vm::free(process, base, 0, super::vm::MEM_RELEASE) {
+        if let Err(e) =
+            super::vm::free(process, base, 0, super::vm::MEM_RELEASE, super::vad::By::Kernel)
+        {
             warn!(
                 "wow64: {} (pid {}): cannot free an exited thread's {what} at {base:#x}: {e:?}",
                 process.name, process.id

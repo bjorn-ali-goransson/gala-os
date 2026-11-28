@@ -2556,6 +2556,60 @@ target/x86_64-pc-windows-msvc/release --dumps <artifact>/imports
 what those programs load (static imports through Office's own DLLs,
 then delay imports), `--static` after it only what loading needs.
 
+**The survey's build is not the installed build.** The workflow installs
+whatever the Current channel serves the day it runs; `office_install_local`
+installs the pinned cache (`OFFICE_SOURCE_VERSION`). They drift apart --
+16.0.20625.20142 against the pinned 16.0.20527.20196 -- and a module's
+imports change between builds, so a static gap can be one no run will
+ever reach. The one measured this way: six kernel32 functions
+(CreateBoundaryDescriptorW, CreatePrivateNamespaceW,
+AddSIDToBoundaryDescriptor and their three companions) that the surveyed
+Click-to-Run AppV shim imports statically and the pinned one does not --
+the run loads `AppvIsvSubsystems64.dll` and leaves no missing-import row
+for them. So read `version.txt` out of the artifact, compare it with
+`OFFICE_SOURCE_VERSION`, and take a static gap the run contradicts as
+drift rather than work.
+
+### Ranking a run's gaps (ROADMAP OF)
+
+A run's missing-features ledger (OBSERVABILITY) is the measured list of
+what a program asked for and did not get; `tools/gap_rank.py` puts it in
+the order the work wants it in and says how broad each gap is:
+
+```
+python3 -I tools/gap_rank.py target/release/test-office_word.serial.log \
+    --dumps <artifact>/imports --roots WINWORD.EXE,WWLIB.DLL
+```
+
+It takes a boot-test serial log (or its `ledger: {...}` lines on their
+own), prints every gap that names a module with its hits and the time it
+was last hit, latest first, then the same by module. A gap whose name an
+import table carries also gets `[Ns/Md]`: how many of the program's
+start-up modules import it statically (a module does not load without
+it) and how many by delay load (only a call wants it). One module
+importing a function is one program's path; twelve is the platform's,
+and the ledger cannot tell them apart.
+
+**So the stages are: survey, one run, rank, implement a batch, verify.**
+The survey (above) says what loading needs before a run is spent on it.
+One run then leaves the ledger. The ranking turns it into the order to
+work in -- an `office_word` run leaves some 260 gaps naming a module
+across some 50 modules, which is tens of chunks of work from one run, not
+one. A run from boot after each is the expensive way round: it belongs at
+the end, as the verification that the window is further along than it
+was (and remember a hot-swapped run is never a pass).
+
+**What no survey ranks, and what therefore needs the run**: a COM class
+or an interface method. A class is sixteen bytes of data; no import table
+names it, and reading those bytes out of a program is not something the
+clean room allows. The ledger is the only source -- and it is enough,
+because the row's `detail` is the first dword of the CLSID or IID, which
+a public header names (`ole32.dll!CoGetClassObject(class not
+registered)` with detail `0x275c23e2` is mlang.h's CLSID_CMultiLanguage,
+`0xdcb00c01` netlistmgr.h's CLSID_NetworkListManager). Those rows come
+out of the ranking with no breadth beside them, which is the sign to go
+to the headers rather than the survey.
+
 ### Office's fast path (ROADMAP OF)
 
 `office_install` downloads Office from the CDN inside gala: half an

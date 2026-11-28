@@ -4311,6 +4311,34 @@ pub extern "system" fn SetGestureConfig(
     1
 }
 
+/// RegisterTouchHitTestingWindow: a window says it does its own touch hit
+/// testing (WM_TOUCHHITTESTING). Only the window's own thread may say it,
+/// and only for a window: a window of another thread, of another process
+/// or the desktop is ERROR_ACCESS_DENIED, and a handle that is no window
+/// is ERROR_INVALID_WINDOW_HANDLE, looked at before the value. The value
+/// is never validated -- TOUCH_HIT_TESTING_DEFAULT (0), ..._CLIENT (1),
+/// ..._NONE (2) and values nothing names are all taken, repeat calls and
+/// going back to the default among them -- and a call that is taken
+/// leaves the last error as it was (Windows 11; `gui_test`,
+/// `paint_thread_test`). gala has no touch input, so no
+/// WM_TOUCHHITTESTING is ever sent and nothing follows from the
+/// registration; MSO's UI delay-loads this and ends the process without
+/// it (ROADMAP OF).
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterTouchHitTestingWindow(hwnd: Hwnd, _value: u32) -> i32 {
+    // The calling thread's own window: taken, last error untouched.
+    if window(hwnd).is_some_and(|w| w.thread == me()) {
+        return 1;
+    }
+    // Somebody else's window (another thread of this process, another
+    // process, or the desktop) against a handle that is no window at all.
+    let someone_else = hwnd == crate::tree::DESKTOP
+        || window(hwnd).is_some()
+        || crate::foreign::remote(hwnd).is_some();
+    set_last_error(if someone_else { 5 } else { 1400 });
+    0
+}
+
 /// GetGestureInfo: a NULL GESTUREINFO is ERROR_INVALID_PARAMETER before
 /// the handle is looked at (Windows 11 25H2); otherwise no WM_GESTURE is
 /// ever sent, so no gesture handle is valid (ERROR_INVALID_HANDLE).

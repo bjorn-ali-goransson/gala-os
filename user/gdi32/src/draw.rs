@@ -802,23 +802,33 @@ pub extern "system" fn GetTextCharset(hdc: Handle) -> u32 {
     GetTextCharsetInfo(hdc, core::ptr::null_mut(), 0)
 }
 
-/// GetTextFaceW(hdc, n, buf): the selected font's face name; the
-/// characters copied with the NUL (the length needed with the NUL when
-/// `buf` is NULL).
+/// GetTextFaceW(hdc, n, buf): the name of the family the selected font
+/// realized with -- not the name it asked for, which may be a name no
+/// family has: a program is told the face it actually got, and that face
+/// is one EnumFontFamiliesExW answers for. The call copies at most `n`
+/// characters and always terminates what it copied, and answers with the
+/// characters it wrote, the terminator counted; with no buffer it answers
+/// the whole length, the terminator counted; with no room (`n` <= 0) it
+/// writes nothing and answers 0. All measured on Windows 11 24H2.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetTextFaceW(hdc: Handle, n: i32, buf: *mut u16) -> i32 {
     with_dc(hdc, |dc, slots| {
         let f = font_of(dc, slots);
-        let len = f.face.iter().position(|&c| c == 0).unwrap_or(f.face.len());
+        let name = crate::font::family_of(&f).name;
+        let len = name.encode_utf16().count();
         if buf.is_null() {
             return len as i32 + 1;
         }
-        let k = len.min((n.max(1) - 1) as usize);
-        // SAFETY: the caller's buffer of `n` characters.
-        unsafe {
-            core::ptr::copy_nonoverlapping(f.face.as_ptr(), buf, k);
-            *buf.add(k) = 0;
+        if n <= 0 {
+            return 0;
         }
+        let k = len.min((n - 1) as usize);
+        for (i, c) in name.encode_utf16().take(k).enumerate() {
+            // SAFETY: the caller's buffer of `n` characters; i < n - 1.
+            unsafe { *buf.add(i) = c };
+        }
+        // SAFETY: the caller's buffer of `n` characters; k <= n - 1.
+        unsafe { *buf.add(k) = 0 };
         k as i32 + 1
     })
     .unwrap_or(0)
@@ -1118,8 +1128,16 @@ pub extern "system" fn GetTextMetricsA(hdc: Handle, out: *mut TextMetricA) -> i3
     if GetTextMetricsW(hdc, &mut w) == 0 {
         return 0;
     }
+    // SAFETY: the caller's TEXTMETRICA.
+    unsafe { out.write(narrow(&w)) };
+    1
+}
+
+/// TEXTMETRICA from TEXTMETRICW: the first, last, default and break
+/// characters as bytes (at most 0xff).
+fn narrow(w: &font::TextMetricW) -> TextMetricA {
     let byte = |c: u16| c.min(0xff) as u8;
-    let a = TextMetricA {
+    TextMetricA {
         numbers: [
             w.height,
             w.ascent,
@@ -1135,8 +1153,269 @@ pub extern "system" fn GetTextMetricsA(hdc: Handle, out: *mut TextMetricA) -> i3
         ],
         chars: [byte(w.first_char), byte(w.last_char), byte(w.default_char), byte(w.break_char)],
         flags: [w.italic, w.underlined, w.struck_out, w.pitch_and_family, w.char_set],
-    };
-    // SAFETY: the caller's TEXTMETRICA.
-    unsafe { out.write(a) };
-    1
+    }
+}
+
+/// OUTLINETEXTMETRIC's fields between the TEXTMETRIC and the names. The
+/// same in both forms: only the shorter TEXTMETRICA moves them.
+#[repr(C)]
+struct OutlineRest {
+    filler: u8,
+    panose: [u8; 10],
+    fs_selection: u32,
+    fs_type: u32,
+    slope_rise: i32,
+    slope_run: i32,
+    italic_angle: i32,
+    em_square: u32,
+    ascent: i32,
+    descent: i32,
+    line_gap: u32,
+    cap_em_height: u32,
+    x_height: u32,
+    font_box: [i32; 4],
+    mac_ascent: i32,
+    mac_descent: i32,
+    mac_line_gap: u32,
+    min_ppem: u32,
+    subscript_size: [i32; 2],
+    subscript_offset: [i32; 2],
+    superscript_size: [i32; 2],
+    superscript_offset: [i32; 2],
+    strikeout_size: u32,
+    strikeout_position: i32,
+    underscore_size: i32,
+    underscore_position: i32,
+}
+
+/// OUTLINETEXTMETRICW (`tm` a TEXTMETRICW) and OUTLINETEXTMETRICA (`tm` a
+/// TEXTMETRICA): 232 bytes either way, the four names following the
+/// struct. The name fields are byte offsets from the start of the
+/// struct, whatever their PSTR declaration says -- measured, and the
+/// whole reason a program can copy the answer about.
+#[repr(C)]
+struct OutlineTextMetric<T> {
+    size: u32,
+    tm: T,
+    rest: OutlineRest,
+    names: [usize; 4],
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<OutlineTextMetric<font::TextMetricW>>() == 232);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<OutlineTextMetric<TextMetricA>>() == 232);
+
+fn rest_of(o: &font::Outline) -> OutlineRest {
+    OutlineRest {
+        filler: 0,
+        panose: o.panose,
+        fs_selection: o.fs_selection,
+        fs_type: o.fs_type,
+        slope_rise: o.slope_rise,
+        slope_run: o.slope_run,
+        italic_angle: o.italic_angle,
+        em_square: o.em_square,
+        ascent: o.ascent,
+        descent: o.descent,
+        line_gap: o.line_gap,
+        cap_em_height: o.cap_em_height,
+        x_height: o.x_height,
+        font_box: o.font_box,
+        mac_ascent: o.mac_ascent,
+        mac_descent: o.mac_descent,
+        mac_line_gap: o.mac_line_gap,
+        min_ppem: o.min_ppem,
+        subscript_size: [o.subscript[0], o.subscript[1]],
+        subscript_offset: [o.subscript[2], o.subscript[3]],
+        superscript_size: [o.superscript[0], o.superscript[1]],
+        superscript_offset: [o.superscript[2], o.superscript[3]],
+        strikeout_size: o.strikeout[0].max(0) as u32,
+        strikeout_position: o.strikeout[1],
+        underscore_size: o.underscore[0],
+        underscore_position: o.underscore[1],
+    }
+}
+
+/// A name the answer carries: a family (31 characters at most) and the
+/// style composed into it.
+struct Name {
+    buf: [u8; 64],
+    len: usize,
+}
+
+impl Name {
+    fn new() -> Name {
+        Name { buf: [0; 64], len: 0 }
+    }
+
+    fn push(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            if self.len < self.buf.len() {
+                self.buf[self.len] = b;
+                self.len += 1;
+            }
+        }
+    }
+}
+
+/// The family, face, style and full names, in the order they follow the
+/// struct. The face is the family with the style composed into it
+/// ("Arial Bold Italic"), a "Regular" leaving it as the family's own
+/// name, and the full name is the family and the style in full ("Segoe
+/// UI Regular"); a raster face has no style and no full name. Measured
+/// on Arial, Segoe UI, Lucida Console and MS Sans Serif -- the vendor's
+/// own full name is its to choose ("Monotype:Arial Regular (Microsoft)"),
+/// and gala gives the one a well-formed name table gives.
+fn outline_names(o: &font::Outline) -> [Name; 4] {
+    let mut family = Name::new();
+    family.push(o.family);
+    let mut face = Name::new();
+    face.push(o.family);
+    if o.style != "Regular" && !o.style.is_empty() {
+        face.push(" ");
+        face.push(o.style);
+    }
+    let mut style = Name::new();
+    let mut full = Name::new();
+    if !o.style.is_empty() {
+        if o.named_italic && o.style != "Regular" {
+            style.push(o.style);
+            style.push(" ");
+        } else if !o.named_italic {
+            style.push(o.style);
+        }
+        full.push(o.family);
+        full.push(" ");
+        full.push(o.style);
+    }
+    if o.named_italic {
+        face.push(" Italic");
+        style.push("Italic");
+        full.push(" Italic");
+    }
+    [family, face, style, full]
+}
+
+/// Lays an OUTLINETEXTMETRIC out in the caller's buffer and answers the
+/// way GDI does, all of it measured: with no buffer (or no room claimed
+/// at all), the size of the whole answer; with room for less than the
+/// struct, that many bytes of it and that many as the answer; with room
+/// for the struct but not for the names, nothing written and no answer;
+/// with room to spare, the whole answer, the rest of the buffer cleared
+/// and the size of the answer. The struct's own `otmSize` is the whole
+/// answer's size even where only part of it was written.
+fn outline_answer<T>(
+    buf: *mut u8,
+    cb: u32,
+    tm: T,
+    rest: OutlineRest,
+    names: [Name; 4],
+    wide: bool,
+) -> u32 {
+    let base = core::mem::size_of::<OutlineTextMetric<T>>();
+    let unit = if wide { 2 } else { 1 };
+    let mut offsets = [0; 4];
+    let mut at = base;
+    for (i, n) in names.iter().enumerate() {
+        offsets[i] = at;
+        at += (n.len + 1) * unit;
+    }
+    let total = at;
+    if buf.is_null() || cb == 0 {
+        return total as u32;
+    }
+    let cb = cb as usize;
+    let head = OutlineTextMetric { size: total as u32, tm, rest, names: offsets };
+    let bytes = (&raw const head).cast::<u8>();
+    if cb <= base {
+        // SAFETY: the head is plain data of `base` bytes, and the
+        // caller's buffer holds the `cb` <= `base` copied.
+        unsafe { core::ptr::copy_nonoverlapping(bytes, buf, cb) };
+        return cb as u32;
+    }
+    if cb < total {
+        return 0;
+    }
+    // SAFETY: as above, and the buffer holds the whole answer.
+    unsafe { core::ptr::copy_nonoverlapping(bytes, buf, base) };
+    for (i, n) in names.iter().enumerate() {
+        for k in 0..=n.len {
+            let c = if k < n.len { n.buf[k] } else { 0 };
+            let at = offsets[i] + k * unit;
+            // SAFETY: the caller's buffer, which holds `total` > `at`
+            // bytes; the wide form's characters are written unaligned
+            // because the names follow the struct at a byte offset.
+            unsafe {
+                if wide {
+                    buf.add(at).cast::<u16>().write_unaligned(u16::from(c));
+                } else {
+                    buf.add(at).write(c);
+                }
+            }
+        }
+    }
+    // SAFETY: the caller's buffer of `cb` bytes, cleared past the answer.
+    unsafe { core::ptr::write_bytes(buf.add(total), 0, cb - total) };
+    total as u32
+}
+
+/// The ledger row: the family answered for and the size of the answer,
+/// so a program building a font list is on the stream whether or not it
+/// then says anything itself.
+fn note_outline(wide: bool, family: &str, answer: u32) {
+    let mut what = [0; 96];
+    let mut n = 0;
+    {
+        let mut put = |s: &[u8]| {
+            for &b in s {
+                if n < what.len() {
+                    what[n] = b;
+                    n += 1;
+                }
+            }
+        };
+        put(b"gdi32.dll!GetOutlineTextMetrics");
+        put(if wide { b"W(" } else { b"A(" });
+        put(family.as_bytes());
+        put(b")");
+    }
+    crate::reached(&what[..n], u64::from(answer));
+}
+
+/// GetOutlineTextMetricsW(hdc, cb, otm): the metrics of the selected
+/// font beyond TEXTMETRICW -- the design box, the typographic and
+/// Macintosh ascents, the sub- and superscript boxes, the rules, the
+/// PANOSE numbers and the four names. Word's print boot task reads it
+/// for the emergency DC's font while it builds its font list
+/// (`IfrInitPrint`), and refusing it is the whole of what it reports.
+/// `outline_answer` has the buffer rules; `font::outline` the metrics.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetOutlineTextMetricsW(hdc: Handle, cb: u32, otm: *mut u8) -> u32 {
+    with_dc(hdc, |dc, slots| {
+        let f = font_of(dc, slots);
+        let o = font::outline(&f);
+        let answer =
+            outline_answer(otm, cb, font::text_metrics(&f), rest_of(&o), outline_names(&o), true);
+        note_outline(true, o.family, answer);
+        answer
+    })
+    .unwrap_or(0)
+}
+
+/// GetOutlineTextMetricsA: GetOutlineTextMetricsW's answer with the
+/// TEXTMETRICA GetTextMetricsA gives and the names as bytes. The struct
+/// is the same size either way, so the names start at the same offset
+/// and only their own length differs.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetOutlineTextMetricsA(hdc: Handle, cb: u32, otm: *mut u8) -> u32 {
+    with_dc(hdc, |dc, slots| {
+        let f = font_of(dc, slots);
+        let o = font::outline(&f);
+        let tm = narrow(&font::text_metrics(&f));
+        let answer = outline_answer(otm, cb, tm, rest_of(&o), outline_names(&o), false);
+        note_outline(false, o.family, answer);
+        answer
+    })
+    .unwrap_or(0)
 }

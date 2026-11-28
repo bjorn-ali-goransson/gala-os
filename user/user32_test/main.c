@@ -102,6 +102,17 @@
  *   ERROR_CLASS_ALREADY_EXISTS); ImmNotifyIME of no input context fails,
  *   leaving ERROR_SUCCESS for NULL and ERROR_INVALID_HANDLE for a handle
  *   that is no context (Wine's imm32.c records Windows' answers).
+ * - What Word's MSO delay-loads from imm32 besides: ImmAssociateContext
+ *   answers with the input context the window had, NULL for none, and
+ *   sets ERROR_SUCCESS when the association changed, leaving the last
+ *   error as it was when it did not (the same context again, or none
+ *   where there was none). The window is looked at before the context: a
+ *   NULL window is that same silent nothing, a handle that is no window
+ *   (a destroyed one among them) is ERROR_INVALID_WINDOW_HANDLE whatever
+ *   the context, and a handle that is no context is
+ *   ERROR_INVALID_HANDLE. ImmGetContext is NULL with the last error
+ *   untouched for a NULL window and ERROR_INVALID_WINDOW_HANDLE for a
+ *   handle that is no window; ImmReleaseContext takes anything.
  * - What Mesa's llvmpipe imports: RegisterClassA (as RegisterClassExA),
  *   CreateWindowExA of that class; WindowFromDC of GetDC's DC is the
  *   window, of a memory DC NULL; EnumDisplaySettingsA's current mode is
@@ -659,6 +670,113 @@ static void scintilla_imports(void) {
     CHECK(!ImmNotifyIME(NULL, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_SUCCESS);
     SetLastError(0xdeadbeef);
     CHECK(!ImmNotifyIME((HIMC)0xdeadcafe, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_INVALID_HANDLE);
+}
+
+/* What Word's MSO (Mso40UIwin32client.dll) delay-loads from imm32: the
+ * input context a window is associated with. The answer is always the
+ * context that was there, so the checks are written against what the
+ * window has rather than against a context of their own: on Windows a
+ * window of a thread with a default input context has one, and where
+ * there are no input contexts at all (gala) it has none, and both are the
+ * same rule. Whether the last error is set says whether anything
+ * happened: a change sets ERROR_SUCCESS, a call that changes nothing
+ * leaves it alone. A context of another thread is refused with
+ * ERROR_ACCESS_DENIED, which needs a context to see and so is not checked
+ * here. Measured on Windows 11. */
+static void imm_association(void) {
+    HWND w = CreateWindowExW(0, L"User32TestHooks", L"imm", WS_OVERLAPPEDWINDOW, 10, 10, 200, 150, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    CHECK(w != NULL);
+    /* The context the window starts with, which is its thread's: asking
+     * leaves the last error as it is. */
+    SetLastError(0xdeadbeef);
+    HIMC had = ImmGetContext(w);
+    CHECK(GetLastError() == 0xdeadbeef);
+    if (had) CHECK(ImmReleaseContext(w, had));
+
+    /* Taking the context away answers with the one that was there, and
+     * sets ERROR_SUCCESS only if there was one to take. */
+    SetLastError(0xdeadbeef);
+    HIMC prev = ImmAssociateContext(w, NULL);
+    CHECK(prev == had);
+    CHECK(GetLastError() == (had ? ERROR_SUCCESS : 0xdeadbeef));
+    /* Taking it away again changes nothing: NULL, and the error stands. */
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(w, NULL) == NULL && GetLastError() == 0xdeadbeef);
+    /* Putting it back answers with the NULL that was there. */
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(w, had) == NULL);
+    CHECK(GetLastError() == (had ? ERROR_SUCCESS : 0xdeadbeef));
+    /* The same context again changes nothing, and answers with it. */
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(w, had) == had && GetLastError() == 0xdeadbeef);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmGetContext(w) == had && GetLastError() == 0xdeadbeef);
+    if (had) CHECK(ImmReleaseContext(w, had));
+
+    /* A handle that is no context: ERROR_INVALID_HANDLE, and the window
+     * keeps what it had. */
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(w, (HIMC)0xdeadcafe) == NULL && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmGetContext(w) == had && GetLastError() == 0xdeadbeef);
+    if (had) CHECK(ImmReleaseContext(w, had));
+    /* ImmReleaseContext takes a context that is none and one that is no
+     * context at all. */
+    SetLastError(0xdeadbeef);
+    CHECK(ImmReleaseContext(w, NULL) && GetLastError() == 0xdeadbeef);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmReleaseContext(w, (HIMC)0xdeadcafe) && GetLastError() == 0xdeadbeef);
+
+    /* A child window is its thread's too, and starts with the same
+     * context as its parent. */
+    HWND child = CreateWindowExW(0, L"User32TestHooks", L"immchild", WS_CHILD, 0, 0, 20, 20, w, NULL,
+                                 GetModuleHandleW(NULL), NULL);
+    CHECK(child != NULL);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmGetContext(child) == had && GetLastError() == 0xdeadbeef);
+    if (had) CHECK(ImmReleaseContext(child, had));
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(child, NULL) == had);
+    CHECK(GetLastError() == (had ? ERROR_SUCCESS : 0xdeadbeef));
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(child, had) == NULL);
+    CHECK(GetLastError() == (had ? ERROR_SUCCESS : 0xdeadbeef));
+
+    /* A NULL window is a silent nothing, whatever the context: the
+     * context is not even looked at. */
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(NULL, NULL) == NULL && GetLastError() == 0xdeadbeef);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(NULL, (HIMC)0xdeadcafe) == NULL && GetLastError() == 0xdeadbeef);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmGetContext(NULL) == NULL && GetLastError() == 0xdeadbeef);
+
+    /* A handle that is no window is ERROR_INVALID_WINDOW_HANDLE, before
+     * the context is looked at. */
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext((HWND)0xdeadcafe, NULL) == NULL && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext((HWND)0xdeadcafe, (HIMC)0xdeadcafe) == NULL
+          && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmGetContext((HWND)0xdeadcafe) == NULL && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+
+    /* The desktop is a window with no context of its own: taking none
+     * away is that same silent nothing, and a handle that is no context
+     * is still ERROR_INVALID_HANDLE. */
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(GetDesktopWindow(), NULL) == NULL && GetLastError() == 0xdeadbeef);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(GetDesktopWindow(), (HIMC)0xdeadcafe) == NULL
+          && GetLastError() == ERROR_INVALID_HANDLE);
+
+    /* A window that is gone is no window. */
+    CHECK(DestroyWindow(w));
+    SetLastError(0xdeadbeef);
+    CHECK(ImmAssociateContext(w, NULL) == NULL && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+    SetLastError(0xdeadbeef);
+    CHECK(ImmGetContext(w) == NULL && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
 }
 
 /* What Mesa's llvmpipe (libgallium_wgl.dll) imports besides: RegisterClassA
@@ -1797,6 +1915,7 @@ int main(void) {
     menu_bar();
     menu_bar_info();
     scintilla_imports();
+    imm_association();
     mesa_imports();
     monitors();
     menus();

@@ -879,8 +879,27 @@ pub fn create(
     if want_dir && want_file {
         return Err(NtStatus::INVALID_PARAMETER);
     }
+    let truncating = matches!(disposition, FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF);
+    // A directory has nothing to truncate, so an open that asks for one
+    // and would truncate it is refused before the name is read: a missing
+    // last component, a missing parent and a missing directory at the
+    // root of the volume all give the same STATUS_INVALID_PARAMETER
+    // rather than the error the name would earn (measured against
+    // Windows; `user/kernel32_file_test`).
+    if want_dir && truncating {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
     let start = path.start;
     let parts = components(&path.name, start != ramfs::ROOT)?;
+    // A name that ends in a separator asks for a directory, whatever the
+    // open asked for and whatever is there: an existing file so named is
+    // STATUS_NOT_A_DIRECTORY, and so is a create that would make
+    // anything but a directory where nothing is yet -- so no file is left
+    // behind by one (measured against Windows;
+    // `user/kernel32_file_test`). Win32 keeps the caller's trailing
+    // separator (`full_path`), and reports the directory case as
+    // ERROR_PATH_NOT_FOUND.
+    let named_dir = path.name.last() == Some(&u16::from(b'\\'));
     let access = Access {
         read: granted & FILE_READ_DATA != 0,
         write: granted & (FILE_WRITE_DATA | FILE_APPEND_DATA) != 0,
@@ -919,6 +938,25 @@ pub fn create(
             match existing {
                 Some(node) => {
                     let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+                    // What the name itself asks for, and what the open
+                    // refuses to be given, are answered before the name
+                    // is reported as taken: a create aimed through a
+                    // trailing separator at a file is
+                    // STATUS_NOT_A_DIRECTORY and one aimed at a directory
+                    // with FILE_NON_DIRECTORY_FILE is
+                    // STATUS_FILE_IS_A_DIRECTORY, where the same creates
+                    // with the kind left unasked collide
+                    // (STATUS_OBJECT_NAME_COLLISION). FILE_DIRECTORY_FILE
+                    // over a file is the one that does not: it collides
+                    // too (measured against Windows; the kinds a Win32
+                    // caller can ask for are in
+                    // `user/kernel32_file_test`).
+                    if named_dir && !n.is_dir() {
+                        return Err(NtStatus::NOT_A_DIRECTORY);
+                    }
+                    if want_file && n.is_dir() {
+                        return Err(NtStatus::FILE_IS_A_DIRECTORY);
+                    }
                     if disposition == FILE_CREATE {
                         return Err(NtStatus::OBJECT_NAME_COLLISION);
                     }
@@ -933,16 +971,17 @@ pub fn create(
                     if want_dir && !n.is_dir() {
                         return Err(NtStatus::NOT_A_DIRECTORY);
                     }
-                    if want_file && n.is_dir() {
-                        return Err(NtStatus::FILE_IS_A_DIRECTORY);
-                    }
                     if access.write && n.attributes & ramfs::ATTRIBUTE_READONLY != 0 {
                         return Err(NtStatus::ACCESS_DENIED);
                     }
-                    let truncate =
-                        matches!(disposition, FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF);
-                    if truncate && n.is_dir() {
-                        return Err(NtStatus::INVALID_PARAMETER);
+                    // A directory is still what the name names, so an
+                    // open that would truncate it collides with the name
+                    // (STATUS_OBJECT_NAME_COLLISION, ERROR_FILE_EXISTS).
+                    // The open that asked for a file was refused above,
+                    // and the one that asked for a directory before the
+                    // name was read.
+                    if truncating && n.is_dir() {
+                        return Err(NtStatus::OBJECT_NAME_COLLISION);
                     }
                     fs.open(node, access, share).map_err(fs_status)?;
                     let information = match disposition {
@@ -950,7 +989,7 @@ pub fn create(
                         FILE_OVERWRITE | FILE_OVERWRITE_IF => FILE_OVERWRITTEN,
                         _ => FILE_OPENED,
                     };
-                    if truncate && let Err(e) = fs.set_size(node, 0, now) {
+                    if truncating && let Err(e) = fs.set_size(node, 0, now) {
                         fs.close(node, access, share);
                         if e == FsError::ImageHeld {
                             held = fs.take_held();
@@ -965,6 +1004,14 @@ pub fn create(
                     }
                     let last = parts.last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
                     let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
+                    // The parent is looked up first: a name that asks
+                    // for a directory below one that is not there is
+                    // STATUS_OBJECT_PATH_NOT_FOUND, the same as without
+                    // the separator, and only a name whose parent is
+                    // there is refused for what it asks for.
+                    if named_dir && !want_dir {
+                        return Err(NtStatus::NOT_A_DIRECTORY);
+                    }
                     let node = fs.create(parent, last, want_dir, now).map_err(fs_status)?;
                     // In a Linux tree (a WSL distribution's: its directories
                     // have POSIX modes), a file Windows makes gets the mode

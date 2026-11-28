@@ -40,6 +40,25 @@
  *   STGM_DELETEONRELEASE and STGM_TRANSACTED are E_INVALIDARG; without
  *   STGM_CREATE a missing file is ERROR_FILE_NOT_FOUND; STGM_CREATE makes
  *   it, and it then opens without.
+ * - PathIsRootW (Word delay-loads it as it starts up and dies
+ *   0xc06d007f without it; measured on build 26300, since the
+ *   documentation says only that the path is "a root"): a reading of the
+ *   string alone, which never looks at the file system and does not care
+ *   how long the path is. "X:\\" is a root for a letter of Latin-1 and
+ *   "X:" is not; one backslash by itself is the current drive's root,
+ *   and nothing longer that starts with one is; two backslashes start a
+ *   UNC path, a root until a backslash follows the share ("\\\\",
+ *   "\\\\server" and "\\\\server\\share" are roots, "\\\\server\\",
+ *   "\\\\server\\share\\" and "\\\\server\\share\\dir" are not), where
+ *   only backslashes separate (a "/" and a trailing space are part of a
+ *   name). After the extended prefix, which is exactly "\\\\?\\", three
+ *   forms are roots and nothing else is: a drive's "X:\\" (even of a
+ *   drive that is not there), a volume's "Volume{<8-4-4-4-12 hex
+ *   digits>}\\" in either case, and "UNC\\" with a body that answers as
+ *   two backslashes' body does ("\\\\?\\UNC\\a\\b" as "\\\\a\\b"). A "?"
+ *   right after the two backslashes is read as the start of that
+ *   prefix and as nothing else, so "\\\\?a" is not a root where
+ *   "\\\\.a" is. NULL and "" are not roots.
  * - The URL functions, AssocQueryStringW and SHCreateStreamOnFileEx:
  *   url.c (Wine's url.c vectors).
  * - What ODT's setup.exe imports beside them (shell_checks):
@@ -139,6 +158,175 @@ static void shell_checks(void) {
     memset(buf, 0xbf, sizeof buf);
     r.uType = 3;
     CHECK(StrRetToBufW(&r, NULL, buf, 10) == E_FAIL && buf[0] == 0);
+}
+
+/* PathIsRootW over the paths it was measured on, each failure naming the
+   path it was given. */
+#define ROOT(path, want) do { check++; const wchar_t *p_ = (path); int got_ = PathIsRootW(p_) ? 1 : 0; \
+    if (got_ != (want)) { printf(NAME ": check %d (%s line %d) PathIsRootW(\"%ls\") is %d, want %d\n", \
+    check, __FILE_NAME__, __LINE__, p_ ? p_ : L"(null)", got_, (want)); fflush(stdout); ExitProcess(check); } } while (0)
+
+static void root_checks(void) {
+    /* Nothing, and a drive's root. */
+    ROOT(NULL, 0);
+    ROOT(L"", 0);
+    ROOT(L"C:\\", 1);
+    ROOT(L"c:\\", 1);
+    ROOT(L"A:\\", 1);
+    ROOT(L"Z:\\", 1);
+    ROOT(L"C:", 0);
+    ROOT(L"C:\\\\", 0);
+    ROOT(L"C:\\Windows", 0);
+    ROOT(L"C:\\Windows\\", 0);
+    ROOT(L"C:\\x\\", 0);
+    ROOT(L"C:\\.", 0);
+    ROOT(L"C:/", 0);
+    ROOT(L"CC:\\", 0);
+    ROOT(L"1:\\", 0);
+    ROOT(L"C:\\ ", 0);
+    ROOT(L" C:\\", 0);
+    ROOT(L":\\", 0);
+    ROOT(L":", 0);
+    ROOT(L"C", 0);
+
+    /* One backslash is the current drive's root; nothing longer is. */
+    ROOT(L"\\", 1);
+    ROOT(L"\\Windows", 0);
+    ROOT(L"\\abc\\", 0);
+    ROOT(L"/", 0);
+    ROOT(L"/\\", 0);
+    ROOT(L"\\/", 0);
+    ROOT(L"Windows", 0);
+    ROOT(L"abc\\", 0);
+    ROOT(L".", 0);
+    ROOT(L"..", 0);
+
+    /* Two backslashes: a root until a backslash follows the share, and
+       only backslashes separate (a '/' is part of a name). */
+    ROOT(L"\\\\", 1);
+    ROOT(L"\\\\\\", 0);
+    ROOT(L"\\\\server", 1);
+    ROOT(L"\\\\server\\", 0);
+    ROOT(L"\\\\server\\share", 1);
+    ROOT(L"\\\\server\\share\\", 0);
+    ROOT(L"\\\\server\\share\\dir", 0);
+    ROOT(L"\\\\server\\\\", 0);
+    ROOT(L"\\\\localhost\\C$", 1);
+    ROOT(L"\\\\localhost\\C$\\", 0);
+    ROOT(L"\\\\server/share", 1);
+    ROOT(L"\\\\server\\share ", 1);
+    ROOT(L"//server/share", 0);
+    ROOT(L"\\\\a\\b\\c", 0);
+    ROOT(L"\\\\.", 1);
+    ROOT(L"\\\\.a", 1);
+    ROOT(L"\\\\.abc", 1);
+    ROOT(L"\\\\.a\\b", 1);
+    ROOT(L"\\\\.\\", 0);
+    ROOT(L"\\\\.\\PhysicalDrive0", 1);
+    ROOT(L"\\\\.\\C:\\", 0);
+    ROOT(L"\\\\?", 0);
+    ROOT(L"\\\\?a", 0);
+    ROOT(L"\\\\?abc", 0);
+    ROOT(L"\\\\?a\\b", 0);
+    ROOT(L"\\\\??", 0);
+
+    /* The extended prefix, exactly "\\?\", with a drive after it. */
+    ROOT(L"\\\\?\\C:\\", 1);
+    ROOT(L"\\\\?\\?", 0);
+    ROOT(L"\\\\?\\?\\", 0);
+    ROOT(L"\\\\?\\c:\\", 1);
+    ROOT(L"\\\\?\\X:\\", 1);
+    ROOT(L"\\\\?\\C:", 0);
+    ROOT(L"\\\\?\\C:\\\\", 0);
+    ROOT(L"\\\\?\\C:\\Windows", 0);
+    ROOT(L"\\\\?\\C:\\x\\", 0);
+    ROOT(L"\\\\?\\1:\\", 0);
+    ROOT(L"\\\\?\\", 0);
+    ROOT(L"\\\\?\\abc\\", 0);
+    ROOT(L"\\\\?\\a\\", 0);
+    ROOT(L"\\\\?\\ \\", 0);
+    ROOT(L"\\\\?\\\\C:\\", 0);
+    ROOT(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\", 0);
+    ROOT(L"\\\\?/C:\\", 0);
+    ROOT(L"\\\\\\?\\C:\\", 0);
+    ROOT(L"\\?\\C:\\", 0);
+    ROOT(L"//?/C:/", 0);
+
+    /* A volume's own root: "Volume{" and a GUID of 8-4-4-4-12 hex
+       digits, in either case, then "}" and one backslash. */
+    ROOT(L"\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\", 1);
+    ROOT(L"\\\\?\\volume{12345678-1234-1234-1234-123456789abc}\\", 1);
+    ROOT(L"\\\\?\\VOLUME{12345678-1234-1234-1234-123456789abc}\\", 1);
+    ROOT(L"\\\\?\\Volume{ABCDEF01-1234-1234-1234-1234567890AB}\\", 1);
+    ROOT(L"\\\\?\\Volume{12345678-1234-1234-1234-123456789ab}\\", 0);
+    ROOT(L"\\\\?\\Volume{12345678-1234-1234-1234-123456789abcd}\\", 0);
+    ROOT(L"\\\\?\\Volume{123456781234123412343456789abc}\\", 0);
+    ROOT(L"\\\\?\\Volume{zzzzzzzz-1234-1234-1234-123456789abc}\\", 0);
+    ROOT(L"\\\\?\\Volume{1234567-81234-1234-1234-123456789abc}\\", 0);
+    ROOT(L"\\\\?\\Volume{12345678_1234_1234_1234_123456789abc}\\", 0);
+    ROOT(L"\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}", 0);
+    ROOT(L"\\\\?\\Volume{12345678-1234-1234-1234-123456789abc", 0);
+    ROOT(L"\\\\?\\Volume12345678-1234-1234-1234-123456789abc}\\", 0);
+    ROOT(L"\\\\?\\Volume {12345678-1234-1234-1234-123456789abc}\\", 0);
+    ROOT(L"\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}X\\", 0);
+    ROOT(L"\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\\\", 0);
+    ROOT(L"\\\\?\\Volume{}\\", 0);
+    ROOT(L"\\\\?\\Volume\\", 0);
+    ROOT(L"\\\\?\\VolumeABC\\", 0);
+    ROOT(L"\\\\Volume{12345678-1234-1234-1234-123456789abc}\\", 0);
+    ROOT(L"\\\\.\\Volume{12345678-1234-1234-1234-123456789abc}\\", 0);
+
+    /* "\\?\UNC\" and what follows it answer as "\\" and its body do. */
+    ROOT(L"\\\\?\\UNC\\", 1);
+    ROOT(L"\\\\?\\unc\\", 1);
+    ROOT(L"\\\\?\\UNC\\a", 1);
+    ROOT(L"\\\\?\\UNC\\a\\b", 1);
+    ROOT(L"\\\\?\\unc\\server\\share", 1);
+    ROOT(L"\\\\?\\UNC\\a/b", 1);
+    ROOT(L"\\\\?\\UNC", 0);
+    ROOT(L"\\\\?\\UNC\\a\\", 0);
+    ROOT(L"\\\\?\\UNC\\a\\b\\", 0);
+    ROOT(L"\\\\?\\UNC\\\\", 0);
+    ROOT(L"\\\\?\\UNCX\\", 0);
+    ROOT(L"\\\\?\\UNCX\\server\\share", 0);
+
+    /* Longer than MAX_PATH, in each of the three shapes. */
+    static wchar_t big[600];
+    int n = 0;
+    big[n++] = L'C';
+    big[n++] = L':';
+    big[n++] = L'\\';
+    while (n < 500) big[n++] = L'a';
+    big[n] = 0;
+    ROOT(big, 0);
+    for (n = 0; n < 500; n++) big[n] = L'\\';
+    big[n] = 0;
+    ROOT(big, 0);
+    n = 0;
+    big[n++] = L'\\';
+    big[n++] = L'\\';
+    big[n++] = L'?';
+    big[n++] = L'\\';
+    while (n < 500) big[n++] = L'z';
+    big[n++] = L'\\';
+    big[n] = 0;
+    ROOT(big, 0);
+
+    /* The drive letter is one of Latin-1's letters and nothing else
+       (measured over the whole of 0x0001-0xFFFF on build 26300).
+       One check: it names the code point that disagrees. */
+    check++;
+    for (unsigned c = 1; c <= 0xffff; c++) {
+        wchar_t drive[4] = {(wchar_t)c, L':', L'\\', 0};
+        int want = (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || (c >= 0xc0 && c <= 0xd6)
+                   || (c >= 0xd8 && c <= 0xf6) || (c >= 0xf8 && c <= 0xff);
+        if ((PathIsRootW(drive) ? 1 : 0) != want) {
+            printf(NAME ": check %d (%s line %d) PathIsRootW of drive U+%04X is %d, want %d\n",
+                   check, __FILE_NAME__, __LINE__, c, PathIsRootW(drive) ? 1 : 0, want);
+            fflush(stdout);
+            ExitProcess(check);
+        }
+    }
 }
 
 int main(void) {
@@ -315,6 +503,7 @@ int main(void) {
     assoc_checks();
     stream_checks();
     shell_checks();
+    root_checks();
 
     printf(NAME ": ok\n");
     return 0;

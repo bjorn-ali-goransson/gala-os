@@ -541,12 +541,20 @@ pub extern "system" fn GetClipBox(hdc: Handle, out: *mut Rect) -> i32 {
     .unwrap_or(ERROR)
 }
 
+/// IntersectClipRect and ExcludeClipRect answer COMPLEXREGION whatever
+/// the clip ends up being -- measured on Windows 11 24H2, where the clip
+/// they leave is the one rectangle GetClipBox then calls SIMPLEREGION,
+/// and setting GdiSetBatchLimit(1) changes neither. Only SelectClipRgn
+/// answers the clip's true complexity.
 fn clip_rect(hdc: Handle, rect: Rect, mode: i32) -> i32 {
     with_dc(hdc, |dc, _| {
         let given = to_device(dc, &[rect]);
         let current = clip_of(dc);
         match op(&current, &given, mode) {
-            Some(r) => set_clip(dc, r),
+            Some(r) => {
+                set_clip(dc, r);
+                COMPLEXREGION
+            }
             None => ERROR,
         }
     })

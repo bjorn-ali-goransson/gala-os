@@ -29,6 +29,7 @@ use core::fmt;
 use super::platform::UserRegs;
 use super::process::Process;
 use super::status::NtStatus;
+use super::vad;
 
 /// The exceptions one thread took, as the crash report of its process
 /// needs them: the kernel's own account of a fault it took, and the
@@ -980,6 +981,58 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
         ),
         None => info!("crash report:   at {at}"),
     }
+    if let Some((addr, _)) = note.access {
+        // The map's lock, then the console's: the order the modules and
+        // the lines above are taken in.
+        let read = process.vad.try_lock().map(|vad| -> Result<_, NtStatus> {
+            let info = vad.query(addr)?;
+            let below = (info.state == vad::MEM_FREE).then(|| vad.nearest_below(addr)).flatten();
+            // What was mapped there and went away, asked only when
+            // nothing is mapped there now (vad::Gone).
+            let gone = (info.state != vad::MEM_COMMIT).then(|| vad.gone_at(addr));
+            Ok((info, below, gone))
+        });
+        match read {
+            Some(Ok((info, below, gone))) => {
+                info!(
+                    "crash report:   {}",
+                    Region { addr, info, image: module_at(process, addr), below }
+                );
+                match gone {
+                    Some((Some(g), _)) => {
+                        let at = match g.by {
+                            vad::By::User { at, pid } if pid == process.id => {
+                                module_at(process, at)
+                            }
+                            _ => None,
+                        };
+                        let now_ms = super::platform::monotonic_ns() / 1_000_000;
+                        info!(
+                            "crash report:   {}",
+                            Unmapped { gone: g, at, pid: process.id, now_ms }
+                        );
+                    }
+                    Some((None, true)) => info!(
+                        "crash report:   nothing in the {} unmappings this process still has on \
+                         record covers {addr:#x}; older ones have rolled off",
+                        vad::GONE
+                    ),
+                    Some((None, false)) => info!(
+                        "crash report:   nothing this process unmapped covers {addr:#x}, and \
+                         every unmapping it made is on record"
+                    ),
+                    None => {}
+                }
+            }
+            Some(Err(_)) => info!(
+                "crash report:   {addr:#x} is not an address a process of this kernel can have"
+            ),
+            None => info!(
+                "crash report:   what is at {addr:#x} is not in this report: the memory map was \
+                 locked when the fault was described"
+            ),
+        }
+    }
     if note.flags != 0 {
         info!(
             "crash report:   record flags {:#x}{}{}",
@@ -1234,6 +1287,132 @@ impl fmt::Display for Calls<'_> {
 /// to (an object a NULL or stale pointer came from shows its fields),
 /// then the values higher on the stack that point into an image (return
 /// addresses: the calls that led here).
+/// What a page's protection lets a program do, as the report says it.
+/// A reserved page's protection is 0 (`vad::PageState`), which is what
+/// Windows' VirtualQuery reports for one too (measured), and it allows
+/// nothing because nothing is mapped there to allow anything on.
+fn allows(protect: u32) -> &'static str {
+    match protect & 0xff {
+        0 => "nothing",
+        vad::PAGE_NOACCESS => "no access at all",
+        vad::PAGE_READONLY => "reading",
+        vad::PAGE_READWRITE => "reading and writing",
+        vad::PAGE_WRITECOPY => "reading, and writing to a copy",
+        vad::PAGE_EXECUTE => "executing",
+        vad::PAGE_EXECUTE_READ => "executing and reading",
+        vad::PAGE_EXECUTE_READWRITE => "executing, reading and writing",
+        vad::PAGE_EXECUTE_WRITECOPY => "executing, reading, and writing to a copy",
+        _ => "something this kernel has no name for",
+    }
+}
+
+/// What is at the address a fault touched. It is the first question any
+/// access violation raises and the registers cannot answer it: a write
+/// to a page committed for writing is a bug in whatever computed the
+/// address, one to a reserved page is memory the program believes it
+/// committed, one to a free address is a pointer that was never memory,
+/// and one to a read-only page is memory whose protection someone else
+/// changed. The kernel's map knows which, so the report says which.
+struct Region {
+    addr: u64,
+    info: vad::RegionInfo,
+    image: Option<Module>,
+    /// The allocation nearest below the address (`vad::nearest_below`),
+    /// which is what tells a gap that starts just past a live mapping
+    /// from one far from anything. Only read when nothing is mapped at
+    /// the address; `None` when nothing is mapped below it either.
+    below: Option<(u64, u64, u32)>,
+}
+
+/// A range that stopped being mapped (`vad::Gone`), as the report says
+/// it: what a fault at an address nothing is mapped at asks next.
+struct Unmapped {
+    gone: vad::Gone,
+    /// The image containing a user call's address, when the call was
+    /// made in this process (one process freeing another's memory is not
+    /// shown as a module of this one).
+    at: Option<Module>,
+    /// The process the report is about, to tell that case from this one.
+    pid: u64,
+    /// Uptime in ms as the report is written: the record's own time says
+    /// nothing without it.
+    now_ms: u64,
+}
+
+impl fmt::Display for Unmapped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let g = self.gone;
+        let how = match g.how {
+            vad::How::Released => "released",
+            vad::How::Decommitted => "decommitted (its addresses left reserved)",
+            vad::How::View { image: false } => "unmapped (a view of a section)",
+            vad::How::View { image: true } => "unmapped (a view of an image: a module that left)",
+        };
+        write!(
+            f,
+            "{:#x}..{:#x} was {how} {} ms before this report",
+            g.base,
+            g.end,
+            self.now_ms.saturating_sub(g.at_ms)
+        )?;
+        match g.by {
+            vad::By::Kernel => f.write_str(", by the kernel itself"),
+            vad::By::User { at, pid } if pid == self.pid => write!(f, ", by {}", At(at, self.at)),
+            vad::By::User { at, pid } => write!(f, ", by {at:#x} in pid {pid}"),
+        }
+    }
+}
+
+/// What kind of memory an allocation is, as the report says it.
+fn kind_of(kind: u32) -> &'static str {
+    match kind {
+        vad::MEM_IMAGE => "an image",
+        vad::MEM_MAPPED => "a mapped section",
+        vad::MEM_PRIVATE => "private memory",
+        _ => "memory of a kind this kernel has no name for",
+    }
+}
+
+impl fmt::Display for Region {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (addr, info) = (self.addr, &self.info);
+        if info.state == vad::MEM_FREE {
+            // The free run is reported from the faulting page, not from
+            // where the gap began (`vad::query`, as Windows' VirtualQuery
+            // answers it), so the sentence says so rather than name a
+            // boundary it does not know.
+            write!(f, "nothing is mapped at {addr:#x}: free for {:#x} bytes from", info.size)?;
+            return match self.below {
+                Some((base, end, kind)) => write!(
+                    f,
+                    " this page onwards, and the nearest mapping below it ({} at {base:#x}) ends \
+                     {:#x} bytes below it",
+                    kind_of(kind),
+                    addr - end
+                ),
+                None => f.write_str(" this page onwards, with nothing mapped below it"),
+            };
+        }
+        let kind = kind_of(info.kind);
+        let state = if info.state == vad::MEM_COMMIT { "committed" } else { "reserved only" };
+        write!(f, "{addr:#x} is {state} in {kind}, and allows {}", allows(info.protect))?;
+        if info.protect & vad::PAGE_GUARD != 0 {
+            write!(f, ", on a guard page")?;
+        }
+        write!(
+            f,
+            " ({:#x} bytes of it from this page); reserved at {:#x} for {}",
+            info.size,
+            info.allocation_base,
+            allows(info.allocation_protect)
+        )?;
+        match &self.image {
+            Some(m) => write!(f, ", which is {}", m.name()),
+            None => Ok(()),
+        }
+    }
+}
+
 fn report_memory(process: &Process, note: &Note) {
     let width = if note.wow64 { 4 } else { 8 };
     let names: [&str; REG_DUMPED.len()] = if note.wow64 {
@@ -1501,5 +1680,141 @@ mod tests {
         let s = alloc::format!("{}", At(0x1_4000_1234, Some(m)));
         assert_eq!(s, "0x140001234 (crash.exe+0x1234)");
         assert_eq!(alloc::format!("{}", At(0x10, None)), "0x10");
+    }
+
+    /// The record a fault reads when nothing is mapped at the address
+    /// (`vad::Gone`): the range, how it went, how long before the report
+    /// and whose call it was.
+    #[test]
+    fn an_unmapped_range_says_how_it_went_and_whose_call_it_was() {
+        let mut m = Module { name: [0; 40], len: 9, base: 0x3_5905_0000 };
+        m.name[..9].copy_from_slice(b"d3d11.dll");
+        let released = vad::Gone {
+            base: 0xa80_0000,
+            end: 0xa87_0000,
+            how: vad::How::Released,
+            by: vad::By::User { at: 0x3_5951_4ecc, pid: 12 },
+            at_ms: 9_988,
+        };
+        assert_eq!(
+            alloc::format!("{}", Unmapped { gone: released, at: Some(m), pid: 12, now_ms: 10_000 }),
+            "0xa800000..0xa870000 was released 12 ms before this report, by 0x359514ecc \
+             (d3d11.dll+0x4c4ecc)"
+        );
+        // A module no longer loaded leaves the address to stand alone,
+        // and another process's call stays that process's.
+        assert_eq!(
+            alloc::format!("{}", Unmapped { gone: released, at: None, pid: 13, now_ms: 9_988 }),
+            "0xa800000..0xa870000 was released 0 ms before this report, by 0x359514ecc in pid 12"
+        );
+        let unloaded = vad::Gone {
+            base: 0x1_8000_0000,
+            end: 0x1_8012_0000,
+            how: vad::How::View { image: true },
+            by: vad::By::Kernel,
+            at_ms: 0,
+        };
+        assert_eq!(
+            alloc::format!("{}", Unmapped { gone: unloaded, at: None, pid: 12, now_ms: 5 }),
+            "0x180000000..0x180120000 was unmapped (a view of an image: a module that left) \
+             5 ms before this report, by the kernel itself"
+        );
+    }
+
+    /// The three answers a faulting address can have, in the shapes
+    /// Windows' VirtualQuery gives them (measured on the pinned build):
+    /// free space reports PAGE_NOACCESS and no allocation base, a
+    /// reserved run reports protect 0 and keeps the protection it was
+    /// reserved for, and a committed page reports its own.
+    #[test]
+    fn a_faulting_address_says_what_is_at_it() {
+        let free = vad::RegionInfo {
+            base: 0x11e_0000,
+            allocation_base: 0,
+            allocation_protect: 0,
+            size: 0x1f0_0000,
+            state: vad::MEM_FREE,
+            protect: vad::PAGE_NOACCESS,
+            kind: 0,
+        };
+        assert_eq!(
+            alloc::format!("{}", Region { addr: 0x11e_0040, info: free, image: None, below: None }),
+            "nothing is mapped at 0x11e0040: free for 0x1f00000 bytes from this page onwards, \
+             with nothing mapped below it"
+        );
+        // 0x40 past the end of a mapping is an overrun; a gap far from
+        // anything is an address that was never memory. The registers
+        // look the same in both (ROADMAP OF: Word's write from inside
+        // d3d11.dll).
+        assert_eq!(
+            alloc::format!(
+                "{}",
+                Region {
+                    addr: 0x11e_0040,
+                    info: free,
+                    image: None,
+                    below: Some((0x11d_0000, 0x11e_0000, vad::MEM_MAPPED)),
+                }
+            ),
+            "nothing is mapped at 0x11e0040: free for 0x1f00000 bytes from this page onwards, \
+             and the nearest mapping below it (a mapped section at 0x11d0000) ends 0x40 bytes \
+             below it"
+        );
+        let reserved = vad::RegionInfo {
+            base: 0x200_0000,
+            allocation_base: 0x200_0000,
+            allocation_protect: vad::PAGE_READWRITE,
+            size: 0x1_0000,
+            state: vad::MEM_RESERVE,
+            protect: 0,
+            kind: vad::MEM_PRIVATE,
+        };
+        assert_eq!(
+            alloc::format!(
+                "{}",
+                Region { addr: 0x200_1000, info: reserved, image: None, below: None }
+            ),
+            "0x2001000 is reserved only in private memory, and allows nothing (0x10000 bytes \
+             of it from this page); reserved at 0x2000000 for reading and writing"
+        );
+        let readonly = vad::RegionInfo {
+            base: 0x300_0000,
+            allocation_base: 0x300_0000,
+            allocation_protect: vad::PAGE_READWRITE,
+            size: 0x1000,
+            state: vad::MEM_COMMIT,
+            protect: vad::PAGE_READONLY,
+            kind: vad::MEM_MAPPED,
+        };
+        assert_eq!(
+            alloc::format!(
+                "{}",
+                Region { addr: 0x300_0000, info: readonly, image: None, below: None }
+            ),
+            "0x3000000 is committed in a mapped section, and allows reading (0x1000 bytes of \
+             it from this page); reserved at 0x3000000 for reading and writing"
+        );
+        // A guard page is committed with its protection and PAGE_GUARD
+        // on top, and an image says which image it is.
+        let mut m = Module { name: [0; 40], len: 9, base: 0x1_4000_0000 };
+        m.name[..9].copy_from_slice(b"crash.exe");
+        let guard = vad::RegionInfo {
+            base: 0x1_4000_0000,
+            allocation_base: 0x1_4000_0000,
+            allocation_protect: vad::PAGE_EXECUTE_READ,
+            size: 0x1000,
+            state: vad::MEM_COMMIT,
+            protect: vad::PAGE_READWRITE | vad::PAGE_GUARD,
+            kind: vad::MEM_IMAGE,
+        };
+        assert_eq!(
+            alloc::format!(
+                "{}",
+                Region { addr: 0x1_4000_0000, info: guard, image: Some(m), below: None }
+            ),
+            "0x140000000 is committed in an image, and allows reading and writing, on a guard \
+             page (0x1000 bytes of it from this page); reserved at 0x140000000 for executing \
+             and reading, which is crash.exe"
+        );
     }
 }

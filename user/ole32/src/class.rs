@@ -30,6 +30,18 @@
 //! registrations serving, as on Windows. CoSuspendClassObjects does
 //! suspend them, and nothing lifts that -- CoResumeClassObjects in an
 //! apartment is an error on Windows and here.
+//!
+//! One class COM serves out of itself, with no registry key of any kind:
+//! CLSID_GlobalOptions, which Word's OLE startup creates before it opens a
+//! document. Its class object is an IClassFactory and nothing else, every
+//! CreateInstance is its own IGlobalOptions, and the properties those read
+//! and write belong to the process, not to the object. In-process contexts
+//! answer and a local one is REGDB_E_CLASSNOTREG, there being no server; a
+//! property outside 1..=8, a value outside a property's enumeration and a
+//! Query with nowhere to put the answer are all E_INVALIDARG, and
+//! COMGLB_APPID is not readable (all of it measured, `com_test`). A value
+//! is kept and read back and nothing acts on it: gala has no exception
+//! handling to turn off, no RPC thread pool and no unmarshaling to police.
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -100,6 +112,11 @@ pub(crate) fn thread_id() -> u32 {
 }
 
 const IID_ICLASSFACTORY: Guid = ole_iid(1);
+const CLSID_GLOBALOPTIONS: Guid = ole_iid(0x34b);
+const IID_IGLOBALOPTIONS: Guid = ole_iid(0x15b);
+const COMGLB_APPID: u32 = 2;
+const E_FAIL: HResult = 0x8000_4005u32 as i32;
+const CLASS_E_NOAGGREGATION: HResult = 0x8004_0110u32 as i32;
 const CO_E_NOTINITIALIZED: HResult = 0x8004_01f0u32 as i32;
 const REGDB_E_CLASSNOTREG: HResult = 0x8004_0154u32 as i32;
 const CO_E_DLLNOTFOUND: HResult = 0x8004_01f8u32 as i32;
@@ -316,6 +333,14 @@ pub extern "system" fn CoGetClassObject(
             spend(key);
         }
         return hr;
+    }
+    // A class COM serves out of itself, with no registry key of any kind:
+    // Word's OLE startup creates CLSID_GlobalOptions before it opens a
+    // document, and a class store that only knows the registry can never
+    // find what was never registered.
+    if clsid_value == CLSID_GLOBALOPTIONS {
+        reached(b"ole32.dll!CoGetClassObject(global options)", detail);
+        return options_factory_query((&raw const OPTIONS_FACTORY) as usize, iid, out);
     }
     let Some(path) = inproc_server(&clsid_value) else {
         missing(b"ole32.dll!CoGetClassObject(class not registered)", detail);
@@ -864,4 +889,241 @@ pub(crate) fn revoke_apartment(thread: u32) {
     for object in &gone[..n] {
         release(*object);
     }
+}
+
+// ---- CLSID_GlobalOptions ----
+
+/// The process's global options, one slot per property so a property is its
+/// own index (slot 0 is unused: 0 is not a property). The values are what a
+/// fresh process answers with: the documentation says 0 for all of them,
+/// and Windows answers PRIVATE_POOL for the RPC thread pool and HYBRID for
+/// the unmarshaling policy (measured, `com_test`).
+static OPTIONS: [AtomicUsize; 9] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0), // COMGLB_EXCEPTION_HANDLING: HANDLE
+    AtomicUsize::new(0), // COMGLB_APPID: never read back
+    AtomicUsize::new(1), // COMGLB_RPC_THREADPOOL_SETTING: PRIVATE_POOL
+    AtomicUsize::new(0), // COMGLB_RO_SETTINGS
+    AtomicUsize::new(2), // COMGLB_UNMARSHALING_POLICY: HYBRID
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+
+/// The largest value each property takes where the public headers name its
+/// values, and `usize::MAX` where they do not: a value outside a property's
+/// enumeration is E_INVALIDARG, as a property number outside 1..=8 is
+/// (measured).
+const OPTIONS_MAX: [usize; 9] = [
+    0,
+    2, // HANDLE, DONOT_HANDLE_FATAL, DONOT_HANDLE_ANY
+    usize::MAX,
+    1, // DEFAULT_POOL, PRIVATE_POOL
+    usize::MAX,
+    2, // NORMAL, STRONG, HYBRID
+    usize::MAX,
+    usize::MAX,
+    usize::MAX,
+];
+
+/// A property's slot and the largest value it takes, or None when the
+/// number is not a property.
+fn option(property: u32) -> Option<(&'static AtomicUsize, usize)> {
+    let i = property as usize;
+    if i == 0 {
+        return None;
+    }
+    Some((OPTIONS.get(i)?, *OPTIONS_MAX.get(i)?))
+}
+
+/// The one class object for CLSID_GlobalOptions: a pointer to its vtable
+/// (static; its reference count does not matter). It is an IClassFactory
+/// and an IUnknown and nothing else, as on Windows.
+#[repr(C)]
+struct OptionsFactory {
+    vtable: *const super::VTable<5>,
+}
+
+// SAFETY: a pointer to a static vtable.
+unsafe impl Sync for OptionsFactory {}
+
+static OPTIONS_FACTORY_VTABLE: super::VTable<5> = super::VTable([
+    options_factory_query as *const (),
+    options_factory_add_ref as *const (),
+    options_factory_release as *const (),
+    options_factory_create as *const (),
+    options_factory_lock as *const (),
+]);
+
+static OPTIONS_FACTORY: OptionsFactory = OptionsFactory { vtable: &OPTIONS_FACTORY_VTABLE };
+
+extern "system" fn options_factory_query(
+    this: usize,
+    iid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    if iid.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's IID.
+    let iid = unsafe { *iid };
+    if iid == super::IID_IUNKNOWN || iid == IID_ICLASSFACTORY {
+        put(out, this as *mut c_void);
+        super::S_OK
+    } else {
+        super::E_NOINTERFACE
+    }
+}
+
+extern "system" fn options_factory_add_ref(_this: usize) -> u32 {
+    1
+}
+
+extern "system" fn options_factory_release(_this: usize) -> u32 {
+    1
+}
+
+/// IClassFactory::CreateInstance: a fresh object every time, over state
+/// that belongs to the process (measured: a new object sees what an earlier
+/// one set).
+extern "system" fn options_factory_create(
+    _this: usize,
+    outer: *mut c_void,
+    iid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    if iid.is_null() {
+        return E_INVALIDARG;
+    }
+    if !outer.is_null() {
+        missing(b"ole32.dll!IClassFactory::CreateInstance(global options aggregated)", 0);
+        return CLASS_E_NOAGGREGATION;
+    }
+    // SAFETY: the caller's IID.
+    let asked = unsafe { *iid };
+    if asked != super::IID_IUNKNOWN && asked != IID_IGLOBALOPTIONS {
+        missing(
+            b"ole32.dll!IClassFactory::CreateInstance(global options interface)",
+            u64::from(u32::from_le_bytes([asked[0], asked[1], asked[2], asked[3]])),
+        );
+        return super::E_NOINTERFACE;
+    }
+    let p = super::alloc(core::mem::size_of::<GlobalOptions>()).cast::<GlobalOptions>();
+    if p.is_null() {
+        return super::E_OUTOFMEMORY;
+    }
+    // SAFETY: fresh memory of the object's size.
+    unsafe {
+        p.write(GlobalOptions { vtable: OPTIONS_OBJECT.0.as_ptr().cast(), refs: AtomicU32::new(1) })
+    };
+    put(out, p.cast());
+    super::S_OK
+}
+
+extern "system" fn options_factory_lock(_this: usize, _lock: i32) -> HResult {
+    super::S_OK
+}
+
+/// An IGlobalOptions: the object is its own allocation (two creates are two
+/// pointers), and the state it reads and writes is the process's.
+#[repr(C)]
+struct GlobalOptions {
+    vtable: *const (),
+    refs: AtomicU32,
+}
+
+static OPTIONS_OBJECT: super::VTable<5> = super::VTable([
+    options_query as *const (),
+    options_add_ref as *const (),
+    options_release as *const (),
+    options_set as *const (),
+    options_get as *const (),
+]);
+
+extern "system" fn options_query(
+    this: *mut GlobalOptions,
+    iid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    if iid.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's IID.
+    let iid = unsafe { *iid };
+    if iid == super::IID_IUNKNOWN || iid == IID_IGLOBALOPTIONS {
+        options_add_ref(this);
+        put(out, this.cast());
+        super::S_OK
+    } else {
+        super::E_NOINTERFACE
+    }
+}
+
+extern "system" fn options_add_ref(this: *mut GlobalOptions) -> u32 {
+    // SAFETY: a live global options object.
+    unsafe { (*this).refs.fetch_add(1, Ordering::Relaxed) + 1 }
+}
+
+extern "system" fn options_release(this: *mut GlobalOptions) -> u32 {
+    // SAFETY: a live global options object; freed on its last release.
+    unsafe {
+        let n = (*this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+        if n == 0 {
+            super::free(this.cast());
+        }
+        n
+    }
+}
+
+/// IGlobalOptions::Set. The property and the value are both checked, as on
+/// Windows. The value is kept and read back, and nothing here acts on it:
+/// gala has no exception handling to turn off, no RPC thread pool and no
+/// unmarshaling to police, so the row says the call was kept and had no
+/// effect rather than claiming a setting that does not exist.
+extern "system" fn options_set(_this: *mut GlobalOptions, property: u32, value: usize) -> HResult {
+    let Some((slot, max)) = option(property) else {
+        missing(b"ole32.dll!IGlobalOptions::Set(not a property)", u64::from(property));
+        return E_INVALIDARG;
+    };
+    if value > max {
+        missing(b"ole32.dll!IGlobalOptions::Set(not a value of the property)", value as u64);
+        return E_INVALIDARG;
+    }
+    slot.store(value, Ordering::Relaxed);
+    missing(b"ole32.dll!IGlobalOptions::Set(kept, no effect)", u64::from(property));
+    super::S_OK
+}
+
+/// IGlobalOptions::Query. COMGLB_APPID is not readable at all, as on
+/// Windows, and a call with nowhere to put the answer is E_INVALIDARG.
+extern "system" fn options_get(
+    _this: *mut GlobalOptions,
+    property: u32,
+    value: *mut usize,
+) -> HResult {
+    if value.is_null() {
+        return E_INVALIDARG;
+    }
+    let Some((slot, _)) = option(property) else {
+        missing(b"ole32.dll!IGlobalOptions::Query(not a property)", u64::from(property));
+        return E_INVALIDARG;
+    };
+    if property == COMGLB_APPID {
+        return E_FAIL;
+    }
+    // SAFETY: the caller's output.
+    unsafe { value.write(slot.load(Ordering::Relaxed)) };
+    super::S_OK
 }

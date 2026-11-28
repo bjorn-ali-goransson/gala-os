@@ -85,6 +85,14 @@ pub(crate) fn unsupported(what: &[u8], detail: u64) {
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
 }
 
+/// Reports that a program got this far, with `detail`: an answer gala
+/// gave and the caller cannot tell from a measurement, which the ledger
+/// still says was asked for.
+pub(crate) fn reached(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; 9 is GalaRecordMissing's "reached".
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 9, detail) };
+}
+
 const S_OK: i32 = 0;
 const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
 const E_FAIL: i32 = 0x8000_4005u32 as i32;

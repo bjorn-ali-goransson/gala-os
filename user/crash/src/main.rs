@@ -102,6 +102,32 @@
 //! frame handlers pass it on (ROADMAP OF), so whether anything of
 //! Office's was asked outside those frames is a question the report has
 //! to answer rather than be read source for.
+//!
+//! With the argument `region` (scenario `crash_region`) the fault is on
+//! a page the program committed for reading only, inside a reservation
+//! larger than it. What is at the address a fault touched is the first
+//! question an access violation raises and the registers cannot answer
+//! it: a write to a page committed for writing is a bug in whatever
+//! computed the address, one to a page committed read-only is memory
+//! whose protection someone else changed, one to a reserved page is
+//! memory the program believes it committed, and one to a free address
+//! is a pointer that was never memory. Word's own stop is a write from
+//! inside d3d11.dll to an address that differs from run to run
+//! (ROADMAP OF), and which of the four it is decides where to look.
+//!
+//! With the argument `freed` (scenario `crash_freed`) the fault is on
+//! memory the program had and released, which no region line can tell
+//! from an address that was never memory: both are free. What tells them
+//! apart is the map's own record of what stopped being mapped
+//! (nt::vad::Gone), and the report must name the range, how it went, how
+//! long before the report and that the call was the program's own. So the crash report must name the
+//! region: committed, in private memory, allowing reading, the extent
+//! of the committed run (one page, the reservation around it being
+//! reserved only) and the base it was reserved at with the protection
+//! it was reserved for -- all of it the kernel's own map
+//! (nt::vad::Vad::query), none of it the program's word. The write to
+//! address 0 above is the same question answered the other way, and the
+//! report says so there: nothing is mapped at it.
 
 #![no_std]
 #![no_main]
@@ -779,6 +805,59 @@ fn apc() -> u32 {
     1
 }
 
+/// `region`: a fault on a page committed for reading only, inside a
+/// reservation larger than it, so that the crash report's account of
+/// the address has every part of it to get right -- a protection that
+/// is not the one the reservation was made for, a committed run smaller
+/// than the reservation, and a base that is not the faulting page.
+fn region() -> u32 {
+    let (status, base, _) = ntrt::allocate(0, 0x10000, ntrt::MEM_RESERVE, ntrt::PAGE_READWRITE);
+    if status != 0 || base == 0 {
+        ntrt::print("crash: no reservation to fault in\r\n");
+        return 2;
+    }
+    // The second page of it, so the faulting page is not the base.
+    let page = base + 0x1000;
+    let (status, _, _) = ntrt::allocate(page, 0x1000, ntrt::MEM_COMMIT, ntrt::PAGE_READONLY);
+    if status != 0 {
+        ntrt::print("crash: no page to fault on\r\n");
+        return 2;
+    }
+    ntrt::print("crash: writing to a read-only page inside a larger reservation\r\n");
+    // SAFETY: a committed page of this process; the write faults because
+    // it is read-only, and nothing handles the exception.
+    unsafe { core::ptr::write_volatile(page as *mut u32, WRITTEN) };
+    ntrt::print("crash: still alive?!\r\n");
+    1
+}
+
+/// `freed`: a fault on memory this program had and released, which is
+/// the shape of Word's own stop (ROADMAP OF) -- a 64K-aligned base plus
+/// a small offset, in a gap, in a process that has allocated and freed
+/// plenty. The region line alone cannot tell it from an address that was
+/// never memory, so the report reads the map's record of the unmapping
+/// (nt::vad::Gone) as well: this range, released, by a call in this
+/// program, moments before.
+fn freed() -> u32 {
+    let (status, base, _) =
+        ntrt::allocate(0, 0x10000, ntrt::MEM_RESERVE | ntrt::MEM_COMMIT, ntrt::PAGE_READWRITE);
+    if status != 0 || base == 0 {
+        ntrt::print("crash: no memory to release\r\n");
+        return 2;
+    }
+    let (status, _, _) = ntrt::free(base, 0, ntrt::MEM_RELEASE);
+    if status != 0 {
+        ntrt::print("crash: the memory would not release\r\n");
+        return 2;
+    }
+    ntrt::print("crash: writing to memory this program released\r\n");
+    // SAFETY: addresses this program released; the write faults because
+    // nothing is mapped there, and nothing handles the exception.
+    unsafe { core::ptr::write_volatile((base + 0x40) as *mut u32, WRITTEN) };
+    ntrt::print("crash: still alive?!\r\n");
+    1
+}
+
 fn main() -> u32 {
     if arg_is(*b"panic") {
         return index_past_end();
@@ -797,6 +876,12 @@ fn main() -> u32 {
     }
     if arg_is(*b"vectored") {
         return vectored();
+    }
+    if arg_is(*b"region") {
+        return region();
+    }
+    if arg_is(*b"freed") {
+        return freed();
     }
     if arg_is(*b"raise") {
         return raise();

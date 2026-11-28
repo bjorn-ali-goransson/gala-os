@@ -2052,7 +2052,9 @@ fn release_user_memory(process: &Process, teb: u64, teb32: u64, user_stack: u64)
         if base == 0 {
             continue;
         }
-        if let Err(e) = super::vm::free(process, base, 0, super::vm::MEM_RELEASE) {
+        if let Err(e) =
+            super::vm::free(process, base, 0, super::vm::MEM_RELEASE, super::vad::By::Kernel)
+        {
             warn!(
                 "thread: {} (pid {}): cannot free an ended thread's {what} at {base:#x}: {e:?}",
                 process.name, process.id

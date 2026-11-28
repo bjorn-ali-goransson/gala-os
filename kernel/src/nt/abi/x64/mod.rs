@@ -485,7 +485,13 @@ pub(in crate::nt) fn create_wow64_thread(
     };
     let created = thread::create_wow64(&call.process, start, stack64, suspended);
     if created.is_err() {
-        let _ = crate::nt::vm::free(&call.process, stack64.2, 0, crate::nt::vm::MEM_RELEASE);
+        let _ = crate::nt::vm::free(
+            &call.process,
+            stack64.2,
+            0,
+            crate::nt::vm::MEM_RELEASE,
+            crate::nt::vad::By::Kernel,
+        );
     }
     created
 }

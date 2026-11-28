@@ -535,17 +535,25 @@ pub const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
-    // DXVK 3.1.1 for x64 (github.com/doitsujin/dxvk, zlib/libpng;
+    // DXVK 3.2 for x64 (github.com/doitsujin/dxvk, zlib/libpng;
     // THIRD_PARTY.md): Direct3D over Vulkan. It ships beside the program
     // that uses it, never in System32, so that System32's dxgi stays
     // gala's -- the Vulkan loader calls that one (GPU G2, `d3d11_test`).
     // d3d9, d3d8 and d3d10core are in the release too and follow with
     // the programs that want them.
+    //
+    // Not 3.1.1: on a Vulkan driver without VK_KHR_external_memory_win32
+    // -- lavapipe, the driver gala runs it on -- 3.1.1 dies with an
+    // access violation inside d3d11.dll when a program asks for a
+    // shared texture, where 3.2 creates the texture and answers
+    // E_INVALIDARG for its shared handle. Both measured on Windows 11
+    // with these binaries over the pinned lavapipe; the crash is what
+    // `office_word` stopped on (ROADMAP G2).
     Prebuilt {
         name: "dxvk",
-        url: "https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz",
-        checksum: "40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608",
-        members: &["dxvk-3.1.1/x64/d3d11.dll", "dxvk-3.1.1/x64/dxgi.dll"],
+        url: "https://github.com/doitsujin/dxvk/releases/download/v3.2/dxvk-3.2.tar.gz",
+        checksum: "17449ed21602377971289eb2984750699825ac1bac3bbfa2426b2bba0f355692",
+        members: &["dxvk-3.2/x64/d3d11.dll", "dxvk-3.2/x64/dxgi.dll"],
         excludes: &[],
     },
 ];

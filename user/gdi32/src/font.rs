@@ -1,11 +1,20 @@
-//! Fonts: a LOGFONTW kept as given, realized with one of gala's two
-//! families. Proportional faces ("Segoe UI", "MS Shell Dlg", "Tahoma",
-//! "Arial", ... and the default) are Selawik, an open font with Segoe
-//! UI's metrics, rasterized at any size with fontdue (four weights:
-//! semilight, regular, semibold, bold). Fixed-pitch faces ("Courier
-//! New", "Consolas", ..., FIXED_PITCH or FF_MODERN) are Noto Sans Mono's
-//! bitmaps (16, 20, 24 and 32 pixels; regular and bold) scaled to any
-//! height, every character the same width.
+//! Fonts: a LOGFONTW kept as given, realized through `FAMILIES` -- the
+//! table of families a program finds here, each with the weights and
+//! styles it answers for, measured on real Windows (user/gdi32_test's
+//! `font_families`). The table decides which names exist, which faces
+//! each answers with and which weight a face realizes at; two fonts
+//! draw them all. Proportional families are Selawik, an open font with
+//! Segoe UI's metrics, rasterized at any size with fontdue (four
+//! weights: semilight, regular, semibold, bold). Fixed-pitch families
+//! are Noto Sans Mono's bitmaps (16, 20, 24 and 32 pixels; regular and
+//! bold) scaled to any height, every character the same width.
+//!
+//! A name the table has no family for is substituted, as real Windows
+//! substitutes one it has no font for, so that **the face a program is
+//! given is always a face the system enumerates**: `GetTextFaceW` and
+//! the metrics answer for the realized family, and `EnumFontFamiliesExW`
+//! walks the same table (`state.rs`). Keeping those two apart is what
+//! left a program laying text out in a face it could not then find.
 //!
 //! Metrics follow GDI's: a negative lfHeight is the character (em)
 //! height, a positive one the cell height, 0 the default (12-pixel characters). For Selawik
@@ -16,7 +25,7 @@
 //! the cell is 4/3 of the em, the ascent 13/16 of the cell.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 
 /// LOGFONTW.
@@ -67,30 +76,176 @@ impl LogFont {
         }
     }
 
-    /// Whether the font asks for a fixed-pitch face: FIXED_PITCH, or
-    /// FF_MODERN without a name, or a fixed-pitch face's name.
-    fn fixed(&self) -> bool {
-        const FIXED: [&[u8]; 9] = [
-            b"courier",
-            b"courier new",
-            b"consolas",
-            b"lucida console",
-            b"lucida sans typewriter",
-            b"terminal",
-            b"fixedsys",
-            b"cascadia mono",
-            b"cascadia code",
-        ];
+    /// The face name as asked for, without its terminator.
+    pub fn name(&self) -> &[u16] {
         let len = self.face.iter().position(|&c| c == 0).unwrap_or(32);
-        let name = &self.face[..len];
-        if self.pitch_and_family & 3 == 1 || (len == 0 && self.pitch_and_family & 0xf0 == 0x30) {
-            return true;
-        }
-        let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 0x20 } else { c };
-        FIXED.iter().any(|f| {
-            f.len() == name.len() && f.iter().zip(name).all(|(&a, &b)| u16::from(a) == lower(b))
-        })
+        &self.face[..len]
     }
+}
+
+/// A font family a program finds here: the name it enumerates and is
+/// reported under, the weights of its upright faces (lightest first) and
+/// whether it answers italic faces of its own. A program may ask any
+/// family for italics, which gala slants; `italic` is what the family
+/// *enumerates*.
+pub struct Family {
+    pub name: &'static str,
+    pub fixed: bool,
+    pub weights: &'static [i32],
+    pub italic: bool,
+}
+
+/// Regular and Bold, the weights most families have.
+const BOTH: &[i32] = &[400, 700];
+/// One face, at the weight the family is named for.
+const ONE: &[i32] = &[400];
+
+/// A family of four faces: Regular and Bold, upright and italic.
+const fn four(name: &'static str, fixed: bool) -> Family {
+    Family { name, fixed, weights: BOTH, italic: true }
+}
+
+/// A family of one face, at `weight`, with an italic of its own.
+const fn weight_of(name: &'static str, weight: &'static [i32]) -> Family {
+    Family { name, fixed: false, weights: weight, italic: true }
+}
+
+/// A family of a single upright face.
+const fn single(name: &'static str, fixed: bool, weights: &'static [i32]) -> Family {
+    Family { name, fixed, weights, italic: false }
+}
+
+/// The families a program finds here, with the faces each answers for as
+/// measured on Windows 11 24H2 for ANSI_CHARSET (user/gdi32_test's
+/// `font_families`; a DEFAULT_CHARSET enumeration of a named family
+/// repeats its faces once per character set it covers, which gala's one
+/// Latin family does not). Listed by name: GDI promises no order.
+///
+/// Windows has families besides these which it does not enumerate for
+/// ANSI_CHARSET -- its raster Courier, Terminal, Fixedsys, MS Sans Serif,
+/// MS Serif and System, whose faces are OEM -- and gala, whose faces are
+/// Latin, has none of them either; they are substituted (`SUBSTITUTED`).
+pub static FAMILIES: &[Family] = &[
+    four("Arial", false),
+    single("Arial Black", false, &[900]),
+    four("Calibri", false),
+    weight_of("Calibri Light", &[300]),
+    four("Cambria", false),
+    single("Cambria Math", false, ONE),
+    four("Candara", false),
+    four("Comic Sans MS", false),
+    four("Consolas", true),
+    four("Constantia", false),
+    four("Corbel", false),
+    four("Courier New", true),
+    four("Georgia", false),
+    four("Helvetica", false),
+    single("Impact", false, ONE),
+    single("Lucida Console", true, ONE),
+    single("Lucida Sans Unicode", false, ONE),
+    four("Lucida Sans Typewriter", true),
+    single("MS Shell Dlg", false, ONE),
+    single("MS Shell Dlg 2", false, BOTH),
+    single("MS UI Gothic", false, ONE),
+    single("Microsoft Sans Serif", false, ONE),
+    four("Palatino Linotype", false),
+    four("Segoe UI", false),
+    single("Segoe UI Emoji", false, ONE),
+    weight_of("Segoe UI Light", &[300]),
+    weight_of("Segoe UI Semibold", &[600]),
+    weight_of("Segoe UI Semilight", &[350]),
+    single("Segoe UI Symbol", false, ONE),
+    single("Sylfaen", false, ONE),
+    single("Tahoma", false, BOTH),
+    four("Times", false),
+    four("Times New Roman", false),
+    four("Trebuchet MS", false),
+    four("Verdana", false),
+];
+
+/// Names that ask for a fixed-pitch face which gala does not enumerate:
+/// Windows' raster Courier, Terminal and Fixedsys (no ANSI faces, as
+/// measured) and the Cascadia families, which it has only where a
+/// terminal installed them. They realize as "Courier New", as a name no
+/// family has does when it asks for fixed pitch.
+const SUBSTITUTED: [&str; 5] =
+    ["courier", "terminal", "fixedsys", "cascadia mono", "cascadia code"];
+
+/// The family a name with no face of its own becomes: "Courier New" for
+/// a request asking for fixed pitch, "Arial" otherwise. Both are
+/// measured: on Windows an unknown name, and no name at all, realize as
+/// "Arial", and either with FIXED_PITCH or FF_MODERN as "Courier New".
+fn substitute(fixed: bool) -> &'static Family {
+    let name = if fixed { "Courier New" } else { "Arial" };
+    FAMILIES.iter().find(|f| f.name == name).unwrap_or(&FAMILIES[0])
+}
+
+/// Compares a face name (UTF-16, as a LOGFONT carries it) with a
+/// family's, ignoring ASCII case, as GDI's font mapper does.
+fn same_name(name: &[u16], family: &str) -> bool {
+    let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 0x20 } else { c };
+    name.len() == family.len()
+        && name
+            .iter()
+            .zip(family.as_bytes())
+            .all(|(&a, &b)| lower(a) == u16::from(b.to_ascii_lowercase()))
+}
+
+/// The family a face name names, or None for one no family has.
+pub fn family_named(name: &[u16]) -> Option<&'static Family> {
+    FAMILIES.iter().find(|f| same_name(name, f.name))
+}
+
+/// The family a LOGFONT realizes with: the one its face name names, else
+/// the substitute (`substitute`). A name of a fixed-pitch family gala
+/// does not have, FIXED_PITCH (the low two bits 1) and FF_MODERN (the
+/// family bits 0x30) all ask for fixed pitch.
+pub fn family_of(f: &LogFont) -> &'static Family {
+    let name = f.name();
+    if let Some(family) = family_named(name) {
+        return family;
+    }
+    let fixed = f.pitch_and_family & 3 == 1
+        || f.pitch_and_family & 0xf0 == 0x30
+        || SUBSTITUTED.iter().any(|&n| same_name(name, n));
+    let family = substitute(fixed);
+    note_substitution(name, family.name);
+    family
+}
+
+/// A row naming a face a program asked for that no family here has, and
+/// the family it was realized with -- what to read when a program lays
+/// text out in the wrong face, or looks for a face it was given and does
+/// not find it. First seen only, by a hash of the name over 64 buckets
+/// (a collision drops a row, never the answer).
+fn note_substitution(name: &[u16], family: &'static str) {
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &c in name {
+        hash = (hash ^ u64::from(c)).wrapping_mul(0x100_0000_01b3);
+    }
+    let mask = 1u64 << (hash % 64);
+    if SEEN.fetch_or(mask, Ordering::Relaxed) & mask != 0 {
+        return;
+    }
+    let mut what = [0u8; 96];
+    let mut n = 0;
+    let mut put = |bytes: &[u8]| {
+        for &b in bytes {
+            if n < what.len() {
+                what[n] = b;
+                n += 1;
+            }
+        }
+    };
+    put(b"gdi32.dll!font(");
+    for &c in name.iter().take(32) {
+        put(&[if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' }]);
+    }
+    put(b" -> ");
+    put(family.as_bytes());
+    put(b")");
+    crate::reached(&what[..n], name.len() as u64);
 }
 
 /// The Selawik files (OFL; THIRD_PARTY.md) by weight.
@@ -145,9 +300,19 @@ fn round_div(a: i64, b: i64) -> i32 {
     ((2 * a + b) / (2 * b)) as i32
 }
 
+/// The weight a family answers an asked weight with: the nearest of its
+/// faces' weights, the lighter where two are equally near. Measured on
+/// Segoe UI, whose own faces are 400 and 700: it answers 350 with 400 and
+/// 600 with 700, and the weights between them are the Semilight and
+/// Semibold families' own.
+pub fn snap_weight(weight: i32, weights: &[i32]) -> i32 {
+    weights.iter().copied().min_by_key(|&w| ((w - weight).abs(), w)).unwrap_or(weight)
+}
+
 pub fn metrics(f: &LogFont) -> Metrics {
-    let weight = if f.weight == 0 { 400 } else { f.weight };
-    if f.fixed() {
+    let family = family_of(f);
+    let weight = snap_weight(if f.weight == 0 { 400 } else { f.weight }, family.weights);
+    if family.fixed {
         return mono(f, weight);
     }
     let face = match weight {
@@ -211,21 +376,194 @@ pub fn file(f: &LogFont) -> Option<&'static [u8]> {
     }
 }
 
-/// The Selawik files and their style names, lightest first.
-pub fn selawik_faces() -> [(&'static [u8], &'static str, i32); 4] {
-    [
-        (SELAWIK[0], "Semilight", 350),
-        (SELAWIK[1], "Regular", 400),
-        (SELAWIK[2], "Semibold", 600),
-        (SELAWIK[3], "Bold", 700),
-    ]
-}
-
 /// OS/2's xAvgCharWidth (the second field), in font units.
 fn selawik_average(data: &[u8]) -> Option<i64> {
+    Some(i64::from(s16(table(data, b"OS/2")?, 2)))
+}
+
+/// A table of a font file, by tag.
+fn table<'a>(data: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
     let raw = ttf_parser::RawFace::parse(data, 0).ok()?;
-    let os2 = raw.table(ttf_parser::Tag::from_bytes(b"OS/2"))?;
-    Some(i64::from(i16::from_be_bytes([*os2.get(2)?, *os2.get(3)?])))
+    raw.table(ttf_parser::Tag::from_bytes(tag))
+}
+
+/// A signed 16-bit field of a table, or 0 where the table is too short.
+fn s16(t: &[u8], at: usize) -> i32 {
+    match (t.get(at), t.get(at + 1)) {
+        (Some(&a), Some(&b)) => i32::from(i16::from_be_bytes([a, b])),
+        _ => 0,
+    }
+}
+
+/// An unsigned 16-bit field of a table, or 0 where the table is too short.
+fn u16_at(t: &[u8], at: usize) -> i32 {
+    match (t.get(at), t.get(at + 1)) {
+        (Some(&a), Some(&b)) => i32::from(u16::from_be_bytes([a, b])),
+        _ => 0,
+    }
+}
+
+/// A field in font units at the realized em, rounded to the nearest
+/// pixel (half away from zero). Every outline metric but the cap and x
+/// heights is one of these.
+fn scaled(units: i32, em: i32, upem: i32) -> i32 {
+    if upem <= 0 {
+        return 0;
+    }
+    let n = i64::from(units) * i64::from(em);
+    let d = i64::from(upem);
+    (if n < 0 { (2 * n - d) / (2 * d) } else { (2 * n + d) / (2 * d) }) as i32
+}
+
+/// What OUTLINETEXTMETRIC carries beyond the TEXTMETRIC, as the realized
+/// font answers it (`user/gdi32_test`'s `outline_metrics`). Measured on
+/// Arial, Segoe UI and Lucida Console at seven sizes, against those
+/// files' own tables: every field here but the cap and x heights is a
+/// field of the face's head, hhea, OS/2 or post table scaled to the em,
+/// and those two are half the em and a quarter of it whatever the face
+/// says (Arial's OS/2 carries 1467 and 1062 units -- 11 and 8 pixels at
+/// an em of 16 -- and GDI answers 8 and 4).
+pub struct Outline {
+    pub panose: [u8; 10],
+    pub fs_selection: u32,
+    pub fs_type: u32,
+    pub slope_rise: i32,
+    pub slope_run: i32,
+    pub italic_angle: i32,
+    pub em_square: u32,
+    pub ascent: i32,
+    pub descent: i32,
+    pub line_gap: u32,
+    pub cap_em_height: u32,
+    pub x_height: u32,
+    /// Left, top, right and bottom, the way RECT holds them: the design
+    /// box, so top is above the baseline (positive) and bottom below it.
+    pub font_box: [i32; 4],
+    pub mac_ascent: i32,
+    pub mac_descent: i32,
+    pub mac_line_gap: u32,
+    pub min_ppem: u32,
+    /// The size then the offset, x before y.
+    pub subscript: [i32; 4],
+    pub superscript: [i32; 4],
+    /// The size then the position.
+    pub strikeout: [i32; 2],
+    pub underscore: [i32; 2],
+    /// The family's name, the realized face's own style ("" for the
+    /// raster faces, which carry no style or full name at all), and
+    /// whether the realized slant is named in the face and full names.
+    pub family: &'static str,
+    pub style: &'static str,
+    pub named_italic: bool,
+}
+
+/// The outline metrics of the font `f` realizes.
+///
+/// A slant gala synthesizes is reported the way Windows reports one it
+/// simulates: in fsSelection (bit 0, the regular bit giving way to it)
+/// and nowhere else -- an Impact italic, which has no italic face,
+/// answers 0x01 with an italic angle of 0 and the upright slope. Where
+/// the family enumerates italic faces of its own (`Family::italic`,
+/// which EnumFontFamiliesExW answers with and the names below), the face
+/// a program selected does exist as far as every other call is
+/// concerned, so the slant is named there too -- and then the angle is
+/// gala's own quarter-height shear, not a face's design angle.
+pub fn outline(f: &LogFont) -> Outline {
+    let family = family_of(f);
+    let m = metrics(f);
+    let em = m.em;
+    // The style of the face the family realized: "Bold" only for the
+    // heaviest of a family that has more than one weight. A family that
+    // is itself a weight has the one face, and Windows names its style
+    // "Regular" whatever that weight is (Arial Black answers "Regular"
+    // with a tmWeight of 900).
+    let heaviest = family.weights.iter().copied().max().unwrap_or(400);
+    let style = if family.weights.len() > 1 && m.weight >= heaviest { "Bold" } else { "Regular" };
+    let named_italic = m.italic && family.italic;
+    let Some(data) = file(f) else { return raster(family, &m, named_italic) };
+    let head = table(data, b"head").unwrap_or(&[]);
+    let hhea = table(data, b"hhea").unwrap_or(&[]);
+    let os2 = table(data, b"OS/2").unwrap_or(&[]);
+    let post = table(data, b"post").unwrap_or(&[]);
+    let upem = u16_at(head, 18).max(1);
+    let s = |units: i32| scaled(units, em, upem);
+    let mut panose = [0; 10];
+    for (i, p) in panose.iter_mut().enumerate() {
+        *p = os2.get(32 + i).copied().unwrap_or(0);
+    }
+    let selection = u16_at(os2, 62) as u32;
+    // The shear is a quarter of the height above the baseline
+    // (`Metrics::glyph`), which leans the face 14.04 degrees: an angle of
+    // -140 tenths, and a slope of 4 up to 1 along.
+    let (italic_angle, slope_rise, slope_run) =
+        if named_italic { (-140, 4, 1) } else { (s16(post, 4) * 10, 1, 0) };
+    Outline {
+        panose,
+        fs_selection: if m.italic { (selection & !0x40) | 0x01 } else { selection },
+        fs_type: u16_at(os2, 8) as u32,
+        slope_rise,
+        slope_run,
+        italic_angle,
+        em_square: upem as u32,
+        ascent: s(s16(os2, 68)),
+        descent: s(s16(os2, 70)),
+        line_gap: s(s16(os2, 72)).max(0) as u32,
+        cap_em_height: ((em + 1) / 2).max(0) as u32,
+        x_height: ((em + 2) / 4).max(0) as u32,
+        font_box: [s(s16(head, 36)), s(s16(head, 42)), s(s16(head, 40)), s(s16(head, 38))],
+        mac_ascent: s(s16(hhea, 4)),
+        mac_descent: s(s16(hhea, 6)),
+        mac_line_gap: s(s16(hhea, 8)).max(0) as u32,
+        min_ppem: u16_at(head, 46) as u32,
+        subscript: [s(s16(os2, 10)), s(s16(os2, 12)), s(s16(os2, 14)), s(s16(os2, 16))],
+        superscript: [s(s16(os2, 18)), s(s16(os2, 20)), s(s16(os2, 22)), s(s16(os2, 24))],
+        strikeout: [s(s16(os2, 26)), s(s16(os2, 28))],
+        underscore: [s(s16(post, 10)), s(s16(post, 8))],
+        family: family.name,
+        style,
+        named_italic,
+    }
+}
+
+/// The answer a raster face gives, which gala's fixed-pitch families are
+/// (they are drawn from bitmaps, with no file to read tables from): the
+/// fields the bitmaps themselves have, and zero for the rest. Measured
+/// on Windows' own MS Sans Serif and Small Fonts, which carry no style
+/// or full name, no PANOSE beyond the first four numbers, no fsSelection
+/// and no recommended PPEM, and whose em square is the em of the bitmap
+/// strike in pixels rather than a design grid.
+fn raster(family: &'static Family, m: &Metrics, named_italic: bool) -> Outline {
+    let em = m.em;
+    let descent = m.ascent - m.height;
+    // A pixel of rule per 16 pixels of em, at the x height, which is
+    // where MS Sans Serif puts it (1 and 4 at an em of 16).
+    let rule = ((em + 8) / 16).max(1);
+    Outline {
+        panose: [2, 11, if m.weight >= 600 { 8 } else { 5 }, 9, 0, 0, 0, 0, 0, 0],
+        fs_selection: if m.italic { 0x01 } else { 0 },
+        fs_type: 0,
+        slope_rise: 1,
+        slope_run: 0,
+        italic_angle: 0,
+        em_square: em.max(0) as u32,
+        ascent: m.ascent,
+        descent,
+        line_gap: 0,
+        cap_em_height: ((em + 1) / 2).max(0) as u32,
+        x_height: ((em + 2) / 4).max(0) as u32,
+        font_box: [0, m.ascent, m.widest, descent],
+        mac_ascent: m.ascent,
+        mac_descent: descent,
+        mac_line_gap: 0,
+        min_ppem: 0,
+        subscript: [0; 4],
+        superscript: [0; 4],
+        strikeout: [rule, ((em + 2) / 4).max(1)],
+        underscore: [rule, -rule],
+        family: family.name,
+        style: "",
+        named_italic,
+    }
 }
 
 fn mono(f: &LogFont, weight: i32) -> Metrics {

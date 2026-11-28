@@ -488,7 +488,16 @@ that finds no room is `?user`, and a name that is not plain text is
 `?text` -- a caller's bug and no cap of the ledger's, told apart
 because a row that said `?user` of a name read for more bytes than the
 caller meant sent the reader after a cap of the ledger's instead
-(`ledger_test` reports one of each).
+(`ledger_test` reports one of each). A `?text` row cannot carry the
+name, so the log says it instead, as the caller passed it with the
+bytes that are not text escaped (`a name that is not text, counted
+under ?text: "dwrite.dll!Foo\x00\x00" (18 bytes, unsupported, detail
+0x1)`): the row alone is a gap whose identity the one facility for
+naming gaps threw away, while the escaped name says which DLL asked
+after what, the name it meant reading in front of whatever followed
+it. Eight such names a boot, because a caller whose length is wrong
+once is wrong on every call; a closing line says the rest were counted
+and not said.
 
 Invariants (`nt::ledger`): each dump gives back the names no
 entry uses any more, so the table holds the names of the gaps since the
@@ -606,6 +615,23 @@ took.
   `ole32.dll!CoGetClassObject(the activation filter kept replacing the
   class)`, "unsupported", with that limit as its detail. Scenario
   `ole32_test`.
+  Compound files (ole32): the open of one leaves
+  `ole32.dll!StgOpenStorage(opened)`, "reached", with the STGM mode as
+  the detail, so a run says which modes a program asked a compound file
+  for before anything inside it is read, and a file gala cannot read
+  says why in its own row (`(corrupt allocation table)`, `(corrupt mini
+  allocation table)`, `(no root entry)`, `(flags gala has not built)`,
+  the mode again as the detail). The read-only storage's refusals are
+  rows of their own, named after the method they refuse and bounded by
+  one row per kind: a write (`IStream::Write(read-only storage)`,
+  `IStream::SetSize(read-only storage)` and the IStorage calls beside
+  them), a CopyTo or MoveElementTo, an interface Windows' storage
+  answers and gala's does not
+  (`IStorage::QueryInterface(IPropertySetStorage)`, `(IRootStorage)`,
+  `(IMarshal)`), an exclusion list, a priority storage, and the limit on
+  how many elements may be held open at once
+  (`IStorage::OpenStream(too many elements open)`, the limit as the
+  detail). Scenario `stg_test`; ARCHITECTURE "Compound files".
   A message box: `user32.dll!MessageBoxW(<the text>)`, "unsupported",
   with the kind (MB_*) as the detail, because **a program that gives up
   says so in a box and leaves nothing else behind**: Word's startup ends
@@ -812,6 +838,27 @@ took.
   detail). Each QueryInterface
   msxml6 does not answer: `msxml6.dll!QI? <node|list|map|error|cache|
   XSLTemplate|XSLProcessor> {<the whole IID>}`, "other", its first dword as detail.
+  Multi Language Support (mlang, ARCHITECTURE "mlang"): what a program
+  asked for and did not get -- `mlang.dll!<interface>::<method>`, "not
+  implemented", for the conversion and enumeration methods, and
+  `mlang.dll!QI? CMultiLanguage {<the whole IID>}` (and `QI?
+  CMultiLanguage class object`), "other", with the IID's first dword as
+  detail, for an interface it does not answer. What it did answer is
+  there too, one row for the first call that reached each method and
+  none after it: `mlang.dll!CMultiLanguage(created)`,
+  `CodePageToCodePages`, `CodePagesToCodePage`, `CodePageToScriptID`,
+  `GetFontCodePages`, `MapFont`, `ReleaseFont` and
+  `ResetFontMapping`, all "reached" with a zero detail -- a bit per
+  method in the DLL, because a row per call would be a row per argument
+  value (the ledger's key is the detail as well as the name) and would
+  crowd the table out. So a run says which half of mlang a program used
+  before it stopped, and the rows stay bounded however hard it leans on
+  them. A code page with no bit or no script is Windows' own E_FAIL and
+  leaves no row; a font that does not cover the code pages asked for
+  does: `mlang.dll!MapFont(no face covers the code pages)`,
+  "unsupported", with the uncovered FONTSIGNATURE bits as detail, which
+  is the row that names a script gala ships no font for. Scenario
+  `mlang_test`.
   XmlLite's reader (xmllite, ARCHITECTURE "xmllite"): every document
   refused, `xmllite.dll!IXmlReader::Read <what the reader was looking
   for>`, "other", with the line as detail -- and
@@ -1238,7 +1285,64 @@ with, `(no return yet)` for one that had not, and a run of the same call
 and status as one entry with its count. An exception a program raises
 itself can carry nothing else at all -- Office's 0xE0000002 names no
 parameters -- and then what the thread called last is the only account
-of what it gave up on. Scenario `crash_raise` pins it. ntdll reports an exception no handler took before it calls the
+of what it gave up on. Scenario `crash_raise` pins it.
+
+An access violation's next question is what was at the address, and
+neither the registers nor the program can answer it. The report reads
+the process's own map for it (`nt::vad::Vad::query`, taken with
+`try_lock` so that writing a crash report can never wait on a lock) and
+says which of four the address is:
+
+```
+crash report:   at 0x14000204c (crash.exe+0x204c), writing address 0x11000
+crash report:   0x11000 is committed in private memory, and allows reading (0x1000 bytes of it from this page); reserved at 0x10000 for reading and writing
+crash report:   nothing is mapped at 0x0: free for 0x100000 bytes from this page onwards, with nothing mapped below it
+```
+
+A write to a page committed for writing is a bug in whatever computed
+the address; one to a page committed for reading is memory whose
+protection someone else changed; one to a reserved page is memory the
+program believes it committed; and a free address is a pointer that was
+never memory. They want different questions asked next, and the
+registers look the same in all four. The line names the kind of memory
+(private, a mapped section, an image -- with the image's name), says
+when the page is a guard page, gives the extent of the run the address
+is in and the base the allocation was reserved at with the protection
+it was reserved for.
+
+For an address nothing is mapped at there is one question more, and the
+map answers that too (`vad::nearest_below`): the free run is reported
+from the faulting page onwards, because that is where `query` starts it
+-- Windows' VirtualQuery answers a free address the same way -- so the
+line names the nearest mapping *below* the address and how far below it
+ends. A gap that starts 0x40 past the end of a live mapping is an
+overrun; one far from anything is an address that was never a pointer.
+Scenarios `crash` (nothing mapped, and nothing below it) and
+`crash_region` (committed for reading only, inside a larger
+reservation).
+
+A gap has a history too, and the map keeps the part of it that answers
+the question (`vad::Gone`, ARCHITECTURE "Virtual memory of processes"):
+the last 32 ranges the process unmapped. A fault at an address nothing
+is mapped at -- or at a page the program believes it committed -- reads
+it, and the line it adds is the difference between memory that went away
+and an address that was never memory:
+
+```
+crash report:   0x10000..0x20000 was released 9 ms before this report, by 0x140003758 (crash.exe+0x3758)
+crash report:   nothing this process unmapped covers 0x0, and every unmapping it made is on record
+```
+
+The address is where the system call returned to, so for a program that
+frees through kernel32 it names KERNELBASE and not the DLL that asked:
+the range, the time and that the call was the program's own are what the
+record is for, and the DLL behind such a call takes a stack capture on
+the free ("Stack captures" below). The kernel's own unmappings say so
+instead ("by the kernel itself"), a view of an image says that a module
+left, and when the ring has rolled over the line says so rather than let
+silence read as "never mapped". Scenario `crash_freed`.
+
+ntdll reports an exception no handler took before it calls the
 top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
@@ -1317,10 +1421,13 @@ does write over this one. That is also the only case left where a
 withdrawal can meet a note which is not its own, and it leaves it, for
 the crash report. Scenarios `crash`, `crash_dispatched`,
 `crash_filtered`, `crash_continued`, `crash_continued_other`,
-`crash_unhandled_both` and `crash_delay` (two threads, a delay-loaded
-function and a delay-loaded DLL), each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
-0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
-eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
+`crash_unhandled_both`, `crash_delay` (two threads, a delay-loaded
+function and a delay-loaded DLL), `crash_region` (what is at the
+faulting address) and `crash_freed` (memory the program released), the
+first seven each with an ARM64 twin. An exception in 32-bit code (a
+WOW64 process, CS 0x23) says `32-bit x86 (WOW64)` after the
+personality and shows eax..esp, eip and the stack's 4-byte words
+(`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`
 (the 32-bit ntdll's dispatcher found no handler: wow64.dll passes its
 record and the 32-bit registers on through GalaUnhandledException, and

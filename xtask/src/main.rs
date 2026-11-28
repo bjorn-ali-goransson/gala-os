@@ -353,6 +353,10 @@ const USER_DLLS: &[Dll] = &[
     // Windows.UI.dll: the Windows Runtime class UISettings, the system's
     // colours and UI preferences (uisettings_test; ODT's setup.exe).
     Dll { package: "windows_ui", file: "windows.ui.dll", exported_as: "testwindows.ui.dll" },
+    // mlang.dll: Multi Language Support, the code-page and font-link
+    // tables (mlang_test; MSO asks for its class on the way to laying
+    // text out).
+    Dll { package: "mlang", file: "mlang.dll", exported_as: "testmlang.dll" },
     // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
     // WindowsCodecs.dll: the Windows Imaging Component, its factory,
@@ -1122,8 +1126,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d3d11_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("d3d11_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("d3d11_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("d3d11_test", "user/bin/d3d11_test.exe", "gala"),
     // d2d1_device_test (GPU G2): Direct2D on the program's own Direct3D
     // 11 device, so it ships d3d11_test's stack (DXVK beside the program,
@@ -1152,8 +1156,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d2d1_device_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("d2d1_device_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("d2d1_device_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("d2d1_device_test", "user/bin/d2d1_device_test.exe", "gala"),
     // d3d10_1_test (GPU G2): Direct3D 10.1 over the program's own
     // Direct3D 11 and Direct2D 1.0 over that, the path Word takes when
@@ -1184,8 +1188,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d3d10_1_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("d3d10_1_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("d3d10_1_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("d3d10_1_test", "user/bin/d3d10_1_test.exe", "gala"),
     // trace_from_d3d10_test: d3d10_1_test's disk, with the trace armed.
     ("trace_from_d3d10_test", "ntdll.dll", "Windows/System32"),
@@ -1213,8 +1217,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("trace_from_d3d10_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("trace_from_d3d10_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("trace_from_d3d10_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("trace_from_d3d10_test", "user/bin/d3d10_1_test.exe", "gala"),
     // trace_from_across_test: the same disk, with the trace armed in
     // the other DLL of the two the program calls into.
@@ -1243,12 +1247,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("trace_from_across_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("trace_from_across_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("trace_from_across_test", "user/mesa/lavapipe.regseed", "registry"),
-    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
-    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll", "gala"),
+    ("trace_from_across_test", "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll", "gala"),
     ("trace_from_across_test", "user/bin/d3d10_1_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
+    ("dwrite_test", "gdi32.dll", "Windows/System32"),
     ("dwrite_test", "fonts/selawik/selawk.ttf", "Windows/Fonts"),
     ("dwrite_test", "fonts/selawik/selawksl.ttf", "Windows/Fonts"),
     ("dwrite_test", "fonts/selawik/selawksb.ttf", "Windows/Fonts"),
@@ -1650,6 +1655,25 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("ole32_test", "user32.dll", "Windows/System32"),
     ("ole32_test", "gdi32.dll", "Windows/System32"),
     ("ole32_test", "user/bin/ole32_test.exe", "gala"),
+    ("mlang_test", "ntdll.dll", "Windows/System32"),
+    ("mlang_test", "kernel32.dll", "Windows/System32"),
+    ("mlang_test", "msvcrt.dll", "Windows/System32"),
+    ("mlang_test", "ole32.dll", "Windows/System32"),
+    ("mlang_test", "advapi32.dll", "Windows/System32"),
+    ("mlang_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("mlang_test", "user32.dll", "Windows/System32"),
+    ("mlang_test", "gdi32.dll", "Windows/System32"),
+    // mlang.dll is loaded by the class CoCreateInstance asks for, not
+    // imported: it is here because the registry points at it.
+    ("mlang_test", "mlang.dll", "Windows/System32"),
+    ("mlang_test", "user/bin/mlang_test.exe", "gala"),
+    ("stg_test", "ntdll.dll", "Windows/System32"),
+    ("stg_test", "kernel32.dll", "Windows/System32"),
+    ("stg_test", "msvcrt.dll", "Windows/System32"),
+    ("stg_test", "ole32.dll", "Windows/System32"),
+    ("stg_test", "advapi32.dll", "Windows/System32"),
+    ("stg_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("stg_test", "user/bin/stg_test.exe", "gala"),
     ("moniker_test", "ntdll.dll", "Windows/System32"),
     ("moniker_test", "kernel32.dll", "Windows/System32"),
     ("moniker_test", "msvcrt.dll", "Windows/System32"),
@@ -3020,12 +3044,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // and Mesa's lavapipe in System32, lavapipe registered.
     (
         "office_word",
-        "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll",
+        "target/prebuilt/dxvk/dxvk-3.2/x64/d3d11.dll",
         "Program Files/Microsoft Office/root/Office16",
     ),
     (
         "office_word",
-        "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll",
+        "target/prebuilt/dxvk/dxvk-3.2/x64/dxgi.dll",
         "Program Files/Microsoft Office/root/Office16",
     ),
     (
@@ -3414,7 +3438,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msxml_test", "ole32.dll", "Windows/System32"),
     ("msxml_test", "oleaut32.dll", "Windows/System32"),
     ("msxml_test", "msxml6.dll", "Windows/System32"),
-    // XmlLite's reader (user/xmllite_test).
+    // XmlLite's reader, writer and writer outputs
+    // (user/xmllite_test).
     ("xmllite_test", "ntdll.dll", "Windows/System32"),
     ("xmllite_test", "kernel32.dll", "Windows/System32"),
     ("xmllite_test", "xmllite.dll", "Windows/System32"),
@@ -10058,19 +10083,59 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // XmlLite's reader (user/xmllite_test): CreateXmlReader, an
-        // IStream of the program's own as the input, and the whole
-        // document node by node -- the declaration, white space, a
-        // comment, elements in a default and a prefixed namespace with
-        // their attributes (the namespace declarations among them),
-        // text, an empty element, CDATA, a processing instruction and
-        // end tags -- then end of file and a document that is not well
-        // formed. Word delay-loads CreateXmlReader and ends on
-        // 0xc06d007f without it (ROADMAP OF).
+        // XmlLite's reader and writer (user/xmllite_test). The
+        // reader: CreateXmlReader, an IStream of the program's own as
+        // the input, and the whole document node by node -- the
+        // declaration, white space, a comment, elements in a default
+        // and a prefixed namespace with their attributes (the namespace
+        // declarations among them), text, an empty element, CDATA, a
+        // processing instruction and end tags -- then end of file and a
+        // document that is not well formed. Its properties: the whole
+        // enumeration, what each one defaults to and takes, when they
+        // lock (the first Read, not SetInput), the two that hold an
+        // object with a reference of the reader's own, and what the
+        // kept values do -- a conformance level that reads character
+        // data outside the root elements, an element depth that stops
+        // the read that would go past it. The writer: CreateXmlWriter
+        // and all 32 methods of IXmlWriter, fifty cases compared byte
+        // for byte with what Windows' own writer wrote, the properties,
+        // the namespaces it declares, the place of the XML declaration
+        // (WriteStartDocument's call and no other's) and the refusals
+        // that kill a writer among them. The outputs:
+        // CreateXmlWriterOutputWithEncodingName and
+        // ...WithEncodingCodePage, the encodings XmlLite takes and what
+        // an encoding nothing knows leaves behind. Word delay-loads the
+        // reader, the writer and the first of the two creators, and
+        // ends on 0xc06d007f without any of them (ROADMAP OF).
         name: "xmllite_test",
         cmdline: "qemu_exit run=xmllite_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["xmllite_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "xmllite_test: ok",
+            // The reader's properties: the two past the end of the
+            // enumeration, the two values gala keeps and acts on
+            // nowhere (the MultiLanguage object it never asks for an
+            // encoding, DtdProcessing Parse with no declaration
+            // parsed), and the depth that stopped a read.
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::GetProperty(property)","what":"not implemented""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(property)","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(MultiLanguage)","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(DtdProcessing) parse","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::Read(MaxElementDepth)","what":"other""#,
+            // The writer on the stream: a document handed over, an
+            // interface it does not answer for, and an output that is
+            // no stream at all.
+            r#"ledger: {"service":"xmllite.dll!IXmlWriter hands its bytes over","what":"reached""#,
+            r#"ledger: {"service":"xmllite.dll!CreateXmlWriter(iid)","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlWriter::SetOutput(not a stream)","what":"unsupported""#,
+            // The output: the encoding a document was asked to be
+            // written in, an encoding nothing knows, and the one
+            // interface the object has.
+            r#"ledger: {"service":"xmllite.dll!CreateXmlWriterOutput utf-8","what":"reached""#,
+            r#"ledger: {"service":"xmllite.dll!CreateXmlWriterOutput(encoding) bogus","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlWriterOutput::QueryInterface(iid)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // The Windows Imaging Component (user/windowscodecs_test): the
@@ -10416,7 +10481,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
         name: "gdi32_test",
         cmdline: "qemu_exit run=gdi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["gdi32_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "gdi32_test: ok",
+            // The font table answering for itself: every family it has,
+            // the substitution a name it has not takes, and the character
+            // set it cannot enumerate (user/gdi32/src/font.rs).
+            r#"ledger: {"service":"gdi32.dll!EnumFontFamiliesExW(*)","what":"reached""#,
+            r#"ledger: {"service":"gdi32.dll!font(No Such Font Family -> Arial)","what":"reached""#,
+            r#"ledger: {"service":"gdi32.dll!EnumFontFamiliesExW(charset 002)","what":"unsupported""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // W3: gala's comctl32 (image lists) against documented behaviour,
@@ -10523,6 +10597,32 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=ole32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["ole32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OF: Multi Language Support (mlang.dll) as Windows serves it --
+        // the class object and factory, the interfaces its object answers
+        // and the tear-offs they come back on, the code-page and script
+        // tables, and the code pages of a font in a DC. Word's
+        // Mso20win32client.dll asks CoCreateInstance for the class on the
+        // way to laying text out, and an unregistered class ends it
+        // (user/mlang_test/main.c, mingw).
+        name: "mlang_test",
+        cmdline: "qemu_exit run=mlang_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["mlang_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: ole32's compound files (MS-CFB) as Windows reads them --
+        // StgOpenStorage's modes and errors, a root storage's Stat and
+        // interfaces, lookups and enumeration in the directory tree,
+        // streams on both the FAT and the mini FAT chain -- on a file
+        // the test builds byte by byte. Office's Mso20win32client.dll
+        // delay-loads StgOpenStorage and WWLIB.DLL calls it on start-up
+        // (user/stg_test/main.c, mingw).
+        name: "stg_test",
+        cmdline: "qemu_exit run=stg_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["stg_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: shell32's ShellExecuteExW, dropped files, DragAcceptFiles
@@ -12338,6 +12438,13 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // apart from a name the table had no room for (`?user`),
             // which is a cap of the ledger's and not a caller's bug.
             r#"ledger: {"service":"?text","what":"other","detail":2989,"hits":1,"#,
+            // And the name itself, which the row could not carry and
+            // the log must: a `?text` row with nothing else said is a
+            // gap whose identity the one facility for naming gaps threw
+            // away. The bytes go out as the caller passed them, the
+            // ones that are not text escaped, so the name it meant
+            // reads in front of whatever followed it.
+            r#"ledger: a name that is not text, counted under ?text: "ledger_test.exe!\x00\x00bad" (21 bytes, other, detail 0xbad)"#,
             // The table filled up; how many records it then dropped
             // depends on what the boot itself recorded, but their kind
             // does not.
@@ -13610,11 +13717,64 @@ const BASE_SCENARIOS: &[Scenario] = &[
              (access violation) in thread",
             "(crash.exe+0x",
             "writing address 0x0",
+            // What is at the address: nothing, which is what says the
+            // pointer was never memory (`crash_region` is the other
+            // answer).
+            "nothing is mapped at 0x0: free for 0x",
+            "from this page onwards, with nothing mapped below it",
             // The personality (ROADMAP LX seam 2) and session.
             "crash report:   personality nt, session ",
             "crash report:   rax=",
             "crash report:   [rsp+0x00]",
             "stack values above those point into an image)",
+            "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // What is at the address a fault touched (nt::crashreport::Region,
+        // read out of the kernel's own map): a write to a page committed
+        // for reading only, inside a reservation larger than it, so the
+        // report has a protection that is not the reservation's, a run
+        // smaller than it and a base that is not the faulting page. The
+        // `crash` scenario above is the same line for an address nothing
+        // is mapped at. Which of the two a crash is decides where to look
+        // and the registers do not say (ROADMAP OF: Word's write to
+        // 0x11e0040 inside d3d11.dll).
+        name: "crash_region",
+        cmdline: "qemu_exit run=crash.exe args=region",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to a read-only page inside a larger reservation",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "is committed in private memory, and allows reading (0x1000 bytes of it from this \
+             page); reserved at 0x",
+            " for reading and writing",
+            "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // Memory the program had and released, then wrote to: the shape
+        // of Word's own stop (ROADMAP OF). The region line says only that
+        // nothing is mapped there, which an address that was never memory
+        // says too; the map's record of the unmapping (nt::vad::Gone)
+        // names the range, that it was released and whose call released
+        // it, which is the difference between the two.
+        name: "crash_freed",
+        cmdline: "qemu_exit run=crash.exe args=freed",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to memory this program released",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "nothing is mapped at 0x",
+            " was released ",
+            // The test programs are based at 0x140000000: this says the
+            // release was attributed to a call in the program itself and
+            // not to the kernel, which says so in words instead.
+            " ms before this report, by 0x1400",
             "process crash.exe (pid 4) exited with status 0xc0000005",
             BOOT_OK_MARKER,
         ],
@@ -26138,6 +26298,19 @@ fn is_test_dll(file: &str) -> bool {
 /// (THIRD_PARTY.md: Mozilla's, as curl.se publishes them), which Schannel
 /// and crypt32's ROOT store read: a full image trusts the public web, as
 /// Windows does.
+/// The fonts a full image ships in `C:\Windows\Fonts`: Selawik, the
+/// metric-compatible face gdi32 embeds (`user/gdi32/src/font.rs`) and
+/// dwrite reads from the file system, because DirectWrite hands a program
+/// the file and its path (`IDWriteFontFile::GetReferenceKey`,
+/// `GetFilePathW`) and an embedded copy would make those a lie. An image
+/// without them leaves DirectWrite with no font at all.
+const FONT_FILES: [&str; 4] = [
+    "fonts/selawik/selawksl.ttf",
+    "fonts/selawik/selawk.ttf",
+    "fonts/selawik/selawksb.ttf",
+    "fonts/selawik/selawkb.ttf",
+];
+
 fn system_modules() -> Vec<(&'static str, &'static str)> {
     let mut modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
@@ -26146,6 +26319,7 @@ fn system_modules() -> Vec<(&'static str, &'static str)> {
         .collect();
     modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
     modules.push(("user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"));
+    modules.extend(FONT_FILES.iter().map(|&f| (f, "Windows/Fonts")));
     modules
 }
 
@@ -26239,8 +26413,8 @@ mod shard_tests {
 mod release_tree_tests {
     use super::*;
 
-    /// A release is the system: gala's DLLs in System32 and the root
-    /// store, no test DLL or program.
+    /// A release is the system: gala's DLLs in System32, the root store
+    /// and the fonts, no test DLL or program.
     #[test]
     fn release_modules_are_the_system() {
         let m = system_modules();
@@ -26248,6 +26422,14 @@ mod release_tree_tests {
             assert!(m.contains(&(dll, "Windows/System32")), "{dll}");
         }
         assert!(m.contains(&("user/roots/public-roots.pem", "Windows/System32/gala/roots")));
+        // DirectWrite reads its fonts from the file system (gdi32 embeds its
+        // copies), so a full image ships them: without them a program that
+        // lays its text out with dwrite has no font at all, which is what
+        // Word's error 47 was.
+        for font in ["selawksl.ttf", "selawk.ttf", "selawksb.ttf", "selawkb.ttf"] {
+            let path = format!("fonts/selawik/{font}");
+            assert!(m.iter().any(|&(f, d)| f == path && d == "Windows/Fonts"), "{font}");
+        }
         for (file, _) in &m {
             assert!(!is_test_dll(file) && !file.ends_with(".exe"), "{file}");
             assert!(!USER_PROGRAMS.iter().any(|p| file.starts_with(p)), "{file}");

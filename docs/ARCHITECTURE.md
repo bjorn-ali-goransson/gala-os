@@ -1632,6 +1632,16 @@ unless the runs grow, then only the shift of the runs after it (bench
   **MEM_RESET** keeps the contents (Windows may discard them; keeping
   them is allowed) and MEM_RESET_UNDO, alone in the allocation type, then
   succeeds.
+- **What went away**: the map keeps the last 32 ranges the process
+  unmapped (`vad::Gone`: the range, whether it was released,
+  decommitted, or a view of a section or of an image, where the call
+  that did it returned to, and the uptime), written by `vm::free` and
+  `section::unmap_view` under the lock the map is already held with and
+  read by a crash report alone (OBSERVABILITY "Crash reports"). A fault
+  at an address nothing is mapped at cannot otherwise tell memory that
+  went away from an address that was never memory, and no Windows API
+  answers it. `munmap` of a Linux mapping (`unmap_range`) is not
+  recorded.
 - **What the loader registers**: the image (MEM_IMAGE, sections with
   Windows-style protections such as WRITECOPY), the stack reservation,
   and PEB/params/TEB.
@@ -2653,6 +2663,48 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   builds a folder from an unset value asks whether "" exists before it
   deletes "<folder>\*" recursively (ODT's setup.exe does); a "yes" from
   the platform makes that `\*`, the drive's root, and wipes C:.
+- **A name that asks for a directory** (`kernel32_file_test`, measured
+  against Windows): a name whose last character is a backslash asks for
+  a directory, and it counts as the caller wrote it rather than as it
+  canonicalises -- a trailing `/` is not one, nor is `<dir>\.`, and a
+  `\\?\` name counts like any other. The demand holds on every
+  disposition, not only on an open: ramfs refuses such a name over a
+  file whatever the open asked for (STATUS_NOT_A_DIRECTORY, kernel32's
+  ERROR_DIRECTORY), and refuses a create that would make anything but a
+  directory under it with the same status even where nothing is there
+  yet -- so no file is left behind by one, while the same name without
+  the separator creates one, and a create that does make a directory
+  (CreateDirectoryW, or FILE_CREATE with FILE_DIRECTORY_FILE) is content
+  either way. A missing last component is still
+  STATUS_OBJECT_NAME_NOT_FOUND, a missing parent
+  STATUS_OBJECT_PATH_NOT_FOUND, and over a directory the status is the
+  same STATUS_FILE_IS_A_DIRECTORY that the name without the separator
+  gives. The difference between those two names is Win32's alone:
+  CreateFileW reports ERROR_PATH_NOT_FOUND for the name that asked for
+  a directory and the access denial for the one that did not, which is
+  why `full_path` keeps a trailing separator the caller wrote. With
+  FILE_FLAG_BACKUP_SEMANTICS the open succeeds either way. Office's
+  ole32 turns that ERROR_PATH_NOT_FOUND into STG_E_PATHNOTFOUND, which
+  Word reads as "no such document" ("Compound files").
+- **What an open is refused for first** (`kernel32_file_test`, measured
+  against Windows): over something that is already there the refusals
+  are not symmetric. The name's own demand (a trailing separator over a
+  non-directory) and FILE_NON_DIRECTORY_FILE over a directory both come
+  before the collision a FILE_CREATE would report, while
+  FILE_DIRECTORY_FILE over a file loses to it -- that create collides
+  (STATUS_OBJECT_NAME_COLLISION) rather than reporting the kind. ramfs
+  answers them in that order.
+- **A disposition that truncates** (FILE_SUPERSEDE, FILE_OVERWRITE,
+  FILE_OVERWRITE_IF; `kernel32_file_test`, measured against Windows) has
+  nothing to truncate in a directory. Asked together with
+  FILE_DIRECTORY_FILE it is STATUS_INVALID_PARAMETER before the name is
+  read at all: a missing last component, a missing parent and the
+  volume's root all give that one status rather than the error the name
+  would earn. Over a directory that is there it collides with the name
+  instead (STATUS_OBJECT_NAME_COLLISION, kernel32's ERROR_FILE_EXISTS),
+  which is what CREATE_ALWAYS with FILE_FLAG_BACKUP_SEMANTICS reads,
+  where OPEN_ALWAYS on the same name opens the directory and reports
+  ERROR_ALREADY_EXISTS.
 - **Access checks** on opens and creates: "Access checks".
 
 #### Directory change notification
@@ -3826,7 +3878,7 @@ own name).
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs"), gdiplus (GDI+'s flat API: bitmaps, PNG, solid fills, "Other DLLs"), windows.ui (Windows.UI.ViewManagement.UISettings, "Other DLLs") |
-| COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
+| COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, mlang (Multi Language Support's code-page, script and font-link tables, "mlang"), appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
 | other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices (Windows Web Services' XML reader, "Other DLLs"), wintrust, clusapi, resutils, msi (Windows Installer: nothing installed, and reading a database, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), sppc (the Software Protection Platform's client over gala's license store, "Other DLLs"), slc (the Software Licensing Client, sppc's API under its older name, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
@@ -4122,8 +4174,15 @@ reads like a gap in the DLL and not a gap in the list.
 
 `user/kernel32` implements Win32 functions on top of ntdll's exports
 (imported with `raw-dylib`): failures return the documented failure
-value and set the last error (TEB+0x68) from the NTSTATUS. Names ntdll
-also exports (the `Rtl*` unwind functions) are export forwarders
+value and set the last error (TEB+0x68) from the NTSTATUS through
+RtlNtStatusToDosError, which is also what leaves the status in
+TEB.LastStatusValue for RtlGetLastNtStatus. Invariant: a function that
+reports an error of its own instead of the mapped one (CreateFileW's
+ERROR_PATH_NOT_FOUND for a name that asks for a directory, its
+ERROR_FILE_EXISTS for CREATE_NEW) maps the status first and overrides
+only what the mapping returned, never what it recorded -- a program that
+reads the status reads the one the file system gave (ole32 does). Names
+ntdll also exports (the `Rtl*` unwind functions) are export forwarders
 (`build.rs`), as on Windows: defining them in kernel32 would shadow the
 ntdll imports.
 
@@ -5627,6 +5686,46 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   registered under HKCR\CLSID are created from their DLLs ("UI
   Automation"); ProgIDs and out-of-process servers fail as unregistered
   (recorded).
+- **The OLE clipboard** (`clipboard.rs`), over the window station's one
+  ("The clipboard"): OleSetClipboard, OleGetClipboard, OleFlushClipboard
+  and OleIsCurrentClipboard, reached through ntdll's clipboard services
+  rather than user32, because ole32 does not import user32 (programs
+  without windows use it too). All four are functions and none is a
+  `.gstub`: Word's WWLIB delay-loads OleIsCurrentClipboard, and a delay
+  load sees a stub as the honest absence it is and raises 0xc06d007f,
+  where a static import would only have been refused by GetProcAddress.
+  Invariant, measured on Windows 11 24H2 (`ole32_test`): OleInitialize
+  keeps a count of its own beside the apartment's reference count --
+  per thread, a count and not a flag, saturating at zero -- and only
+  OleSetClipboard reads it, refused with CO_E_NOTINITIALIZED until it
+  stands, before the argument is looked at. OleInitialize's answer
+  tracks that count alone (S_OK when it was 0 however many
+  CoInitializeEx already stand, S_FALSE when it was not, and
+  CoInitializeEx's error when the apartment is refused, arming
+  nothing); it does raise the COM count as well as its own, and an
+  OleUninitialize with the count already at zero does nothing whatever,
+  the COM count included, which is what makes an unbalanced call
+  survivable rather than a stolen apartment. The other three never
+  gate, and OleIsCurrentClipboard is S_FALSE in every state, a NULL
+  argument included: the pointer is not read, as on Windows, where
+  `(IDataObject *)1` and 0xdeadbeef are answered rather than faulted on,
+  so the function compares an address against whatever this process last
+  published and does nothing else; the documented OLE_E_NOTRUNNING never
+  appears, not even with no apartment at all. OleGetClipboard(NULL) is
+  E_INVALIDARG in every state, its argument checked before the clipboard
+  is reached. OleSetClipboard(NULL), the documented way to clear the
+  clipboard, clears the window station's. Limit: a data object has
+  nowhere to go while a delayed-rendering entry is kept but never
+  rendered (ROADMAP LD step 3), because publishing its formats means
+  offering them without rendering them -- so a non-NULL object is
+  CLIPBRD_E_CANT_SET, OleGetClipboard has no wrapper over the Win32
+  formats to hand back (E_FAIL), and OleFlushClipboard has nothing to
+  render (S_OK), each recorded. What the success paths answer is not
+  measured yet: the window station the host oracle runs on refuses the
+  clipboard (OpenClipboard fails with ERROR_ACCESS_DENIED), so what it
+  answers past the gate is that station's answer and not the contract,
+  which is why everything above is a decision taken before the
+  clipboard is touched.
 - **Activation filters** (`class.rs`): the process's IActivationFilter,
   which Office's shared code registers early (Word's MSO.DLL delay-loads
   CoRegisterActivationFilter), has its say on every activation before
@@ -5685,6 +5784,72 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   registration keeps the object alive until it has (a revoke meanwhile
   puts the registration out of reach and leaves its reference for the
   borrow to give back).
+- **The class COM serves out of itself** (`class.rs`):
+  CLSID_GlobalOptions has no registry identity at all -- ProgIDFromCLSID
+  and OleRegGetUserType are both REGDB_E_CLASSNOTREG on Windows too --
+  and COM answers for it out of itself, which is why a class store that
+  only knows the registry can never find it; Word's `IfrInitOle` boot
+  task creates it before it opens a document. Measured (`com_test`) and
+  answered here: the in-process contexts answer and CLSCTX_LOCAL_SERVER
+  on its own is REGDB_E_CLASSNOTREG, there being no server; the class
+  object is an IClassFactory and an IUnknown and nothing else, and its
+  instances are IGlobalOptions and IUnknown and nothing else; every
+  CreateInstance is its own object over state that belongs to the
+  process, so an object made after a Set reads what was set; the
+  properties are 1..=8 and a number outside that range is E_INVALIDARG,
+  as are a value outside a property's enumeration and a Query with
+  nowhere to put the answer; COMGLB_APPID is not readable at all
+  (E_FAIL). The defaults are the ones Windows answers rather than the
+  ones it documents: PRIVATE_POOL for the RPC thread pool and HYBRID for
+  the unmarshaling policy, 0 for the rest. A value is kept and read back
+  and nothing acts on it, which the row `ole32.dll!IGlobalOptions::Set
+  (kept, no effect)` says: gala has no exception handling to turn off,
+  no RPC thread pool and no unmarshaling to police.
+- **Compound files** (`storage.rs`, `stg_test`, measured against
+  Windows 11), read-only: StgOpenStorage and StgIsStorageFile over a
+  file on disk (MS-CFB), with the IStorage, IStream and IEnumSTATSTG
+  objects they hand out. Office's Mso20win32client delay-loads the
+  first and WWLIB calls it on start-up. The format is 512-byte sectors,
+  a FAT of sector chains reached through the DIFAT, 128-byte directory
+  entries in a tree, and a mini FAT of 64-byte sectors inside the root
+  entry's stream for everything below the header's cutoff; a stream's
+  size alone decides which chain holds it, at or above the cutoff the
+  FAT and below it the mini FAT. The open works before any
+  CoInitialize and checks the mode hard: a share mode is required,
+  write access demands STGM_SHARE_EXCLUSIVE, STGM_DELETEONRELEASE is
+  STG_E_INVALIDFUNCTION and an unknown bit STG_E_INVALIDFLAG, and a
+  non-zero `reserved` is the one refusal that leaves the caller's
+  pointer untouched where every other writes NULL through it. The
+  file's own errors arrive mapped into the STG_E_ facility, so they
+  follow kernel32's CreateFileW: a file that is not a compound file, or
+  is too short for the header, is STG_E_FILEALREADYEXISTS, a missing
+  one STG_E_FILENOTFOUND, a directory STG_E_ACCESSDENIED, and a missing
+  parent, a trailing separator or the empty name STG_E_PATHNOTFOUND
+  ("A name that asks for a directory"). The root storage's Stat gives
+  the file's full path whatever name it was opened by, STGTY_STORAGE
+  and size 0 where the directory entry says 5; an element's gives the
+  bare entry name and the entry's own times, which are zero in a file
+  nothing has set them in. Names fold case-insensitively
+  (RtlUpcaseUnicodeChar) and are neither trimmed nor prefix-matched,
+  and the tree is ordered by name length before name, so an
+  enumeration is in the format's order and not alphabetical. An element
+  may be open once -- a second open of it is STG_E_ACCESSDENIED until
+  the first is released, and a Clone shares the hold -- and a child
+  open takes STGM_READ with STGM_SHARE_EXCLUSIVE, a deny-write share
+  being STG_E_INVALIDFUNCTION and anything else STG_E_INVALIDFLAG.
+  Reads stop at the end of a stream with S_OK and a short count, Seek
+  may go past it, and a negative result or an unknown origin is
+  STG_E_INVALIDFUNCTION.
+
+  **Limits**, each recorded where it is reached (OBSERVABILITY): every
+  call that would change a compound file is STG_E_ACCESSDENIED, which
+  is what Windows answers for a storage opened for reading -- what gala
+  lacks is the write-capable open behind it, which hands out a
+  read-only storage and records that it did, so a program that means to
+  write finds out at the write and not at the open; IStorage::CopyTo
+  and MoveElementTo; the IPropertySetStorage, IRootStorage and IMarshal
+  interfaces Windows' storage answers (E_NOINTERFACE here); an
+  exclusion list (refused) and a priority storage (ignored).
 - **Objects in streams and storages** (`persist.rs`): a persisted
   object is its
   class id and then whatever the object writes. WriteClassStm writes
@@ -5922,25 +6087,6 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   and RoGetAgileReference are built on it. CoRegisterMessageFilter keeps
   an STA's filter (CO_E_NOT_SUPPORTED elsewhere); with no calls between
   apartments it is never called.
-- **The OLE clipboard**: gala has a window station's clipboard ("The
-  clipboard") but no OLE one -- no process has handed ole32 an
-  IDataObject to publish -- so OleIsCurrentClipboard answers S_FALSE,
-  which is what Windows answers about any object that is not the current
-  one. Measured in every initialisation state, including none at all,
-  where the documented OLE_E_NOTRUNNING never came; the pointer is not
-  read, as on Windows, where `(IDataObject *)1` is answered rather than
-  faulted on (`ole32_test`). It matters that this one is an export and
-  not a stub: Word's OART.DLL delay-loads it, and a delay load that
-  resolves to nothing is not a recorded gap but an unhandled 0xc06d007f.
-  OleGetClipboard, OleSetClipboard and OleFlushClipboard open the
-  clipboard and stay unimplemented until they can be measured from a
-  desktop -- the window station the host probes run on refuses it
-  (OpenClipboard fails with ERROR_ACCESS_DENIED however often it is
-  retried), so what they answer there is the station's answer and not
-  the contract. Two edges did survive that, because the argument check
-  precedes the clipboard: OleGetClipboard(NULL) is E_INVALIDARG in every
-  state and OleSetClipboard(NULL) CO_E_NOTINITIALIZED without an
-  apartment.
 - **Windows Runtime** (`winrt.rs`, `roerror.rs`; `api-ms-win-core-winrt-*`
   and combase.dll's forwarders). HSTRINGs: the header is laid out as
   Windows lays it out (flags, length, two unused words, the text
@@ -6435,33 +6581,72 @@ built for x64 and x86.
   content not of the type) leaves, char's value and a failed typed
   load's parse error.
 
-### xmllite (XmlLite's reader)
+### xmllite (XmlLite's reader, writer and writer outputs)
 
-XmlLite's pull reader, `CreateXmlReader` and `IXmlReader`
-(`user/xmllite`, `xmllite_test`; ROADMAP OF). Word delay-loads
-`CreateXmlReader` and ends on 0xc06d007f without it; SQL Server LocalDB
-imports it and `CreateXmlWriter`. Built for x64, x86 and ARM64. The
-reader is `gala_xml`'s `Scan`, so it refuses what msxml6's DOM and
-webservices' reader refuse, in the same words.
+XmlLite's pull reader, its writer and the outputs the writer writes
+through: `CreateXmlReader`/`IXmlReader`, `CreateXmlWriter`/`IXmlWriter`
+and `CreateXmlWriterOutputWithEncodingName` /
+`CreateXmlWriterOutputWithEncodingCodePage` (`user/xmllite`,
+`xmllite_test`; ROADMAP OF). Word delay-loads the reader, the writer and
+the first of the two output creators, and ends on 0xc06d007f without any
+of them; SQL Server LocalDB imports the reader and the writer. Built for
+x64, x86 and ARM64. The reader is
+`gala_xml`'s `Scan`, so it refuses what msxml6's DOM and webservices'
+reader refuse, in the same words; the writer is its own (`writer.rs`),
+and every byte it writes is measured against Windows' writer.
 
 - **The reader**: `CreateXmlReader(IID_IXmlReader, &reader, NULL)`;
   another interface is E_NOINTERFACE and an IMalloc passed is ignored
   (gala allocates from the process heap), both recorded. A reader with
   no input has node type None, is not at end of file and its ReadState
-  is **Closed**, measured, where the documentation says Initial;
-  ConformanceLevel is Document and DtdProcessing Prohibit. Its
+  is **Closed**, measured, where the documentation says Initial. Its
   references are its own (no IMalloc, no apartment); the last Release
   frees it.
+- **The properties** (`XmlReaderProperty`, all eight measured, and the
+  reason the whole enumeration is here rather than the one property
+  that stopped Word: Word sets MultiLanguage on a reader before it
+  reads its first part, and a reader that refuses it ends the
+  process). The defaults are MultiLanguage 0, ConformanceLevel
+  Document, RandomAccess 0, XmlResolver 0, DtdProcessing Prohibit,
+  ReadState Closed, MaxElementDepth 256 and MaxEntityExpansion 100000,
+  while the two values past the end of the enumeration are E_NOTIMPL
+  both ways and GetProperty with nowhere to put the answer is
+  E_INVALIDARG -- the pointer is checked before the property, so a
+  property that is E_NOTIMPL with somewhere to put it is E_INVALIDARG
+  without. A conformance level or a DTD setting outside its own
+  enumeration is E_INVALIDARG and the old value stays, ReadState is
+  read-only (E_ACCESSDENIED) and the two limits take any value.
+  MultiLanguage and XmlResolver hold an object with a reference of the
+  reader's own: GetProperty hands the pointer back with another,
+  setting the property to NULL or releasing the reader gives the
+  reader's up, and the object is never asked for an interface -- which
+  is what lets a program let go of its own reference the moment it has
+  set the property. The properties lock at the **first Read** and not
+  at SetInput: after it every SetProperty is E_ACCESSDENIED (the
+  object properties included, and a refused set keeps no reference)
+  while GetProperty still answers, and a reader in the Error state,
+  past the end of its document, or whose input was taken away takes
+  them again. What the kept values do: MaxElementDepth stops the Read
+  that would go past it with SC_E_MAXELEMENTDEPTH and leaves the
+  reader in the Error state (0 is no limit), ConformanceLevel Auto
+  reads exactly as Fragment does, DtdProcessing Parse is taken and
+  parses nothing (recorded), and MaxEntityExpansion is enforced by
+  neither reader -- Windows expands past it and reports nothing, and
+  gala keeps the value and does the same.
 - **The input**: `SetInput` asks the object for IStream and then
   ISequentialStream (anything else is E_NOINTERFACE, recorded) and
   reads it whole in 64 KiB calls until one gives nothing, which is what
   Windows' reader does too -- measured: QueryInterface and Read, no
   Seek, no AddRef or Release, so a program may hand it a stream that can
   do no more. XmlLite reads the document as its caller pulls nodes;
-  gala's scanner works on the whole text, so the decoding error of
-  bytes that are not the encoding they are taken for comes out of
-  SetInput and not of a Read. `SetInput(NULL)` leaves the reader as
-  CreateXmlReader made it, and SetInput again starts it over.
+  gala's scanner works on the whole text, so SetInput decodes it there
+  and then -- but bytes that are not the encoding they are taken for
+  are answered by the **first Read**, which is where Windows answers
+  for them (WC_E_XMLCHARACTER: a character XML does not allow, not an
+  encoding it cannot read), and not by SetInput, which is S_OK and
+  leaves the reader Initial. `SetInput(NULL)` takes the input away and
+  leaves the reader Initial -- not Closed, measured -- with the
+  properties it was given, and SetInput again starts it over.
 - **The nodes** (`reader.rs`): each Read hands out one node -- the XML
   declaration (type 17, `version` and `encoding` its attributes), white
   space (13), a comment (8), an element (1), text (3), a CDATA section
@@ -6483,9 +6668,14 @@ webservices' reader refuse, in the same words.
   MoveToAttributeByName (local name and namespace URI; no namespace
   asked for means the attributes in none) and MoveToElement, with the
   getters answering for the attribute the reader has moved to. A
-  fragment is read when ConformanceLevel is set to Fragment before
-  SetInput (`gala_xml`'s `allow_fragment`): any number of root
-  elements, every other rule unchanged.
+  fragment is read when ConformanceLevel is set to Fragment or Auto
+  before SetInput (`gala_xml`'s `allow_fragment`): any number of root
+  elements, and character data outside them -- the content of an entity
+  rather than a document. Such text is a node like the text inside an
+  element, entities expanded, with the white space in front of it part
+  of it, while a run of white space that markup or the end of the text
+  follows is a Whitespace node of its own; every other rule unchanged
+  (all measured, both levels, in `xmllite_test`'s `LOOSE` table).
 - **A document that is not well formed** fails the Read that meets it,
   with the code XmlLite answers for what the reader was looking for,
   and leaves the reader in the Error ReadState, which every later Read
@@ -6493,9 +6683,9 @@ webservices' reader refuse, in the same words.
   XmlError (`error_code`): 24 of them measured on Windows -- among them
   WC_E_ELEMENTMATCH, WC_E_ROOTELEMENT, WC_E_CDSECT, WC_E_COMMENT,
   WC_E_PI, WC_E_TEXTXMLDECL, WC_E_DTDPROHIBITED, NC_E_QNAMECHARACTER,
-  NC_E_UNDECLAREDPREFIX and NC_E_EMPTYURI -- while
-  SC_E_MAXELEMENTDEPTH (nesting past gala's 256) and MX_E_ENCODING are
-  named from the SDK's `xmllite.h` and not measured. The same table is
+  NC_E_UNDECLAREDPREFIX and NC_E_EMPTYURI, SC_E_MAXELEMENTDEPTH for
+  nesting past MaxElementDepth, and WC_E_XMLCHARACTER for bytes that
+  are not the encoding the document is taken for. The same table is
   the test's (`xmllite_test`'s `BADS`), so a reason added belongs in
   both. One document is refused one Read earlier than Windows refuses
   it: text that ends inside a CDATA section is a CDATA node to
@@ -6505,10 +6695,143 @@ webservices' reader refuse, in the same words.
   difference over.
 - **Limits**, each recorded when a program meets it: ReadValueChunk and
   GetBaseUri are not implemented, a DTD is never parsed (DtdProcessing
-  stays Prohibit, XmlLite's own default), the attribute getters answer
-  with the position of the element's node since the scan keeps none per
-  attribute, and the writer (`CreateXmlWriter`) ends the process
-  (`gala_stubs`) so the ledger names it when something wants one.
+  Parse is taken all the same, and the declaration is still refused as
+  Prohibit refuses it), the encoding an XML declaration names is never
+  read -- where it is one gala's decoder does not know, Windows asks
+  the MultiLanguage object for the character set
+  (`IMultiLanguage2::GetCharsetInfo`) and answers MX_E_ENCODING, or
+  MX_E_ENCODINGSIGNATURE with no object to ask -- and the attribute
+  getters answer with the position of the element's node since the scan
+  keeps none per attribute.
+
+The writer is `writer.rs`: `CreateXmlWriter(IID_IXmlWriter, &writer,
+NULL)` and the 32 methods of `IXmlWriter`. What it writes is measured,
+not derived from the standard -- `xmllite_test`'s `writer` module writes
+fifty cases with the same calls on Windows and under gala and compares
+the bytes (3342 checks for the DLL in all, the reader's and its
+properties' among them). The
+parts a program can tell apart:
+
+- **When bytes reach the stream**: never until they are asked for. Flush
+  hands over what there is; the last Release closes every element still
+  open and then hands over. WriteEndDocument closes the open elements
+  and writes nothing itself, so a program that ends its document and
+  never flushes gets the same bytes from Release. It ends what an
+  element opened and not what WriteStartDocument started: with no
+  element written it is WR_E_INVALIDACTION (a comment on its own is not
+  a document to end), with one it is S_OK whether a document was
+  started or not, and a document is ended once -- a second call, and
+  anything written after the first, is out of place. A writer whose last
+  call killed it (below) keeps the unfinished document it had and closes
+  nothing, which is why a refused doctype leaves a half-written `<r` in
+  the stream.
+- **The output**: SetOutput asks the object for IStream and then
+  ISequentialStream (anything else is E_NOINTERFACE, recorded) and keeps
+  the one reference its QueryInterface took, which the last Release
+  gives back. It writes with ISequentialStream::Write and commits with
+  IStream::Commit, and asks for nothing else -- no Seek, no SetSize, no
+  Stat, no Clone -- so a stream that can only write is enough; Commit is
+  called only for an output that answered as an IStream, since a
+  sequential stream has no such method. `SetOutput(NULL)` gives the
+  output up, and every write is E_UNEXPECTED without one while Flush is
+  S_OK. A second SetOutput starts the document over and keeps the
+  properties.
+- **The encoding** is the output's and not the writer's (`output.rs`):
+  `CreateXmlWriterOutputWithEncodingName` and
+  `CreateXmlWriterOutputWithEncodingCodePage` wrap a stream and the
+  encoding to write it in, as an `IXmlWriterOutput` -- an object whose
+  only interface is its own IID (`{C1131708-0F59-477F-9359-7D332451BC1A}`),
+  which answers even IUnknown with E_NOINTERFACE, measured. SetOutput
+  takes a stream or one of these, so a writer handed a plain stream
+  writes UTF-8 and says so. What XmlLite takes is 25 names and 22 code
+  pages: UTF-8, UTF-16 and UTF-16BE, UCS-4 (and its aliases), US-ASCII
+  and the eighteen single-byte pages 1250-1258 and 28591-28599
+  (`codepages.rs`: each table taken from the host's code page data and
+  then checked byte by byte through XmlLite's own writer, which is the
+  measurement and not a copy of anyone's table); everything else leaves
+  a writer that answers MX_E_ENCODING for every write while Flush is
+  S_OK and the properties stay unlocked, revived by a good output. The
+  document is held as its own text and encoded on the way to the
+  stream, so where the encoding has no byte for a character: an
+  attribute value or character data gets a hexadecimal reference, while
+  a comment, a CDATA section or raw text -- where a reference is not
+  allowed -- kills the encoder. A dead encoder's
+  hand-over is E_FAIL; the bytes before the character that killed it
+  are paid at the next hand-over, and nothing after it ever reaches the
+  stream.
+- **The declaration** is WriteStartDocument's and no other call's: an
+  element, a comment or a doctype written with no document started gets
+  none. Inside that call the order was measured step by step -- a
+  document started already, a declaration written already or any byte
+  written is WR_E_INVALIDACTION, which kills the writer at Document
+  level and leaves it alive in a fragment; then the declaration, which
+  needs an output (E_UNEXPECTED without one) and says the standalone
+  just asked for; then the conformance level, so a fragment gets its
+  declaration on the stream and the refusal for an answer, which is
+  what the measurement says and what no reading of the documentation
+  would give; then the output again, for a call whose declaration was
+  left out. A declaration left out settles nothing: a document-level
+  call that failed for want of an output fails the same way again,
+  while one whose declaration reached the stream is WR_E_INVALIDACTION
+  from then on. The call locks the properties whether or not a byte
+  came of it, so a document started with OmitXmlDeclaration writes
+  nothing and locks them all the same -- and a fragment's refused call
+  with the declaration omitted writes nothing and locks nothing. A
+  plain stream output never gets a byte order mark, whatever the
+  ByteOrderMark property says; an output with a wide encoding does.
+- **The properties** are six slots read back exactly as they were set
+  (MultiLanguage, Indent, ByteOrderMark, OmitXmlDeclaration,
+  ConformanceLevel and an undocumented fifth that reads 0); the sixth
+  and anything past it is E_NOTIMPL both ways and leaves the out value
+  alone, and nowhere to put the answer is E_INVALIDARG. It is **writing**
+  that locks them, not SetOutput: from the first byte on, SetProperty is
+  E_ACCESSDENIED while GetProperty still answers.
+- **A refusal either kills the writer or it does not**, and which one it
+  is was measured call by call. A call that does not belong where the
+  document now is kills it -- an attribute with no start tag open, a
+  processing instruction named `xml`, a second root element at Document
+  level, a second or late WriteStartDocument, a doctype after the root
+  -- and every write after it answers that same code until a new output
+  revives it, while Flush still answers S_OK. A refusal about the call's
+  own arguments does not: a bad name (WC_E_NAMECHARACTER), an end tag
+  with nothing open (E_INVALIDARG), a duplicate attribute, an `xmlns`
+  attribute (WR_E_NSPREFIXDECLARED), a bad `xml:space`
+  (WR_E_INVALIDXMLSPACE), text at the top of a document
+  (WR_E_INVALIDACTION), non-white space to WriteWhitespace
+  (WR_E_NONWHITESPACE), a bad character or surrogate
+  (WC_E_XMLCHARACTER), a qualified name in a namespace nothing declared
+  (WR_E_NAMESPACEUNDECLARED). Every write checks in one order --
+  dead, then place, then whether there is an output, then its arguments
+  -- so a bad name writes nothing and leaves the tag it was going into
+  open.
+- **Namespaces**: an element's prefix with no URI given and none in
+  scope is WR_E_NSPREFIXWITHEMPTYNSURI; a URI with no prefix is written
+  as `xmlns="..."`. An attribute's declaration goes at the **end** of
+  the start tag, not beside the attribute: an `xmlns:p` attribute
+  declares `p` inline, an attribute with a URI nothing declares gets a
+  prefix invented (`p` and one more than the prefixes in scope, so `p1`
+  where nothing is declared and `p2` beside one that is), and an
+  attribute with a prefix nothing declares and no URI quietly loses its
+  prefix.
+- **Escaping**: an attribute's value escapes `<`, `&` and `"` by name
+  and a tab or a line end by reference, leaving `>` and `'` as they
+  are; character data escapes `<`, `&` and `>`, leaves `"`, `'` and a
+  tab, and writes every line end as CRLF. WriteRaw passes text through.
+  A character reference is `&#x` and upper-case hexadecimal with no
+  leading zeros. WriteString(NULL) is S_OK and writes nothing, while
+  WriteComment(NULL) writes `<!---->`. A comment keeps what would end it
+  apart with a space instead of refusing it (`no -- allowed?` comes out
+  `no - - allowed?`), and a CDATA section is split around a `]]>` in its
+  text.
+- **Indenting** (Indent on): CRLF and two spaces a level before a node
+  that stands on a line of its own, and an end tag indented only where
+  the element held nodes and no character data.
+- **Limits**, each recorded when a program meets it: WriteAttributes,
+  WriteNode and WriteNodeShallow copy from an `IXmlReader` and are
+  E_NOTIMPL, the MultiLanguage property is kept and not acted on (the
+  encoding comes from the output and from nowhere else), and a doctype
+  with a public identifier and no system identifier is a shape no
+  measurement covers.
 
 ### RPC: rpcrt4
 
@@ -6700,7 +7023,14 @@ of their own, clients of it) is the yardstick.
   Go and the JVM) succeed; timers run on the 1 ms tick whatever is asked.
 - **shlwapi** (`shlwapi_test`): path and string functions
   (PathCanonicalize splits components at backslashes only, PathCombine
-  resolves a file part against the directory's drive, comparisons go
+  resolves a file part against the directory's drive, PathIsRootW reads
+  the string alone and never the file system -- `X:\` for a letter of
+  Latin-1, a lone backslash, or two backslashes and a body holding at
+  most one more and not ending in one, and after exactly `\\?\` a
+  drive's `X:\`, a volume's `Volume{<guid>}\` or `UNC\` and such a
+  body (a `?` right after the two backslashes only ever starts that
+  prefix, so `\\?a` is not a root where `\\.a` is; measured on 26300,
+  the shapes kept by `shlwapi_test`), comparisons go
   through kernel32's CompareStringW in the user's locale, StrCmpLogicalW
   compares digit runs by value; SHDeleteKeyW finds RegDeleteTreeW at run
   time so loading shlwapi does not pull in advapi32), URL functions
@@ -9755,6 +10085,18 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   popup `window::activate` recorded with its owner, while it is there
   and shown; ShowOwnedPopups hides the shown owned popups and shows the
   ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
+- **Touch** (`window.rs`): gala has no touch input, so no WM_GESTURE and
+  no WM_TOUCHHITTESTING is ever sent; what a program calls to arrange
+  them only answers. RegisterTouchHitTestingWindow, which MSO's UI
+  delay-loads, is a per-**thread** rule: a window of the calling thread
+  takes it with any value, including values no header names, repeat
+  calls and going back to the default among them, and leaves the last
+  error as it was; a window of another thread of the same process, a
+  window of another process, and the desktop are ERROR_ACCESS_DENIED;
+  a handle that is no window is ERROR_INVALID_WINDOW_HANDLE, and the
+  handle is looked at before the value, so a NULL window with a nonsense
+  value is still 1400. `gui_test` has the calling thread's own windows
+  and every refusal, `paint_thread_test` the other thread's.
 - **A box with nothing to show it** (`lib.rs`): MessageBoxW writes the
   caption and the text to the program's standard error and answers IDOK,
   as if its only button had been pressed; and it records what was said
@@ -10695,9 +11037,34 @@ then riched20.dll).
   (rectangles by both corners), but sizes such as pen widths, fonts and
   blit sizes are not scaled yet. Drawing clips to the surface and the
   DC's clip.
-- **Text** (`font.rs`), two families:
-  - Proportional faces (Segoe UI, MS Shell Dlg, the default, any face
-    not known to be fixed pitch) are Selawik (Segoe UI's metrics; four
+- **Text** (`font.rs`): a table, `FAMILIES`, decides which font
+  families exist here -- 35 of them, each with the weights and styles it
+  answers for, measured on Windows 11 24H2 (`gdi32_test`'s
+  `font_families`) -- and two fonts draw them all. The table is what both
+  the realizer (`family_of`, which `metrics` reads) and the enumerator
+  (`EnumFontFamiliesExW` in `state.rs`) answer from, so **the face a
+  program is given is always a face the system enumerates**; keeping
+  those two apart is what left a program laying text out in a face it
+  could not then find. A family answers an asked weight with the nearest
+  of its own faces' weights, the lighter where two are equally near
+  (`snap_weight`: Segoe UI, whose faces are 400 and 700, answers 350 with
+  400 and 600 with 700, the weights between being the Semilight and
+  Semibold families' own). A name no family has is substituted, as
+  Windows substitutes a name it has no font for: "Courier New" where the
+  request asks for fixed pitch (FIXED_PITCH, FF_MODERN, or the name of a
+  fixed-pitch family gala does not enumerate -- Courier, Terminal,
+  Fixedsys, Cascadia Mono, Cascadia Code), "Arial" otherwise, both
+  measured. Every substitution leaves a "reached" row naming both,
+  `gdi32.dll!font(<asked> -> <family>)`, which is what to read when a
+  program lays text out in the wrong face or cannot find the face it was
+  given (first seen only, by a hash of the name over 64 buckets: a
+  collision drops a row, never the answer). Windows has
+  families besides these which it does not enumerate for ANSI_CHARSET
+  either -- its raster Courier, Terminal, Fixedsys, MS Sans Serif, MS
+  Serif and System, whose faces are OEM -- and gala, whose faces are
+  Latin, has none of them. The two fonts:
+  - Proportional families (Segoe UI, MS Shell Dlg, Arial, the default,
+    every family not marked fixed pitch) are Selawik (Segoe UI's metrics; four
     weights embedded in gdi32.dll), rasterized at the font's em by
     fontdue (`no_std` + `alloc` over `gala_heap`) and kept in a glyph
     cache (256 buckets of 16, its own spin lock; **lock order: taken
@@ -10715,16 +11082,18 @@ then riched20.dll).
     hyphen) has no width and draws nothing, as Segoe UI's zero-width
     glyphs on Windows (`gdi32_test`; ODT's setup.exe wraps its texts in
     U+202A/U+202C); any other missing glyph is drawn as `?`.
-  - Fixed-pitch faces (Courier New, Consolas, Lucida Console, other
-    known fixed faces, FIXED_PITCH, or FF_MODERN without a name) are
-    Noto Sans Mono's bitmaps (16/20/24/32 px, regular and bold) scaled
-    to the cell (4/3 of the em) with four samples per pixel, one advance.
+  - Fixed-pitch families (Courier New, Consolas, Lucida Console, Lucida
+    Sans Typewriter) are Noto Sans Mono's bitmaps (16/20/24/32 px,
+    regular and bold) scaled to the cell (4/3 of the em) with four
+    samples per pixel, one advance. Being bitmaps, they enumerate as
+    RASTER_FONTTYPE and have no file for GetFontData; a mono TrueType
+    would make them scalable faces like the rest (ROADMAP).
   - Both: italic slant, underline, strike-out; TextOut alignment
     (TA_RIGHT/CENTER, TA_BOTTOM/BASELINE) and OPAQUE backgrounds;
     ExtTextOutW (ETO_OPAQUE, ETO_CLIPPED, lpDx); GetTextMetricsW,
     GetTextExtentPoint32W, GetTextExtentExPointW (fit and partial
-    widths, with lpnFit only those of what fits, as documented) and
-    GetTextFaceW from the same metrics. GetTextCharsetInfo,
+    widths, with lpnFit only those of what fits, as documented) from the
+    same metrics (GetTextFaceW is below, with the family table it reads). GetTextCharsetInfo,
     GetTextCharset and GetTextMetricsW's tmCharSet report the character
     set the font is *realized* with, which is never DEFAULT_CHARSET: a
     LOGFONT asking for that only asks the font mapper to choose, and
@@ -10769,22 +11138,87 @@ then riched20.dll).
   SelectClipRgn/ExtSelectClipRgn, ExcludeClipRect, IntersectClipRect,
   GetClipBox, GetClipRgn; drawing and GetPixel respect it (GetPixel
   outside: CLR_INVALID); FillRgn, PaintRgn, GetRegionData/
-  ExtCreateRegion.
+  ExtCreateRegion. IntersectClipRect and ExcludeClipRect answer
+  COMPLEXREGION whatever the clip ends up being -- even the one rectangle
+  GetClipBox then calls SIMPLEREGION -- as Windows does, batching or no
+  (`gdi32_test`); only SelectClipRgn answers the true complexity.
 - **Palettes** (`palette.rs`) are kept, selected and queried but change
   nothing on the true-colour display (RealizePalette maps 0 entries,
   GetNearestColor is the colour). GdiFlush: nothing is batched.
 - **DC state and font queries** (`state.rs`): SaveDC/RestoreDC keep
   copies of the DC in a list of their own (spin-locked; **lock order:
   taken inside the object table's**), dropped with the DC; the DC brush
-  and pen colours (white and black at first); CreateFontA/IndirectA and
-  GetTextFaceA (CP_ACP); GetCharWidthW/GetCharWidth32W from the same
+  and pen colours (white and black at first); CreateFontA/IndirectA;
+  GetCharWidthW/GetCharWidth32W from the same
   advances as the text functions; GetFontData reads the selected Selawik
   file's tables by tag (table 0: the whole file; GDI_ERROR for the
-  bitmap fixed-pitch font, which has no file); EnumFontFamiliesExW knows
-  one family, Selawik (an empty name enumerates its Regular face, its
-  name each of its four faces; other names nothing); EnumFontsW is it
-  with DEFAULT_CHARSET (ENUMLOGFONTEXW and NEWTEXTMETRICEXW start with
-  what FONTENUMPROCW takes).
+  bitmap fixed-pitch families, which have no file).
+  GetTextFaceA and GetTextFaceW report the family the selected font
+  realized with. Both copy at most `n` units and always terminate what
+  they copied; what they answer is what they wrote, the terminator
+  counted by the wide form and not by the ANSI one ("Arial" answers 6 and
+  5), and with no buffer both answer the whole length, terminator
+  included; `n` <= 0 writes nothing and answers 0. Every family's name is
+  ASCII, which no ANSI code page changes.
+  EnumFontFamiliesExW walks `FAMILIES`: an empty name lists every family
+  once, at its lightest upright face (that is how a program finds the
+  font list); a name lists that family's upright faces by ascending
+  weight, then its italics, with `elfStyle` and `elfFullName` composed
+  from the weight's name and `elfScript` "Western"; a name no family has
+  gives no callback at all, as Windows gives none for a family it does
+  not have. Every enumeration leaves a "reached" row with the name it
+  asked for and the faces it was given as the detail
+  (`gdi32.dll!EnumFontFamiliesExW(<name>)`, `(*)` for the whole table),
+  so a program's idea of the font list is readable and a name that was
+  answered with nothing is a row with detail 0, not a silence. A
+  character set other than ANSI_CHARSET or DEFAULT_CHARSET enumerates
+  nothing and leaves an "unsupported" row
+  (`gdi32.dll!EnumFontFamiliesExW(charset <n>)`): gala's faces are Latin,
+  and Windows would list the faces covering that set. (A named family asked with DEFAULT_CHARSET repeats its faces once
+  per character set it covers on Windows -- Arial 34 times -- which one
+  Latin family does not; a test must ask a named family with
+  ANSI_CHARSET.) EnumFontsW is EnumFontFamiliesExW with DEFAULT_CHARSET
+  (ENUMLOGFONTEXW and NEWTEXTMETRICEXW start with what FONTENUMPROCW
+  takes).
+  GetOutlineTextMetricsW and GetOutlineTextMetricsA answer the metrics a
+  program needs beyond TEXTMETRIC: the design box, the typographic and
+  Macintosh ascents, the sub- and superscript boxes, the rules, the
+  PANOSE numbers and the four names. The whole answer is the 232-byte
+  struct (the same size in both forms) followed by the family, face,
+  style and full names, and the `otmp*Name` fields are **byte offsets
+  from the start of the struct**, not pointers, whatever their PSTR
+  declaration says -- which is what lets a program copy the answer about.
+  With no buffer the answer is that size; a buffer shorter than the
+  struct is filled as far as it goes and that much is the answer, its
+  `otmSize` still the whole; a buffer with room for the struct but not
+  for the names is refused outright and nothing is written; a buffer with
+  room to spare is cleared past the answer. All measured
+  (`gdi32_test`). Every field but two is a field of the realized file's
+  head, hhea, OS/2 or post table scaled to the em (`font::outline`) and
+  rounded to the nearest pixel, and the two are GDI's own fakes:
+  `otmsCapEmHeight` is half the em and `otmsXHeight` a quarter of it
+  whatever the face says (Arial's OS/2 carries a cap height of 1467 units
+  -- 11 pixels at an em of 16 -- and GDI answers 8). `otmfsSelection`
+  carries the realized style, with a slant gala synthesized in it the way
+  Windows reports one it simulated: bit 0 set, the regular bit giving way
+  to it, and nothing elsewhere -- an Impact italic, which has no italic
+  face, answers an italic angle of 0 and the upright slope. Where the
+  family enumerates italics of its own the face a program selected does
+  exist as far as every other call is concerned, so the slant is named in
+  the face and style names too ("Arial Bold Italic") and the angle is
+  gala's own quarter-height shear, -140 tenths of a degree with a slope
+  of 4 up to 1 along, not a design angle of a file gala does not have.
+  The bitmap fixed-pitch families answer the shape a raster face answers
+  on Windows (measured on MS Sans Serif and Small Fonts): the fields the
+  bitmaps have, an em square that is the strike's em in pixels rather
+  than a design grid, PANOSE's first four numbers, and no style or full
+  name at all. Every answer leaves a "reached" row with the family and
+  the size of the answer
+  (`gdi32.dll!GetOutlineTextMetricsW(<family>)`), so a program building a
+  font list is on the stream whether or not it then says anything itself
+  -- Word's print boot task (`IfrInitPrint`) reads these for the
+  emergency DC's font, and a refusal there was the whole of what it
+  reported.
 - **Older calls** (`older.rs`, Delphi's VCL): GetTextExtentPointW is
   GetTextExtentPoint32W, CreatePenIndirect CreatePen, UnrealizeObject
   TRUE for brushes and palettes (nothing realized to reset),
@@ -10798,7 +11232,7 @@ then riched20.dll).
   (BeginPath .. WidenPath, PolyBezierTo; drawing is direct), enhanced
   metafiles (NULL/FALSE/0), printing (no DC is a printer DC: SP_ERROR),
   OpenGL pixel formats (no ICD: 0/FALSE), GetICMProfileW,
-  GetOutlineTextMetricsW, EnumFontFamiliesExA, ExtEscape (0, the escape
+  EnumFontFamiliesExA, ExtEscape (0, the escape
   not implemented), GdiComment, and the kernel-mode display thunks
   DXVK imports (19 `D3DKMT*` functions: STATUS_NOT_SUPPORTED, recorded;
   DXVK calls them only for resources shared between devices).
@@ -10815,6 +11249,71 @@ then riched20.dll).
   hears that there are no adapters, and finds lavapipe in the registry
   after it -- `vk_test` expects the row that says it heard so beside
   the device it then used.
+
+### mlang (Multi Language Support)
+
+What Office's shared code asks for on the way to laying text out: which
+code pages a code page or a font covers, and a font for a character the
+selected one does not cover (`mlang_test`; ROADMAP OF). `user/mlang`,
+built for x64 only -- there is no 32-bit mlang.dll yet, so a 32-bit
+program asking for the class leaves the absent-key row that says so.
+
+- **Registration**: CMultiLanguage ({275C23E2-3747-11D0-9FEA-00AA003F8646},
+  no ProgID) under `HKLM\SOFTWARE\Classes\CLSID` (the registry seed),
+  InprocServer32 `%SystemRoot%\System32\mlang.dll`, ThreadingModel Both;
+  ole32's CoCreateInstance loads it and calls DllGetClassObject. The
+  class object answers IUnknown and IClassFactory only (every other IID
+  is recorded); LockServer counts nothing, because the DLL never unloads
+  (DllCanUnloadNow is S_FALSE); CreateInstance with an outer unknown is
+  CLASS_E_NOAGGREGATION, which is Windows' own answer and is recorded as
+  unsupported, since an inner object that delegates is the half gala
+  does not have.
+- **Objects** (`com.rs`): one object per creation, each with its own
+  references. IUnknown and IMultiLanguage are the object itself;
+  IMultiLanguage2, IMultiLanguage3, IMLangCodePages, IMLangFontLink,
+  IMLangFontLink2 and IMLangLineBreakConsole each come back on a
+  tear-off -- a separate object, with its own references, holding one on
+  the object -- which is the shape Windows' own answers have. The
+  methods three of those interfaces share (the code-page and font-link
+  pairs) are one implementation behind all of them.
+- **Tables** (`tables.rs`): one row per code page, each with its
+  FONTSIGNATURE bit and its SCRIPT_ID where it has one.
+  CodePageToCodePages gives the bit of the code pages that have one (874,
+  932, 936, 949, 950, 1250-1258) and E_FAIL for every other, 1200, 1201,
+  65001 and 20127 among them. CodePagesToCodePage gives the caller's
+  default code page when the mask covers it, otherwise the page of the
+  lowest bit in the mask, otherwise the default -- so an empty mask with
+  no default is E_FAIL and an empty mask with one gives it back.
+  CodePageToScriptID gives the script of a code page (437 and the Latin
+  pages sidAsciiLatin, 932 sidKana, 936 sidHan, 949 sidHangul, 950
+  sidBopomofo, and Thai, Cyrillic, Greek, Hebrew and Arabic their own)
+  and for every other code page leaves the caller's byte untouched and
+  answers E_FAIL. Measured against Windows' mlang.dll, which is what
+  `mlang_test` keeps.
+- **Fonts** (`fonts.rs`): gdi32 is the only source of answers.
+  GetFontCodePages selects the font into the DC and reads fsCsb[0] out of
+  GetTextCharsetInfo ("gdi32"), so a face gala ships answers FS_LATIN1; a
+  handle that is not a font, a DC that is not one and a NULL argument
+  are each E_FAIL with the out zeroed, as Windows has them. MapFont
+  copies the DC's current font (GetObjectW into a LOGFONTW,
+  CreateFontIndirectW out of it), because gala ships one Latin family
+  and there is no other face to map to: a mask that face does not cover
+  is E_FAIL and a recorded gap naming the uncovered bits, which is what
+  a program needing a script gala has no font for will leave behind. The
+  handles MapFont hands out are remembered on the object, under a
+  `gala_lock` lock named `mlang.dll!mapped fonts`, and deleted by
+  ReleaseFont, by ResetFontMapping or when the object goes; the lock is
+  let go before gdi32 is called.
+- **What it does not answer**: the conversion and enumeration half --
+  ConvertString and its Unicode, stream and Ex forms, GetCodePageInfo
+  and the code-page and script enumerations, the RFC 1766 pairs, code
+  page detection and validation, the line-break console -- is E_NOTIMPL,
+  recorded with the interface and method that was asked for. Guessing
+  them is worse than refusing them: a conversion needs per-code-page
+  tables gala does not have, and a program told a conversion succeeded
+  would carry the wrong bytes on silently. Which of them a program
+  reaches is in the ledger (OBSERVABILITY), and that is what decides the
+  next chunk (ROADMAP OF).
 
 ### shell32, ole32, dbghelp and normaliz helpers
 
@@ -11992,7 +12491,16 @@ the character both from 1, which is how XmlLite counts and, asked
 before the next event, where the node about to be read starts. After a
 start tag `empty_element` says whether the element was written empty,
 which XmlLite's reader reports as IsEmptyElement and hands out no end
-tag for. Every refusal carries what the reader was looking for
+tag for. White space outside the root element is an event of its own
+(`Event::Text`, XmlLite's Whitespace node) only where markup or the end
+of the document follows it; where anything else does -- text, or the
+NULs a buffer read to its capacity ends in -- the run is no node at all:
+it is consumed and that same call refuses, at the first character that
+is not white space, which is where XmlLite puts the error too (measured
+after the root element; before it, where a document opening in white
+space is a matter for the encoding its stream is sniffed for, the white
+space is handed over either way). Every refusal carries what the reader
+was looking for
 (`Reason`) beside its message, so a DLL answers in its own codes
 instead of reading gala's words: msxml6's three XML_E_ codes
 (`parse_into`) and XmlLite's 24 XmlError codes (`user/xmllite`'s
@@ -12605,7 +13113,14 @@ stations and desktops a program creates are refused until stage 3).
   session 0 ERROR_NO_TOKEN; other sessions' users are not recorded yet,
   so ERROR_NO_TOKEN too, recorded); `office_api_test`'s `service.rs`), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
   NULL, and every call on a context fails as on an invalid one, FALSE
-  with ERROR_INVALID_HANDLE, nothing set for NULL). powrprof: platform role and active
+  with ERROR_INVALID_HANDLE, nothing set for NULL. The handles are
+  still answered for: ImmGetContext and ImmAssociateContext (which
+  MSO's UI delay-loads) look at the window before the context, so a
+  NULL window is a silent nothing, a handle that is no window is
+  ERROR_INVALID_WINDOW_HANDLE, and only then is a handle that is no
+  context ERROR_INVALID_HANDLE. Associating nothing with a window that
+  holds nothing changes nothing, so the last error stands, which is
+  how Windows says a call did something). powrprof: platform role and active
   scheme. uxtheme: DrawThemeBackgroundEx as ordinal 47.
 - ntdll: RtlGetDeviceFamilyInfoEnum (10.0.26100.<UBR>, the desktop
   family, an unknown form).
@@ -12974,7 +13489,17 @@ expected answers are those of `user/d3d10_1_test` run on Windows.
 font manager comes up on its system collection. gala's collection has
 one family, Selawik, in four faces read from
 `C:\Windows\Fonts\selawk*.ttf` (ttf-parser); Segoe UI, Arial, Times New
-Roman, ... are found as Selawik, as in gdi32. Every object reachable from
+Roman, ... are found as Selawik, as in gdi32. The files come from
+`system_modules` (the release tree above), so every full image has them
+and a scenario that is not one ships them itself (`EXTRA_MODULES`).
+They are files and not bytes in the DLL, where gdi32 embeds its four
+copies, because DirectWrite hands a program the font's file and its
+path to open itself (`IDWriteFontFile::GetReferenceKey`,
+`GetFilePathW`, the local file loader), which an embedded copy would
+make a lie. **An image without them leaves DirectWrite with no font at
+all**, and a program that lays its text out with it stops: Word's
+"something went wrong ... (47)" was this, 3 ms after it asked for the
+system collection. Every object reachable from
 it is static (AddRef/Release count nothing): factory, collection, family
 (also the font list), fonts, faces (metrics, glyph indices and design
 metrics, font tables in place), files with the local file loader (paths)
@@ -13004,9 +13529,10 @@ slot that records the method's name where a word past the end of the
 table would be called as a function, and that is where a revision's
 methods go when one is implemented. Its GDI interop object (`GetGdiInterop`, one per factory on
 Windows, so one static object here), which bridges a font and a
-LOGFONT, answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself;
-none of its methods is built, each recording its own name, so the run of
-a program that wants one names it. Test: `dwrite_test` step 11, which
+LOGFONT, answers IDWriteGdiInterop and IDWriteGdiInterop1 as itself; of
+its methods the two LOGFONT conversions are built (`logfont.rs`, below)
+and the rest record their own names, so the run of a program that wants
+one of those names it. Test: `dwrite_test` step 11, which
 takes either answer for a revision -- Windows' object or gala's refusal
 -- because that program runs on Windows too (`user/windows/ci-passing.txt`);
 the refusal itself is pinned by the `dwrite_test` scenario, which expects
@@ -13047,6 +13573,150 @@ ID2D1SimplifiedGeometrySink in DIPs, y downward (winding, quadratics as
 cubic Béziers); the sink's owner closes it. Test: `dwrite_test` steps 8
 and 9.
 
+Text analysis (`analyze.rs`, IDWriteTextAnalyzer), the step Word's
+start-up stops without: one static analyzer (a text analyzer holds no
+state of its own) answering IDWriteTextAnalyzer, ...1 and ...2 as
+itself. The four Analyze* methods read the string through the caller's
+IDWriteTextAnalysisSource and report runs to its sink, as Windows does:
+AnalyzeScript itemizes into script runs (Latin 49, Arabic 3, Han 33,
+shapes DEFAULT), AnalyzeBidi into level runs, AnalyzeLineBreakpoints
+into a byte per character (the condition before it and the one after,
+whitespace flagged on the space itself), and AnalyzeNumberSubstitution
+succeeds without calling the sink at all, which is what Windows
+answers. GetGlyphs maps each character to the face's own glyph with an
+identity cluster map, GetGlyphPlacements scales each glyph's design
+advance by the em size and leaves every offset zero. A NULL source or
+sink is E_INVALIDARG; a zero-length range is S_OK with no runs. A
+refusal is not the option here that it is for a factory revision: a
+program refused a revision takes a fallback, while one refused its
+analyzer has none -- Word's boot ends 13 ms after the refusal with
+"something went wrong" (error 47) -- so what is not measured yet is
+answered as well as it can be and says so to the ledger. Two parts are
+that: AnalyzeBidi reports level 0 throughout, so an RTL run is itemized
+as if it ran left to right (resolving the levels is the bidi
+algorithm), and a hard line break is reported as a break that may
+happen rather than one that must. GetGdiCompatibleGlyphPlacements is
+refused, its numbers not being the ones measured. Test: `dwrite_test`
+step 12.
+
+Text formats (`format.rs`, IDWriteTextFormat), what a program lays a
+piece of text out with and the busiest call of Word's start-up: 279 of
+them in the tenth of a second before its window
+(`IDWriteFactory::CreateTextFormat`). A format is the font the text is
+asked for -- the family's name, the weight, the style, the stretch, the
+em size and the locale -- and the paragraph's own values beside it: the
+text and paragraph alignment, the word wrapping, the reading and flow
+direction, the incremental tab stop, the line spacing and the trimming.
+It keeps whatever it is given, a family nothing has by that name
+included, because finding a face for a name is the layout's work and not
+the format's; a program reads back what it set, so every value has its
+getter and the two strings answer their length and then their characters
+(E_NOT_SUFFICIENT_BUFFER for a buffer with no room for the terminator,
+measured). The refusals are measured too: a weight outside 1..999, a
+style, a direction or a trimming granularity past its last value, an em
+size that is zero, negative or NaN, a locale not shaped like a BCP-47
+tag (hyphen-separated runs of one to eight characters, the contents
+unchecked and an empty name taken), and a NULL family or locale are each
+E_INVALIDARG, while an out pointer is not validated at all -- real
+DirectWrite faults on a bad one (0xC0000005), so gala does too rather
+than answer where Windows would not. Unlike the static objects above, a
+format is counted, and it holds its trimming sign and its collection
+while it lives. Its vtable is IDWriteTextFormat3's whole length for the
+reason the factory's is IDWriteFactory7's: the fifteen methods those
+three revisions add record their own names in their own slots, where a
+program that takes the format for a later revision on the Windows
+version alone would otherwise call a word past the end of the table.
+Beside them, typography (a list of a font's OpenType features, each a
+tag and a parameter) and number substitution (the method and its
+locale, kept for the layout that will read it). Test: `dwrite_test`
+step 13.
+
+Text layouts (`layout.rs`, IDWriteTextLayout), a string, a format and a
+box, measured: the busiest object of Word's start-up, which asks the
+factory for a GDI-compatible one 414 times and for the plain
+`CreateTextLayout` never. A layout is two things at once. It is a text
+format, carrying a format's own prefix and answering its 28 slots from
+`format.rs` itself over a copy of the values it was made with, so what
+the format is told afterwards does not reach the layout (and so a
+layout asked for IDWriteTextFormat answers with itself, where Windows
+hands back an object of its own -- measured). And it is a measurement:
+the lines the text broke into, the clusters those lines are made of,
+the box the text fills inside the layout's own, and the places in it a
+point or a position names.
+
+What a layout adds to a format is ranges: every value a format holds
+for the whole text a layout holds over a range of it -- the family,
+weight, style, stretch, em size and locale, the underline and the
+strikethrough, the collection, the drawing effect, an inline object and
+the typography -- and reports with the run it found it in, what no
+range covers being the format's own value over a run that reaches
+UINT32_MAX. Twelve sorted lists of non-overlapping spans, a set
+splitting the spans it lands in the middle of.
+
+Measuring: each character becomes a cluster (a surrogate pair one
+cluster, a default-ignorable character none of its own, a tab advancing
+the pen to the next incremental stop), the clusters break into lines
+greedily at the last place a break may happen before the box's width
+runs out, a word too wide for the box alone on a line of its own, and
+the line's height and baseline come from the face's Windows ascent,
+descent and line gap. The box the text fills, the three hit tests and
+the narrowest box the text fits in without breaking a word
+(`DetermineMinWidth`) are read off that, and the whole of it is cached
+and thrown away by every setter it was computed from -- this file's and
+the eight of the format's that change how text is laid out. What
+"GDI-compatible" means is a number and not a manner: the height, the
+baseline and the width are GDI's own `tmHeight`, `tmAscent` and
+`GetTextExtentPoint32W` for the same face at the same pixel size, so
+this file reproduces gdi32's integer arithmetic (the em in whole
+pixels, every advance rounded on that grid) rather than scaling the
+design metrics, and the pixels per DIP are a scale on the grid and
+nothing more: an em of `e` at `p` pixels per DIP measures what GDI
+measures at `e * p` pixels, reported divided by `p` again. The plain
+layout is the unrounded one, the design metrics scaled. Beside it the
+ellipsis trimming sign a trimmed line would end with
+(`CreateEllipsisTrimmingSign`), an inline object whose width is the
+face's own ellipsis, or three periods where it has none. The vtable is
+IDWriteTextLayout4's whole length for the reason the format's is
+IDWriteTextFormat3's.
+
+Not there yet, each recorded as it is reached: drawing, so `Draw` is
+refused on a layout as on an inline object and nothing here rasterizes;
+the alignments and the directions other than the defaults; trimming
+(the options are kept and the sign is built, but no line is cut); line
+spacing methods other than DEFAULT; bidirectional text; shaping, a
+cluster being a character; the family name of a range choosing a face,
+which the weight does instead (`font::nearest`, which snaps to one of
+Selawik's four faces by a nearest rule of its own where gdi32's
+`snap_weight` has its own); and the methods of the later revisions.
+Two more divergences are recorded where they are read: the overhang is
+the text's box and not the glyphs' ink, and the metrics' bidi depth is
+always 1. Unmeasured choices, kept until a program reads them: a text
+ending in a newline has an empty last line, and tab stops are measured
+from the paragraph's start rather than from the line's. Test:
+`dwrite_test` step 14, eighteen checks of the numbers real DirectWrite
+answers; the last of them lays the same string out through gdi32's own
+device context and requires the two to agree, which is the guard
+against this file and gdi32 drifting apart -- they carry the same
+default-ignorable table and the same rounding, in two copies.
+
+GDI logical fonts (`logfont.rs`): IDWriteGdiInterop's
+ConvertFontToLOGFONT and ConvertFontFaceToLOGFONT, which a program calls
+when it holds a DirectWrite font and has to name it to the GDI half of
+Windows -- to measure with a device context, to put it in a font dialog,
+or to draw with gdi32 after laying the text out with DirectWrite. The
+LOGFONT is of a font and not of a size (measured): the height, the
+width, the escapement and the orientation are all zero, because the em
+size belongs to the text format and not to the font, and what the
+conversion fills in is the weight, the italic flag, DEFAULT_CHARSET,
+OUT_OUTLINE_PRECIS and the family's name as the face name -- the name
+GDI looks a font up by, so gala writes Selawik where Windows writes
+Arial, each the name its own collection answered with. Every font of
+gala's is of the system collection, so the system flag is always set; a
+font of another collection is a ledger row and E_INVALIDARG, and a
+refusal clears the whole structure first as Windows' does, so nothing of
+a font a program was not given can be read back out of it. Test:
+`dwrite_test` step 13.
+
 ### Diagnosis
 
 Without disassembly (CLEAN_ROOM): Chromium's logs go to the serial log
@@ -13062,10 +13732,19 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
   compatible targets, effects or command lists ("Direct2D" lists them).
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
-  rotation, skew or sideways runs; no text layout. The later factory
-  revisions are refused (none of their methods is implemented), and the
-  GDI interop object answers for itself but implements none of its own
-  ("DirectWrite").
+  rotation, skew or sideways runs. Text layouts measure but do not
+  draw; they lay text out in the default alignments and directions
+  only, do not cut a line to its trimming, keep one cluster per
+  character and itemize no bidi, a range's family name does not pick a
+  face (its weight does) and the overhang is the text's box. Text
+  analysis itemizes every bidi run at level 0 and reports a hard line
+  break as one that may happen rather than one that must, and the
+  GDI-compatible glyph placements are refused. The later factory
+  revisions are refused (none of their methods is implemented), the
+  methods the later text format and text layout revisions
+  (IDWriteTextFormat1 through 3, IDWriteTextLayout1 through 4) add are
+  not implemented either, and of the GDI interop object's own methods
+  only the two LOGFONT conversions are ("DirectWrite").
 - Mitigation policies are kept, not enforced; no sandbox (stage 3).
 - One Windows Runtime class (PackageManager, with no packages); no
   shell namespace objects, no COM proxies (see their sections).
@@ -13922,7 +14601,9 @@ same program as SYSTEM).
 
 `kernel/src/nt/clipboard.rs` (the state; host tests there),
 `kernel/src/nt/clipboard_calls.rs` (gala's services),
-`user/user32/src/clipboard.rs`. Test program: `user/clipboard_test`
+`user/user32/src/clipboard.rs`; the OLE clipboard over it is
+`user/ole32/src/clipboard.rs` ("COM: ole32 and oleaut32"). Test program:
+`user/clipboard_test`
 (scenario `clipboard_test`, `events=ipc`: a parent and its child copy
 to each other). ROADMAP LD step 3.
 
@@ -16875,7 +17556,34 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   SHGetFolderLocation and SHGetSpecialFolderLocation (CSIDL_DESKTOP the
   empty list, CSIDL_DRIVES This PC; a profile folder gala's profile
   lacks still has its list, as SHGetFolderPathW gives its path),
-  SHGetPathFromIDListW.
+  SHGetPathFromIDListW and SHGetPathFromIDListEx (the same path into a
+  buffer the caller measures, which Word's recent documents delay-load:
+  the path and TRUE with the last error set to 0; the flags make no
+  difference to a file-system path, so none is read; a buffer one
+  character short is FALSE and still holds the path cut to `cch - 1`
+  characters, and a `cch` of 1 is FALSE and the empty string; a `cch` of
+  0 writes nothing and leaves the last error alone, which with a NULL
+  list is the one way to tell "no room" from "no path", a list that has
+  none being FALSE with the empty string and the last error 0).
+- **Properties** (SHGetPropertyStoreFromParsingName, which Word
+  delay-loads as it starts up and dies 0xc06d007f without): a read-only
+  IPropertyStore over the readings a parsing name already resolves to --
+  System.ItemNameDisplay, System.FileName, System.ItemFolderPathDisplay,
+  System.ItemType (the extension with its dot, "Directory" for a
+  folder), System.ItemTypeText (`fileinfo`'s `type_name`, the text
+  SHGetFileInfoW's SHGFI_TYPENAME gives), System.Size (a file's only),
+  System.FileAttributes and the three times, of which System.DateModified
+  is FindFirstFileW's ftLastWriteTime to the tick, so a program that
+  compares it with its own find data sees one number. GetCount and GetAt
+  walk them (E_FAIL past the last); a property the item has not got is
+  S_OK with VT_EMPTY, and a row in the ledger unless Windows has none
+  either (System.ParsingPath, System.Title); SetValue and Commit are
+  STG_E_ACCESSDENIED. The flags that ask for a store which is not the
+  item's own are answered as Windows answers them where there is nothing
+  to give: GPS_HANDLERPROPERTIESONLY and GPS_READWRITE want a property
+  handler's store, which is the file format's business (E_FAIL for a
+  file, E_NOINTERFACE for a folder), and GPS_EXTRINSICPROPERTIESONLY the
+  shell's extrinsic one (E_FAIL).
 - **Opening a file** (ShellExecuteW/ExW, `shellops.rs`): a document runs
   its association's command (AssocQueryStringW's ASSOCSTR_COMMAND for
   the verb, "open" by default, from the user's classes then HKCR; `%1`
@@ -16888,9 +17596,14 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
 - **Limits** (each ledgered where met): BindToStorage,
   CreateViewObject and GetUIObjectOf (context menus, data objects,
   icons, IShellView), handlers other than the folder and its items
-  (`shell32.dll!IShellItem::BindToHandler`), IShellItem2 and property
-  stores, the Recycle Bin, network locations and libraries; the desktop
-  does not list the files of the user's Desktop directory;
+  (`shell32.dll!IShellItem::BindToHandler`), IShellItem2 (and so an
+  item's own GetPropertyStore, a parsing name's store being the one
+  there is), the empty stores of their own GPS_TEMPORARY and
+  GPS_VOLATILEPROPERTIESONLY ask for, a registry of file types for the
+  type text to read a description of the extension out of, the Recycle
+  Bin, network locations and libraries; a relative parsing name is
+  E_INVALIDARG where Windows reads one against the desktop folder; the
+  desktop does not list the files of the user's Desktop directory;
   SHBrowseForFolderW and IFileDialog do not use it yet (step 2's rest).
 
 ### The program (step 2)
@@ -19822,10 +20535,11 @@ update client will check them with the same `Client`.
   xtask release-tree <dir>`, `release_tree` and `system_modules` in
   xtask): `boot/kernel` (stripped), every DLL of USER_DLLS but the test
   DLLs (`boot/<dll>`, module string `Windows/System32`), the root store
-  (`public-roots.pem`), Limine (`EFI/BOOT/BOOTX64.EFI`,
-  `boot/limine/*`), the sealed `boot/limine/limine.conf` (empty kernel
-  command line, as `cargo xtask build`'s) and `boot/gala.manifest`;
-  about 76 files, 14 MB. Chosen because it is what a machine boots
+  (`public-roots.pem`), the four Selawik files (module string
+  `Windows/Fonts`, which is where DirectWrite reads them), Limine
+  (`EFI/BOOT/BOOTX64.EFI`, `boot/limine/*`), the sealed
+  `boot/limine/limine.conf` (empty kernel command line, as `cargo xtask
+  build`'s) and `boot/gala.manifest`; about 80 files, 14 MB. Chosen because it is what a machine boots
   (steps 2-5 of "Chain of trust" cover exactly these files) and the
   system `cargo xtask iso` ships, minus what only tests use; the
   32-bit DLLs (SysWOW64) are not in it yet, as they are in no full

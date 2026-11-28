@@ -5,8 +5,10 @@
 //! program and a drive. Without SHGFI_USEFILEATTRIBUTES the file's
 //! attributes are read (GetFileAttributesW). Type names are "File
 //! folder", "Application" for .exe, "<EXT> File" otherwise (no registry
-//! of file types yet).
+//! of file types yet): `type_name`, which the property store of the
+//! namespace's items answers System.ItemTypeText from as well.
 
+use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -29,6 +31,40 @@ const SHGFI_OPENICON: u32 = 0x2;
 const SHGFI_USEFILEATTRIBUTES: u32 = 0x10;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const INVALID_FILE_ATTRIBUTES: u32 = 0xffff_ffff;
+
+/// The extension of `name` without its dot (None for a name with no
+/// dot in it).
+pub(crate) fn extension(name: &[u16]) -> Option<&[u16]> {
+    name.iter().rposition(|&c| c == u16::from(b'.')).map(|i| &name[i + 1..])
+}
+
+/// Whether `ext` is a program's extension.
+pub(crate) fn is_program(ext: Option<&[u16]>) -> bool {
+    let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 32 } else { c };
+    ext.is_some_and(|e| e.len() == 3 && e.iter().map(|&c| lower(c)).eq("exe".encode_utf16()))
+}
+
+/// The kind of thing an item is, as the shell says it (SHGFI_TYPENAME,
+/// System.ItemTypeText): a drive's "Local Disk", a directory's "File
+/// folder", "Application" for a program, "<EXT> File" for anything else
+/// with an extension and "File" without one. Windows reads the
+/// registry's description of the extension here -- "Text Document"
+/// where gala says "TXT File" -- which gala has no registry of file
+/// types for yet (ROADMAP EX).
+pub(crate) fn type_name(is_drive: bool, attributes: u32, ext: Option<&[u16]>) -> Vec<u16> {
+    let upper = |c: u16| if (0x61..=0x7a).contains(&c) { c - 32 } else { c };
+    if is_drive {
+        "Local Disk".encode_utf16().collect()
+    } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        "File folder".encode_utf16().collect()
+    } else if is_program(ext) {
+        "Application".encode_utf16().collect()
+    } else if let Some(e) = ext.filter(|e| !e.is_empty()) {
+        e.iter().map(|&c| upper(c)).chain(" File".encode_utf16()).collect()
+    } else {
+        "File".encode_utf16().collect()
+    }
+}
 
 /// The images, in their order in the system image lists.
 const DOCUMENT: i32 = 0;
@@ -199,10 +235,8 @@ pub extern "system" fn SHGetFileInfoW(
         a
     };
     let name = name_part(path);
-    let ext = name.iter().rposition(|&c| c == u16::from(b'.')).map(|i| &name[i + 1..]);
-    let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 32 } else { c };
-    let is_exe =
-        ext.is_some_and(|e| e.len() == 3 && e.iter().map(|&c| lower(c)).eq("exe".encode_utf16()));
+    let ext = extension(name);
+    let is_exe = is_program(ext);
     let is_drive = path.len() <= 3 && path.get(1) == Some(&u16::from(b':'));
     let index = if is_drive {
         DRIVE
@@ -240,18 +274,7 @@ pub extern "system" fn SHGetFileInfoW(
             copy(&mut fi.display_name, name.iter().copied());
         }
         if flags & SHGFI_TYPENAME != 0 {
-            let upper = |c: u16| if (0x61..=0x7a).contains(&c) { c - 32 } else { c };
-            if is_drive {
-                copy(&mut fi.type_name, "Local Disk".encode_utf16());
-            } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                copy(&mut fi.type_name, "File folder".encode_utf16());
-            } else if is_exe {
-                copy(&mut fi.type_name, "Application".encode_utf16());
-            } else if let Some(e) = ext.filter(|e| !e.is_empty()) {
-                copy(&mut fi.type_name, e.iter().map(|&c| upper(c)).chain(" File".encode_utf16()));
-            } else {
-                copy(&mut fi.type_name, "File".encode_utf16());
-            }
+            copy(&mut fi.type_name, type_name(is_drive, attributes, ext).into_iter());
         }
     }
     if flags & SHGFI_SYSICONINDEX != 0 { list } else { 1 }

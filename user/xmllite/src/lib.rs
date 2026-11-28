@@ -1,16 +1,20 @@
 //! gala's xmllite.dll: the XmlLite reader (`CreateXmlReader` and
 //! `IXmlReader`, in `reader`) over gala's XML scanner, and the writer
-//! still unimplemented.
+//! (`CreateXmlWriter` and `IXmlWriter`, in `writer`) that writes a
+//! document out.
 //!
-//! Word delay-loads `CreateXmlReader` and ends with 0xc06d007f without
-//! it (ROADMAP OF); SQL Server LocalDB imports both. What this DLL does
+//! Word delay-loads the reader, the writer and
+//! `CreateXmlWriterOutputWithEncodingName` (`output`, which is a stream
+//! with the encoding to write it in); SQL Server LocalDB imports the
+//! reader and the writer. What this DLL does
 //! not implement fails honestly: E_NOTIMPL, recorded in the ledger as
 //! `xmllite.dll!<interface>::<method>` ("not implemented"), and an
 //! export with nothing behind it ends the process (`gala_stubs`), so the
 //! ledger names what to implement next.
 //!
 //! The reader's node types, depths, positions and error codes are
-//! Windows', measured in `user/xmllite_test` and read there.
+//! Windows', and so is every byte the writer writes: all of it is
+//! measured in `user/xmllite_test` and read there.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -23,8 +27,10 @@ use alloc::vec::Vec;
 
 use gala_heap as _;
 
+mod codepages;
+mod output;
 mod reader;
-mod unimplemented;
+mod writer;
 
 // The memory routines come from gala's ntdll, as other DLLs on `alloc`
 // take them.
@@ -67,16 +73,57 @@ pub const E_NOINTERFACE: HResult = 0x8000_4002u32 as i32;
 pub const E_POINTER: HResult = 0x8000_4003u32 as i32;
 pub const E_INVALIDARG: HResult = 0x8007_0057u32 as i32;
 pub const E_OUTOFMEMORY: HResult = 0x8007_000eu32 as i32;
+pub const E_ACCESSDENIED: HResult = 0x8007_0005u32 as i32;
 
-/// The ledger's kinds (GalaRecordMissing's codes).
+/// The ledger's kinds (GalaRecordMissing's codes). Kind 6 ("stub")
+/// is not among them and must not be: it belongs to an export that
+/// reports itself and ends the process (`gala_stubs`), so a row of
+/// this DLL's wearing it would name a death that never happened. A
+/// call answered as Windows answers it whose effect is absent all the
+/// same -- a property taken and acted on nowhere -- is a gap, and
+/// `LEDGER_UNSUPPORTED` is its kind.
 pub const LEDGER_UNSUPPORTED: u32 = 2;
 pub const LEDGER_NOT_IMPLEMENTED: u32 = 3;
 pub const LEDGER_OTHER: u32 = 5;
+/// Not a gap: the first call that reached something gala answers,
+/// recorded so a run says a program got here at all.
+pub const LEDGER_REACHED: u32 = 9;
 
 /// What every ledger line of this DLL starts with.
 const PREFIX: &str = "xmllite.dll!";
 /// The ledger keeps this many characters of a name.
 const ROOM: usize = 96;
+
+/// Takes a reference on an object a program handed a property, as the
+/// reader and the writer hold one (measured: the object is AddRef'd and
+/// never asked for an interface). A null pointer is no object, and
+/// holding it costs nothing.
+pub(crate) fn add_ref_of(object: Obj) {
+    if object.is_null() {
+        return;
+    }
+    // SAFETY: a COM object from the caller; slot 1 of its vtable is
+    // IUnknown::AddRef.
+    unsafe {
+        let vtable = *(object as *const *const usize);
+        let f: extern "system" fn(Obj) -> u32 = core::mem::transmute(*vtable.add(1));
+        f(object);
+    }
+}
+
+/// Gives a held reference back.
+pub(crate) fn release_of(object: Obj) {
+    if object.is_null() {
+        return;
+    }
+    // SAFETY: a COM object the caller handed a property and this DLL
+    // took a reference on; slot 2 of its vtable is IUnknown::Release.
+    unsafe {
+        let vtable = *(object as *const *const usize);
+        let f: extern "system" fn(Obj) -> u32 = core::mem::transmute(*vtable.add(2));
+        f(object);
+    }
+}
 
 /// A GUID from its parts, as the SDK writes one.
 pub const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {
@@ -93,6 +140,24 @@ pub const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {
 pub fn data1(g: &Guid) -> u64 {
     u64::from(u32::from_le_bytes([g[0], g[1], g[2], g[3]]))
 }
+
+/// A COM object pointer, as the interfaces here take and hand out.
+pub type Obj = *mut core::ffi::c_void;
+
+/// A COM vtable: an object's first field, and function pointers only.
+#[repr(C)]
+pub struct VTable<const N: usize>(pub [*const (); N]);
+// SAFETY: function pointers only.
+unsafe impl<const N: usize> Sync for VTable<N> {}
+
+/// `IUnknown`, which every object answers for.
+pub const IID_IUNKNOWN: Guid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+/// `IStream`, which a stream is asked for first (objidl.idl).
+pub const IID_ISTREAM: Guid = guid(0x0000_000c, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+/// `ISequentialStream`: all a reader needs of an input and a writer of
+/// an output, for a stream that is no more than that.
+pub const IID_ISEQUENTIAL_STREAM: Guid =
+    guid(0x0c73_3a30, 0x2a1c, 0x11ce, [0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d]);
 
 /// Records `xmllite.dll!<what>` in the ledger (printable ASCII; cut at
 /// 96 bytes).

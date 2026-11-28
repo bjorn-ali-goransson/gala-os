@@ -12,6 +12,10 @@
 //! - A parse checks every level exists (FindFirstFileW, which also gives
 //!   each name's case as stored); a missing one is
 //!   HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND).
+//! - An item's properties (SHGetPropertyStoreFromParsingName) are a
+//!   read-only IPropertyStore over those same readings: the name, the
+//!   kind, the size, the attributes and the times. A property gala does
+//!   not keep is VT_EMPTY and a row in the ledger.
 //! - Not there (each recorded, E_NOTIMPL): IShellFolder's BindToStorage,
 //!   CreateViewObject and GetUIObjectOf (context menus, data objects,
 //!   icons: gala's explorer.exe does without), the handlers of
@@ -25,8 +29,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use shellns::{CLSID_LINUX, CLSID_MY_COMPUTER, Guid, Item};
 
-use super::{E_INVALIDARG, E_OUTOFMEMORY, S_OK, unsupported};
-use crate::link::VTable;
+use super::fileinfo::{extension, type_name};
+use super::{E_FAIL, E_INVALIDARG, E_OUTOFMEMORY, S_OK, reached, unsupported};
+use crate::link::{VT_EMPTY, VT_FILETIME, VT_LPWSTR, VT_UI4, VT_UI8, VTable, write_variant};
 
 #[cfg_attr(
     target_arch = "x86",
@@ -35,6 +40,7 @@ use crate::link::VTable;
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
+    fn SetLastError(e: u32);
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;
     fn GetFileAttributesW(path: *const u16) -> u32;
@@ -1729,6 +1735,420 @@ pub extern "system" fn SHGetPathFromIDListW(list: *const u8, path: *mut u16) -> 
         *path.add(name.len()) = 0;
     }
     1
+}
+
+/// SHGetPathFromIDListEx(list, path, cch, flags): the same path into a
+/// buffer the caller measures. Word's recent documents delay-load it,
+/// and a Word that does not find it dies there.
+///
+/// As Windows 11 answers it, measured and kept by `shell32_test`: the
+/// path and TRUE, with the last error set to 0, for a list that has
+/// one; the flags make no difference to a file-system path
+/// (GPFIDL_DEFAULT, GPFIDL_ALTNAME, GPFIDL_UNCPRINTER and bits nothing
+/// names all answer alike, so gala reads none of them). A buffer one
+/// character short of the path and its NUL is FALSE and holds the path
+/// cut to `cch - 1` characters -- what fits is written either way, so
+/// the caller that ignores the answer reads a path that is not the one
+/// it asked for -- and a `cch` of 1 is FALSE and the empty string. A
+/// `cch` of 0 writes nothing at all and leaves the last error alone,
+/// and so does a NULL list, which is the one way to tell "no room"
+/// from "no path": a list with no path (a virtual folder, This PC) is
+/// FALSE with the empty string and the last error 0.
+#[unsafe(no_mangle)]
+pub extern "system" fn SHGetPathFromIDListEx(
+    list: *const u8,
+    path: *mut u16,
+    cch: u32,
+    _flags: u32,
+) -> i32 {
+    // Nowhere to write: the buffer and the last error both stand.
+    // (Windows faults on a NULL buffer with room asked for; gala says
+    // no instead, which no caller can tell from a fault it survived.)
+    if cch == 0 || path.is_null() {
+        return 0;
+    }
+    put(path, 0);
+    if list.is_null() {
+        return 0;
+    }
+    let name = items_of(list).and_then(|items| name_of(&items, SIGDN_FILESYSPATH));
+    // SAFETY: plain call.
+    unsafe { SetLastError(0) };
+    let Some(name) = name else { return 0 };
+    if name.is_empty() {
+        return 0;
+    }
+    // What fits, whether or not all of it does.
+    let room = cch as usize - 1;
+    let n = name.len().min(room);
+    // SAFETY: the caller's buffer of `cch` units, and `n` < `cch`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), path, n);
+        *path.add(n) = 0;
+    }
+    i32::from(n == name.len())
+}
+
+// ---- IPropertyStore of an item (SHGetPropertyStoreFromParsingName) ------------
+
+/// A PROPERTYKEY: a property set's GUID and the property's number in it.
+type PropKey = (Guid, u32);
+
+const IID_IPROPERTYSTORE: Guid =
+    shellns::guid(0x886d_8eeb, 0x8cf2, 0x4446, [0x8d, 0x02, 0xcd, 0xba, 0x1d, 0xbd, 0xcf, 0x99]);
+
+/// The property sets the store answers from.
+const PSET_STORAGE: Guid =
+    shellns::guid(0xb725_f130, 0x47ef, 0x101a, [0xa5, 0xf1, 0x02, 0x60, 0x8c, 0x9e, 0xeb, 0xac]);
+const PSET_SHELL_DETAILS: Guid =
+    shellns::guid(0x2863_6aa6, 0x953d, 0x11d2, [0xb5, 0xd6, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0xd0]);
+const PSET_FILE_NAME: Guid =
+    shellns::guid(0x41cf_5ae0, 0xf75a, 0x4806, [0xbd, 0x87, 0x59, 0xc7, 0xd9, 0x24, 0x8e, 0xb9]);
+const PSET_FOLDER_PATH: Guid =
+    shellns::guid(0xe3e0_584c, 0xb788, 0x4a5a, [0xbb, 0x20, 0x7f, 0x5a, 0x44, 0xc9, 0xac, 0xdd]);
+const PSET_SUMMARY: Guid =
+    shellns::guid(0xf29f_85e0, 0x4ff9, 0x1068, [0xab, 0x91, 0x08, 0x00, 0x2b, 0x27, 0xb3, 0xd9]);
+
+/// The properties the store answers.
+const PK_ITEM_TYPE_TEXT: PropKey = (PSET_STORAGE, 4);
+const PK_ITEM_NAME_DISPLAY: PropKey = (PSET_STORAGE, 10);
+const PK_SIZE: PropKey = (PSET_STORAGE, 12);
+const PK_FILE_ATTRIBUTES: PropKey = (PSET_STORAGE, 13);
+const PK_DATE_MODIFIED: PropKey = (PSET_STORAGE, 14);
+const PK_DATE_CREATED: PropKey = (PSET_STORAGE, 15);
+const PK_DATE_ACCESSED: PropKey = (PSET_STORAGE, 16);
+const PK_ITEM_TYPE: PropKey = (PSET_SHELL_DETAILS, 11);
+const PK_FILE_NAME: PropKey = (PSET_FILE_NAME, 100);
+const PK_ITEM_FOLDER_PATH_DISPLAY: PropKey = (PSET_FOLDER_PATH, 6);
+
+/// The properties Windows answers VT_EMPTY for as well, which a program
+/// asking after them has not been refused anything by: they are not
+/// recorded. System.ParsingPath is one of them (the store of a file as
+/// much as of a folder has no value for it) and System.Title is another
+/// (it comes from a handler for the file's format, which is what
+/// GPS_HANDLERPROPERTIESONLY asks for).
+const EMPTY_KEYS: &[PropKey] = &[(PSET_STORAGE, 30), (PSET_SUMMARY, 2)];
+
+/// GETPROPERTYSTOREFLAGS.
+const GPS_HANDLERPROPERTIESONLY: u32 = 0x1;
+const GPS_READWRITE: u32 = 0x2;
+const GPS_TEMPORARY: u32 = 0x4;
+const GPS_EXTRINSICPROPERTIESONLY: u32 = 0x400;
+const GPS_VOLATILEPROPERTIESONLY: u32 = 0x1000;
+const GPS_MASK_VALID: u32 = 0x1fff;
+
+const STG_E_ACCESSDENIED: HResult = 0x8003_0005u32 as i32;
+
+/// What a property the store answers holds, as the variant GetValue
+/// writes for it.
+enum PropValue {
+    /// VT_LPWSTR, a string from the task allocator.
+    Str(Vec<u16>),
+    /// VT_UI4, FILE_ATTRIBUTE_*.
+    Attributes(u32),
+    /// VT_UI8, a file's size in bytes.
+    Size(u64),
+    /// VT_FILETIME, a time as the file system keeps it.
+    Time(u64),
+}
+
+/// The read-only property store of one item.
+#[repr(C)]
+struct PropStore {
+    head: Head<1>,
+    /// The properties it has, in the order GetAt gives them.
+    props: Vec<(PropKey, PropValue)>,
+}
+
+const STORE_IIDS: &[(Guid, usize)] = &[(IID_IPROPERTYSTORE, 0)];
+
+/// One of FindFirstFileW's times (`at`: 0 created, 2 accessed, 4
+/// written), as the 64-bit FILETIME a VT_FILETIME holds.
+fn file_time(times: &[u32; 6], at: usize) -> u64 {
+    u64::from(times[at]) | u64::from(times[at + 1]) << 32
+}
+
+/// The properties of `items`: what the shell answers for a file, a
+/// folder, a drive or a virtual folder. A file's size and times are the
+/// file system's (FindFirstFileW, the same reading SHGetFileInfoW and
+/// the enumerators take), so a program that compares them with its own
+/// find data sees the same numbers.
+fn props_of(items: &[Item]) -> Vec<(PropKey, PropValue)> {
+    let mut props: Vec<(PropKey, PropValue)> = Vec::new();
+    if let Some(name) = name_of(items, SIGDN_NORMALDISPLAY) {
+        props.push((PK_ITEM_NAME_DISPLAY, PropValue::Str(name)));
+    }
+    match items.last() {
+        // The desktop and the roots below it: a folder with no file of
+        // its own, which only its name and its kind are answered for.
+        None | Some(Item::Root(_)) => {
+            props.push((
+                PK_ITEM_TYPE_TEXT,
+                PropValue::Str("System Folder".encode_utf16().collect()),
+            ));
+        }
+        Some(Item::Drive(_)) => {
+            props.push((PK_ITEM_TYPE_TEXT, PropValue::Str(type_name(true, 0, None))));
+            props.push((PK_FILE_NAME, PropValue::Str(shellns::parsing_name(items))));
+        }
+        Some(Item::Distro(name)) => {
+            props.push((
+                PK_ITEM_TYPE_TEXT,
+                PropValue::Str(type_name(false, FILE_ATTRIBUTE_DIRECTORY, None)),
+            ));
+            props.push((PK_FILE_NAME, PropValue::Str(name.clone())));
+        }
+        Some(Item::Fs { attributes, name }) => {
+            let directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            let ext = extension(name);
+            let kind = if directory {
+                Some("Directory".encode_utf16().collect::<Vec<u16>>())
+            } else {
+                ext.filter(|e| !e.is_empty())
+                    .map(|e| core::iter::once(u16::from(b'.')).chain(e.iter().copied()).collect())
+            };
+            if let Some(kind) = kind {
+                props.push((PK_ITEM_TYPE, PropValue::Str(kind)));
+            }
+            props.push((PK_ITEM_TYPE_TEXT, PropValue::Str(type_name(false, *attributes, ext))));
+            props.push((PK_FILE_NAME, PropValue::Str(name.clone())));
+            if let Some(parent) = shellns::fs_path(&items[..items.len() - 1]) {
+                props.push((PK_ITEM_FOLDER_PATH_DISPLAY, PropValue::Str(parent)));
+            }
+            props.push((PK_FILE_ATTRIBUTES, PropValue::Attributes(*attributes)));
+            if let Some(fd) = shellns::fs_path(items).and_then(|p| find_one(&p).ok()) {
+                if !directory {
+                    let size = u64::from(fd.size_high) << 32 | u64::from(fd.size_low);
+                    props.push((PK_SIZE, PropValue::Size(size)));
+                }
+                props.push((PK_DATE_MODIFIED, PropValue::Time(file_time(&fd.times, 4))));
+                props.push((PK_DATE_CREATED, PropValue::Time(file_time(&fd.times, 0))));
+                props.push((PK_DATE_ACCESSED, PropValue::Time(file_time(&fd.times, 2))));
+            }
+        }
+    }
+    props
+}
+
+/// A new store of `items`, as interface `riid`.
+fn store_as(items: &[Item], riid: *const Guid, out: *mut *mut c_void) -> HResult {
+    let s = boxed(PropStore {
+        head: Head {
+            vtables: [(&STORE_VTABLE as *const VTable<8>).cast()],
+            refs: AtomicU32::new(1),
+        },
+        props: props_of(items),
+    });
+    if s.is_null() {
+        return E_OUTOFMEMORY;
+    }
+    // SAFETY: the new object.
+    let me = unsafe { &mut *s };
+    let r = query(
+        s.cast(),
+        &me.head.refs,
+        STORE_IIDS,
+        riid,
+        out,
+        b"shell32.dll!IPropertyStore(QueryInterface)",
+    );
+    store_release(s.cast());
+    r
+}
+
+extern "system" fn store_qi(p: *mut c_void, riid: *const Guid, out: *mut *mut c_void) -> HResult {
+    let me = this::<PropStore>(p, 0);
+    let base = (me as *mut PropStore).cast();
+    query(base, &me.head.refs, STORE_IIDS, riid, out, b"shell32.dll!IPropertyStore(QueryInterface)")
+}
+extern "system" fn store_add_ref(p: *mut c_void) -> u32 {
+    this::<PropStore>(p, 0).head.refs.fetch_add(1, Ordering::Relaxed) + 1
+}
+extern "system" fn store_release(p: *mut c_void) -> u32 {
+    let me = this::<PropStore>(p, 0);
+    let left = me.head.refs.fetch_sub(1, Ordering::AcqRel) - 1;
+    if left == 0 {
+        free(me as *mut PropStore);
+    }
+    left
+}
+
+/// IPropertyStore::GetCount(*count): how many properties the item has
+/// (on Windows the shell's whole list for its kind, here the ones gala
+/// answers).
+extern "system" fn store_get_count(p: *mut c_void, out: *mut u32) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, this::<PropStore>(p, 0).props.len() as u32);
+    S_OK
+}
+
+/// IPropertyStore::GetAt(index, *key): the key at `index` (E_FAIL past
+/// the last one).
+extern "system" fn store_get_at(p: *mut c_void, index: u32, out: *mut u8) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    match this::<PropStore>(p, 0).props.get(index as usize) {
+        Some(((set, pid), _)) => {
+            // SAFETY: the caller's PROPERTYKEY (16 bytes of FMTID, then
+            // the property's number, neither of them aligned here).
+            unsafe {
+                core::ptr::copy_nonoverlapping(set.as_ptr(), out, 16);
+                out.add(16).cast::<u32>().write_unaligned(*pid);
+            }
+            S_OK
+        }
+        None => E_FAIL,
+    }
+}
+
+/// The key the caller passed (a PROPERTYKEY: 20 bytes, unaligned).
+fn read_key(key: *const u8) -> PropKey {
+    let mut set = [0u8; 16];
+    // SAFETY: the caller's PROPERTYKEY.
+    let pid = unsafe {
+        core::ptr::copy_nonoverlapping(key, set.as_mut_ptr(), 16);
+        key.add(16).cast::<u32>().read_unaligned()
+    };
+    (set, pid)
+}
+
+/// IPropertyStore::GetValue(key, *value): the property's value, or S_OK
+/// with VT_EMPTY for one the item has not got -- which is what Windows
+/// answers for a key nothing names, and what gala answers for a
+/// property it does not keep. A key of the second kind is recorded
+/// (once per key, the set's first word and the property's number as the
+/// detail), so that a program which wanted a property gala has not got
+/// says so in the ledger instead of quietly reading nothing.
+extern "system" fn store_get_value(p: *mut c_void, key: *const u8, pv: *mut u8) -> HResult {
+    if key.is_null() || pv.is_null() {
+        return E_POINTER;
+    }
+    write_variant(pv, VT_EMPTY, 0);
+    let want = read_key(key);
+    let me = this::<PropStore>(p, 0);
+    let Some((_, value)) = me.props.iter().find(|(k, _)| *k == want) else {
+        if !EMPTY_KEYS.contains(&want) {
+            unsupported(
+                b"shell32.dll!IPropertyStore::GetValue(property)",
+                data1(&want.0) << 32 | u64::from(want.1),
+            );
+        }
+        return S_OK;
+    };
+    match value {
+        PropValue::Str(s) => {
+            let text = task_string(s);
+            if text.is_null() {
+                return E_OUTOFMEMORY;
+            }
+            write_variant(pv, VT_LPWSTR, text as u64);
+        }
+        PropValue::Attributes(a) => write_variant(pv, VT_UI4, u64::from(*a)),
+        PropValue::Size(n) => write_variant(pv, VT_UI8, *n),
+        PropValue::Time(t) => write_variant(pv, VT_FILETIME, *t),
+    }
+    S_OK
+}
+
+/// IPropertyStore::SetValue(key, value) and Commit(): the item's own
+/// store is read-only, as on Windows.
+extern "system" fn store_set_value(_p: *mut c_void, _key: *const u8, _pv: *const u8) -> HResult {
+    STG_E_ACCESSDENIED
+}
+extern "system" fn store_commit(_p: *mut c_void) -> HResult {
+    STG_E_ACCESSDENIED
+}
+
+static STORE_VTABLE: VTable<8> = VTable([
+    store_qi as *const (),
+    store_add_ref as *const (),
+    store_release as *const (),
+    store_get_count as *const (),
+    store_get_at as *const (),
+    store_get_value as *const (),
+    store_set_value as *const (),
+    store_commit as *const (),
+]);
+
+/// SHGetPropertyStoreFromParsingName(name, bind context, flags, riid,
+/// *out): the read-only IPropertyStore of the item a desktop-absolute
+/// parsing name names -- a file, a folder, a drive (with or without its
+/// trailing separator) or the desktop itself for the empty name -- and
+/// the bind context makes no difference. The store answers
+/// System.ItemNameDisplay, System.FileName,
+/// System.ItemFolderPathDisplay, System.ItemType (the extension with
+/// its dot, "Directory" for a folder), System.ItemTypeText, System.Size
+/// (a file's only), System.FileAttributes and the three times, of which
+/// System.DateModified is FindFirstFileW's ftLastWriteTime to the tick.
+/// GetCount and GetAt walk those, E_FAIL past the last; a property the
+/// item has not got is S_OK with VT_EMPTY; SetValue and Commit are
+/// STG_E_ACCESSDENIED. A name that is not there is
+/// HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) and a name that is no
+/// parsing name is E_INVALIDARG, with *out NULL either way.
+/// GPS_HANDLERPROPERTIESONLY and GPS_READWRITE want a property
+/// handler's store, which is the file format's business and nothing gala
+/// has (E_FAIL for a file, E_NOINTERFACE for a folder, as on Windows),
+/// and GPS_EXTRINSICPROPERTIESONLY wants the shell's extrinsic one
+/// (E_FAIL for both).
+///
+/// Limits, each recorded rather than worked around (ARCHITECTURE "The
+/// file explorer", ROADMAP EX): GPS_TEMPORARY and
+/// GPS_VOLATILEPROPERTIESONLY (and so GPS_MASK_VALID, which holds the
+/// first) ask for an empty store of their own, writable in the one case
+/// and not in the other, which gala has not got and answers E_NOTIMPL
+/// for; System.ItemTypeText is `fileinfo::type_name`, not the registry's
+/// description of the extension; a relative name is no parsing name
+/// here, where Windows reads one against the desktop folder, and a DOS
+/// device name is E_INVALIDARG rather than
+/// HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME); the call does not want an
+/// initialized apartment, where Windows answers CO_E_NOTINITIALIZED
+/// without one; and a riid of IPropertyStoreCapabilities, which Windows
+/// answers, is E_NOINTERFACE and a row of its own. The first call is
+/// recorded with its flags, so that a program which stops after it
+/// leaves behind what it asked for.
+#[unsafe(no_mangle)]
+pub extern "system" fn SHGetPropertyStoreFromParsingName(
+    name: *const u16,
+    _bc: *mut c_void,
+    flags: u32,
+    riid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    // (Windows faults on a NULL out parameter; gala says no instead,
+    // which no caller can tell from a fault it survived.)
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    if name.is_null() {
+        return E_INVALIDARG;
+    }
+    reached(b"shell32.dll!SHGetPropertyStoreFromParsingName(flags)", u64::from(flags));
+    if flags & !GPS_MASK_VALID != 0 {
+        return E_INVALIDARG;
+    }
+    let items = match resolve(wstr(name)) {
+        Ok(items) => items,
+        Err(e) => return e,
+    };
+    if flags & (GPS_HANDLERPROPERTIESONLY | GPS_READWRITE) != 0 {
+        let folder = items.last().is_none_or(Item::is_folder);
+        return if folder { E_NOINTERFACE } else { E_FAIL };
+    }
+    if flags & GPS_EXTRINSICPROPERTIESONLY != 0 {
+        return E_FAIL;
+    }
+    if flags & (GPS_TEMPORARY | GPS_VOLATILEPROPERTIESONLY) != 0 {
+        unsupported(
+            b"shell32.dll!SHGetPropertyStoreFromParsingName(store of its own)",
+            u64::from(flags),
+        );
+        return E_NOTIMPL;
+    }
+    store_as(&items, riid, out)
 }
 
 /// ILCreateFromPathW(path): the list of an existing path (NULL otherwise).

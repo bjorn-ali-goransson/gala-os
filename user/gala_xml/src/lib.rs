@@ -875,9 +875,14 @@ impl Scan {
         }
     }
 
-    /// A scan over a fragment: more than one root element, with the
-    /// same rules otherwise (each root well-formed, and nothing but
-    /// white space, comments and processing instructions between them).
+    /// A scan over a fragment: more than one root element, and
+    /// character data outside them -- the content of an entity rather
+    /// than a document, with the same rules otherwise (each root
+    /// well-formed, every character of the text in some node).
+    ///
+    /// XmlLite's ConformanceLevel_Fragment is this, and its reader
+    /// reads `text<a/>` as a text node and an element (measured in
+    /// `user/xmllite_test`).
     pub fn allow_fragment(mut self) -> Self {
         self.fragment = true;
         self
@@ -974,7 +979,26 @@ impl Scan {
             let from = p.pos;
             p.skip_space();
             if p.pos > from {
-                return Ok(Event::Text(p.text[from..p.pos].into()));
+                // That node comes before what follows it only if what
+                // follows is markup or the end of the document. Where
+                // anything else follows -- text, or the NULs a buffer
+                // read to its capacity ends in -- the white space is
+                // not a node at all: the run is consumed, and what
+                // comes of it is either the text it begins (a fragment,
+                // which allows character data here, hands out one node
+                // that starts at the white space) or the refusal below,
+                // at the first character that is not white space, which
+                // is where Windows' reader puts the error too. Measured
+                // both ways after the root (`xmllite_test`'s bad
+                // documents and its fragments); before the root, where
+                // a document that opens with white space is a matter
+                // for the encoding the stream is sniffed for, a
+                // document hands the white space over as it always
+                // was.
+                let joined = p.pos < p.s.len() && !p.starts("<");
+                if !(joined && (self.root_done || self.fragment)) {
+                    return Ok(Event::Text(p.text[from..p.pos].into()));
+                }
             }
             if p.starts("<!--") {
                 return Ok(Event::Comment(p.comment()?));
@@ -989,6 +1013,17 @@ impl Scan {
             if p.starts("<!DOCTYPE") {
                 return p
                     .err_for(Reason::Dtd, "a document type declaration (DTDs are not allowed)");
+            }
+            // Character data outside the root elements: a fragment's,
+            // since a document has none. It is a node like the text
+            // inside an element -- entities expanded, and the white
+            // space in front of it part of it -- which is how XmlLite
+            // reads it (measured).
+            if self.fragment && p.pos < p.s.len() && !p.starts("<") && !p.starts("</") {
+                let mut text = String::new();
+                text.push_str(&p.text[from..p.pos]);
+                p.chars_until(b"<", &mut text)?;
+                return Ok(Event::Text(text));
             }
             if self.root_done {
                 if p.pos == p.s.len() {
@@ -1110,11 +1145,28 @@ mod tests {
         assert!(alloc::format!("{whole}").contains("after the root element"), "{whole}");
         assert_eq!(names(&mut Scan::new().allow_fragment()).unwrap(), vec!["a", "b"]);
 
-        // What a fragment does not allow: text between its roots.
+        // What a fragment allows and a document does not: text
+        // between its roots, and in front of the first one, with the
+        // white space before it part of it.
+        let doc = "<a/> x<b/>";
         let mut scan = Scan::new().allow_fragment();
-        assert!(matches!(scan.next_event("<a/>x<b/>"), Ok(Event::StartElement { .. })));
-        assert!(matches!(scan.next_event("<a/>x<b/>"), Ok(Event::EndElement)));
-        let loose = alloc::format!("{}", scan.next_event("<a/>x<b/>").unwrap_err());
+        assert!(matches!(scan.next_event(doc), Ok(Event::StartElement { .. })));
+        assert!(matches!(scan.next_event(doc), Ok(Event::EndElement)));
+        assert_eq!(scan.next_event(doc), Ok(Event::Text(" x".into())));
+        assert!(matches!(scan.next_event(doc), Ok(Event::StartElement { .. })));
+        assert!(matches!(scan.next_event(doc), Ok(Event::EndElement)));
+        assert_eq!(scan.next_event(doc), Ok(Event::End));
+
+        let head = "text<a/>";
+        let mut scan = Scan::new().allow_fragment();
+        assert_eq!(scan.next_event(head), Ok(Event::Text("text".into())));
+        assert!(matches!(scan.next_event(head), Ok(Event::StartElement { .. })));
+        assert!(matches!(scan.next_event(head), Ok(Event::EndElement)));
+        assert_eq!(scan.next_event(head), Ok(Event::End));
+
+        // A document still has no text outside its root.
+        let mut scan = Scan::new();
+        let loose = alloc::format!("{}", scan.next_event(head).unwrap_err());
         assert!(loose.contains("no root element"), "{loose}");
     }
 
