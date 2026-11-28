@@ -75,13 +75,16 @@ pub const E_INVALIDARG: HResult = 0x8007_0057u32 as i32;
 pub const E_OUTOFMEMORY: HResult = 0x8007_000eu32 as i32;
 pub const E_ACCESSDENIED: HResult = 0x8007_0005u32 as i32;
 
-/// The ledger's kinds (GalaRecordMissing's codes).
+/// The ledger's kinds (GalaRecordMissing's codes). Kind 6 ("stub")
+/// is not among them and must not be: it belongs to an export that
+/// reports itself and ends the process (`gala_stubs`), so a row of
+/// this DLL's wearing it would name a death that never happened. A
+/// call answered as Windows answers it whose effect is absent all the
+/// same -- a property taken and acted on nowhere -- is a gap, and
+/// `LEDGER_UNSUPPORTED` is its kind.
 pub const LEDGER_UNSUPPORTED: u32 = 2;
 pub const LEDGER_NOT_IMPLEMENTED: u32 = 3;
 pub const LEDGER_OTHER: u32 = 5;
-/// Answered as Windows answers it, with nothing behind it: a value
-/// gala keeps and never acts on.
-pub const LEDGER_STUB: u32 = 6;
 /// Not a gap: the first call that reached something gala answers,
 /// recorded so a run says a program got here at all.
 pub const LEDGER_REACHED: u32 = 9;

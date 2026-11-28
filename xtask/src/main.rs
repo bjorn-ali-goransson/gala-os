@@ -10103,8 +10103,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // parsed), and the depth that stopped a read.
             r#"ledger: {"service":"xmllite.dll!IXmlReader::GetProperty(property)","what":"not implemented""#,
             r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(property)","what":"unsupported""#,
-            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(MultiLanguage)","what":"stub""#,
-            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(DtdProcessing) parse","what":"stub""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(MultiLanguage)","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(DtdProcessing) parse","what":"unsupported""#,
             r#"ledger: {"service":"xmllite.dll!IXmlReader::Read(MaxElementDepth)","what":"other""#,
             // The writer on the stream: a document handed over, an
             // interface it does not answer for, and an output that is

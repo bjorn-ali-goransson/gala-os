@@ -72,8 +72,8 @@ use gala_xml::{Attr, Event, Reason, Scan};
 use crate::{
     E_ACCESSDENIED, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid,
     HResult, IID_ISEQUENTIAL_STREAM, IID_ISTREAM, IID_IUNKNOWN, LEDGER_NOT_IMPLEMENTED,
-    LEDGER_OTHER, LEDGER_STUB, LEDGER_UNSUPPORTED, Obj, S_FALSE, S_OK, VTable, add_ref_of, data1,
-    free_box, guid, not_implemented, push, put, record, record_head, release_of, text, try_box,
+    LEDGER_OTHER, LEDGER_UNSUPPORTED, Obj, S_FALSE, S_OK, VTable, add_ref_of, data1, free_box,
+    guid, not_implemented, push, put, record, record_head, release_of, text, try_box,
 };
 
 /// `IXmlReader` (xmllite.idl).
@@ -843,7 +843,7 @@ extern "system" fn set_property(this: Obj, property: u32, value: isize) -> HResu
                 // does not know an encoding, Windows asks this object
                 // for the character set, so a document in one is
                 // refused here and read there.
-                record(b"IXmlReader::SetProperty(MultiLanguage)", LEDGER_STUB, 0);
+                record(b"IXmlReader::SetProperty(MultiLanguage)", LEDGER_UNSUPPORTED, 0);
             }
             S_OK
         }
@@ -870,7 +870,7 @@ extern "system" fn set_property(this: Obj, property: u32, value: isize) -> HResu
                     // WC_E_DTDPROHIBITED at the read that meets it,
                     // where Windows hands out the declaration as a node
                     // and expands its entities.
-                    record(b"IXmlReader::SetProperty(DtdProcessing) parse", LEDGER_STUB, 0);
+                    record(b"IXmlReader::SetProperty(DtdProcessing) parse", LEDGER_UNSUPPORTED, 0);
                 }
                 r.dtd = value;
                 S_OK
