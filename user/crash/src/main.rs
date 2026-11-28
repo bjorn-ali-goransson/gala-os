@@ -113,7 +113,14 @@
 //! memory the program believes it committed, and one to a free address
 //! is a pointer that was never memory. Word's own stop is a write from
 //! inside d3d11.dll to an address that differs from run to run
-//! (ROADMAP OF), and which of the four it is decides where to look. So the crash report must name the
+//! (ROADMAP OF), and which of the four it is decides where to look.
+//!
+//! With the argument `freed` (scenario `crash_freed`) the fault is on
+//! memory the program had and released, which no region line can tell
+//! from an address that was never memory: both are free. What tells them
+//! apart is the map's own record of what stopped being mapped
+//! (nt::vad::Gone), and the report must name the range, how it went, how
+//! long before the report and that the call was the program's own. So the crash report must name the
 //! region: committed, in private memory, allowing reading, the extent
 //! of the committed run (one page, the reservation around it being
 //! reserved only) and the base it was reserved at with the protection
@@ -824,6 +831,33 @@ fn region() -> u32 {
     1
 }
 
+/// `freed`: a fault on memory this program had and released, which is
+/// the shape of Word's own stop (ROADMAP OF) -- a 64K-aligned base plus
+/// a small offset, in a gap, in a process that has allocated and freed
+/// plenty. The region line alone cannot tell it from an address that was
+/// never memory, so the report reads the map's record of the unmapping
+/// (nt::vad::Gone) as well: this range, released, by a call in this
+/// program, moments before.
+fn freed() -> u32 {
+    let (status, base, _) =
+        ntrt::allocate(0, 0x10000, ntrt::MEM_RESERVE | ntrt::MEM_COMMIT, ntrt::PAGE_READWRITE);
+    if status != 0 || base == 0 {
+        ntrt::print("crash: no memory to release\r\n");
+        return 2;
+    }
+    let (status, _, _) = ntrt::free(base, 0, ntrt::MEM_RELEASE);
+    if status != 0 {
+        ntrt::print("crash: the memory would not release\r\n");
+        return 2;
+    }
+    ntrt::print("crash: writing to memory this program released\r\n");
+    // SAFETY: addresses this program released; the write faults because
+    // nothing is mapped there, and nothing handles the exception.
+    unsafe { core::ptr::write_volatile((base + 0x40) as *mut u32, WRITTEN) };
+    ntrt::print("crash: still alive?!\r\n");
+    1
+}
+
 fn main() -> u32 {
     if arg_is(*b"panic") {
         return index_past_end();
@@ -845,6 +879,9 @@ fn main() -> u32 {
     }
     if arg_is(*b"region") {
         return region();
+    }
+    if arg_is(*b"freed") {
+        return freed();
     }
     if arg_is(*b"raise") {
         return raise();

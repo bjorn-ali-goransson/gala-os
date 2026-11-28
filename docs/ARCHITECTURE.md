@@ -1632,6 +1632,16 @@ unless the runs grow, then only the shift of the runs after it (bench
   **MEM_RESET** keeps the contents (Windows may discard them; keeping
   them is allowed) and MEM_RESET_UNDO, alone in the allocation type, then
   succeeds.
+- **What went away**: the map keeps the last 32 ranges the process
+  unmapped (`vad::Gone`: the range, whether it was released,
+  decommitted, or a view of a section or of an image, where the call
+  that did it returned to, and the uptime), written by `vm::free` and
+  `section::unmap_view` under the lock the map is already held with and
+  read by a crash report alone (OBSERVABILITY "Crash reports"). A fault
+  at an address nothing is mapped at cannot otherwise tell memory that
+  went away from an address that was never memory, and no Windows API
+  answers it. `munmap` of a Linux mapping (`unmap_range`) is not
+  recorded.
 - **What the loader registers**: the image (MEM_IMAGE, sections with
   Windows-style protections such as WRITECOPY), the stack reservation,
   and PEB/params/TEB.

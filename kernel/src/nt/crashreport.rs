@@ -987,13 +987,43 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
         let read = process.vad.try_lock().map(|vad| -> Result<_, NtStatus> {
             let info = vad.query(addr)?;
             let below = (info.state == vad::MEM_FREE).then(|| vad.nearest_below(addr)).flatten();
-            Ok((info, below))
+            // What was mapped there and went away, asked only when
+            // nothing is mapped there now (vad::Gone).
+            let gone = (info.state != vad::MEM_COMMIT).then(|| vad.gone_at(addr));
+            Ok((info, below, gone))
         });
         match read {
-            Some(Ok((info, below))) => info!(
-                "crash report:   {}",
-                Region { addr, info, image: module_at(process, addr), below }
-            ),
+            Some(Ok((info, below, gone))) => {
+                info!(
+                    "crash report:   {}",
+                    Region { addr, info, image: module_at(process, addr), below }
+                );
+                match gone {
+                    Some((Some(g), _)) => {
+                        let at = match g.by {
+                            vad::By::User { at, pid } if pid == process.id => {
+                                module_at(process, at)
+                            }
+                            _ => None,
+                        };
+                        let now_ms = super::platform::monotonic_ns() / 1_000_000;
+                        info!(
+                            "crash report:   {}",
+                            Unmapped { gone: g, at, pid: process.id, now_ms }
+                        );
+                    }
+                    Some((None, true)) => info!(
+                        "crash report:   nothing in the {} unmappings this process still has on \
+                         record covers {addr:#x}; older ones have rolled off",
+                        vad::GONE
+                    ),
+                    Some((None, false)) => info!(
+                        "crash report:   nothing this process unmapped covers {addr:#x}, and \
+                         every unmapping it made is on record"
+                    ),
+                    None => {}
+                }
+            }
             Some(Err(_)) => info!(
                 "crash report:   {addr:#x} is not an address a process of this kernel can have"
             ),
@@ -1292,6 +1322,45 @@ struct Region {
     /// from one far from anything. Only read when nothing is mapped at
     /// the address; `None` when nothing is mapped below it either.
     below: Option<(u64, u64, u32)>,
+}
+
+/// A range that stopped being mapped (`vad::Gone`), as the report says
+/// it: what a fault at an address nothing is mapped at asks next.
+struct Unmapped {
+    gone: vad::Gone,
+    /// The image containing a user call's address, when the call was
+    /// made in this process (one process freeing another's memory is not
+    /// shown as a module of this one).
+    at: Option<Module>,
+    /// The process the report is about, to tell that case from this one.
+    pid: u64,
+    /// Uptime in ms as the report is written: the record's own time says
+    /// nothing without it.
+    now_ms: u64,
+}
+
+impl fmt::Display for Unmapped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let g = self.gone;
+        let how = match g.how {
+            vad::How::Released => "released",
+            vad::How::Decommitted => "decommitted (its addresses left reserved)",
+            vad::How::View { image: false } => "unmapped (a view of a section)",
+            vad::How::View { image: true } => "unmapped (a view of an image: a module that left)",
+        };
+        write!(
+            f,
+            "{:#x}..{:#x} was {how} {} ms before this report",
+            g.base,
+            g.end,
+            self.now_ms.saturating_sub(g.at_ms)
+        )?;
+        match g.by {
+            vad::By::Kernel => f.write_str(", by the kernel itself"),
+            vad::By::User { at, pid } if pid == self.pid => write!(f, ", by {}", At(at, self.at)),
+            vad::By::User { at, pid } => write!(f, ", by {at:#x} in pid {pid}"),
+        }
+    }
 }
 
 /// What kind of memory an allocation is, as the report says it.
@@ -1611,6 +1680,45 @@ mod tests {
         let s = alloc::format!("{}", At(0x1_4000_1234, Some(m)));
         assert_eq!(s, "0x140001234 (crash.exe+0x1234)");
         assert_eq!(alloc::format!("{}", At(0x10, None)), "0x10");
+    }
+
+    /// The record a fault reads when nothing is mapped at the address
+    /// (`vad::Gone`): the range, how it went, how long before the report
+    /// and whose call it was.
+    #[test]
+    fn an_unmapped_range_says_how_it_went_and_whose_call_it_was() {
+        let mut m = Module { name: [0; 40], len: 9, base: 0x3_5905_0000 };
+        m.name[..9].copy_from_slice(b"d3d11.dll");
+        let released = vad::Gone {
+            base: 0xa80_0000,
+            end: 0xa87_0000,
+            how: vad::How::Released,
+            by: vad::By::User { at: 0x3_5951_4ecc, pid: 12 },
+            at_ms: 9_988,
+        };
+        assert_eq!(
+            alloc::format!("{}", Unmapped { gone: released, at: Some(m), pid: 12, now_ms: 10_000 }),
+            "0xa800000..0xa870000 was released 12 ms before this report, by 0x359514ecc \
+             (d3d11.dll+0x4c4ecc)"
+        );
+        // A module no longer loaded leaves the address to stand alone,
+        // and another process's call stays that process's.
+        assert_eq!(
+            alloc::format!("{}", Unmapped { gone: released, at: None, pid: 13, now_ms: 9_988 }),
+            "0xa800000..0xa870000 was released 0 ms before this report, by 0x359514ecc in pid 12"
+        );
+        let unloaded = vad::Gone {
+            base: 0x1_8000_0000,
+            end: 0x1_8012_0000,
+            how: vad::How::View { image: true },
+            by: vad::By::Kernel,
+            at_ms: 0,
+        };
+        assert_eq!(
+            alloc::format!("{}", Unmapped { gone: unloaded, at: None, pid: 12, now_ms: 5 }),
+            "0x180000000..0x180120000 was unmapped (a view of an image: a module that left) \
+             5 ms before this report, by the kernel itself"
+        );
     }
 
     /// The three answers a faulting address can have, in the shapes

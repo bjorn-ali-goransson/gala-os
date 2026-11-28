@@ -216,6 +216,56 @@ pub struct RegionInfo {
     pub kind: u32,
 }
 
+/// Who asked for a range to stop being mapped (`Gone`). A user call's
+/// address is where its system call returns to -- the caller of ntdll's
+/// stub, which for a program that frees through kernel32 is KERNELBASE
+/// and not the DLL that asked. The range and the time are what the
+/// record is for; naming the DLL behind such a call takes a stack
+/// capture on it (OBSERVABILITY "Stack captures").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum By {
+    /// The kernel itself: a thread's stack as the thread ends, a
+    /// rollback, a hot swap.
+    Kernel,
+    /// `at` is an address in the process `pid`, which is the process the
+    /// range belonged to except when one process frees another's memory.
+    User { at: u64, pid: u64 },
+}
+
+/// How a range stopped being mapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum How {
+    /// MEM_RELEASE: the addresses are free again.
+    Released,
+    /// MEM_DECOMMIT: still reserved, with nothing mapped.
+    Decommitted,
+    /// A view of a section unmapped; an image's is a module gone from
+    /// under every pointer into it.
+    View { image: bool },
+}
+
+/// A range that stopped being mapped: the question a fault at an address
+/// nothing is mapped at (or at a page the program believes it committed)
+/// raises next, which is whether that memory was ever mapped and who
+/// unmapped it. No Windows API answers it and nothing else in the system
+/// remembers, so the map keeps the last few itself -- a fixed ring, no
+/// allocation, written under the lock the map is already taken with and
+/// read by nt::crashreport alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gone {
+    pub base: u64,
+    pub end: u64,
+    pub how: How,
+    pub by: By,
+    /// Uptime in ms when it happened (`platform::monotonic_ns`), which a
+    /// report says as a distance from itself.
+    pub at_ms: u64,
+}
+
+/// How many unmappings a process keeps. Small on purpose: what is wanted
+/// is the moments before a fault, and every process pays for the record.
+pub const GONE: usize = 32;
+
 #[derive(Default, Debug)]
 pub struct Vad {
     /// Sorted by base, non-overlapping.
@@ -231,6 +281,12 @@ pub struct Vad {
     /// The most bytes reserved and committed (all kinds) that `sizes`
     /// has seen: VM_COUNTERS' PeakVirtualSize and PeakWorkingSetSize.
     peaks: (u64, u64),
+    /// The last `GONE` ranges unmapped (`Gone`), newest at `gone_next`
+    /// minus one, and how many rolled off before them -- so that "no
+    /// record" can be told from "no record kept".
+    gone: [Option<Gone>; GONE],
+    gone_next: usize,
+    gone_lost: u64,
 }
 
 fn page_round(start: u64, size: u64) -> Result<(u64, u64), NtStatus> {
@@ -273,6 +329,12 @@ impl Vad {
             private_commit: self.private_commit,
             limit: self.limit,
             peaks: self.peaks,
+            // A fork's child inherits the records: the ranges its parent
+            // unmapped are unmapped in it too, and `By::User`'s pid says
+            // whose call it was.
+            gone: self.gone,
+            gone_next: self.gone_next,
+            gone_lost: self.gone_lost,
         })
     }
 
@@ -504,6 +566,24 @@ impl Vad {
     pub fn page(&self, addr: u64) -> Option<PageState> {
         let a = &self.allocs[self.index_of(addr)?];
         Some(a.run_at((addr - a.base) / PAGE).state)
+    }
+
+    /// Records that `[base, end)` stopped being mapped (`Gone`).
+    pub fn record_gone(&mut self, base: u64, end: u64, how: How, by: By) {
+        if self.gone[self.gone_next].is_some() {
+            self.gone_lost += 1;
+        }
+        let at_ms = super::platform::monotonic_ns() / 1_000_000;
+        self.gone[self.gone_next] = Some(Gone { base, end, how, by, at_ms });
+        self.gone_next = (self.gone_next + 1) % GONE;
+    }
+
+    /// The most recent record covering `addr`, and whether older records
+    /// have rolled off (nt::crashreport).
+    pub fn gone_at(&self, addr: u64) -> (Option<Gone>, bool) {
+        let mut newest_first =
+            (0..GONE).rev().filter_map(|i| self.gone[(self.gone_next + i) % GONE]);
+        (newest_first.find(|g| (g.base..g.end).contains(&addr)), self.gone_lost > 0)
     }
 
     /// The allocation nearest below `addr`: its base, its end and its
@@ -767,7 +847,7 @@ impl Vad {
                 .try_push(Allocation { base, pages, kind, alloc_protect, runs })
                 .map_err(|_| NtStatus::NO_MEMORY)?;
         }
-        Ok(Vad { allocs, private_commit, limit: 0, peaks: (0, 0) })
+        Ok(Vad { allocs, private_commit, limit: 0, peaks: (0, 0), ..Default::default() })
     }
 }
 
@@ -777,6 +857,38 @@ mod tests {
 
     fn rw() -> u32 {
         PAGE_READWRITE
+    }
+
+    #[test]
+    fn unmapped_ranges_stay_on_record_until_newer_ones_push_them_off() {
+        let mut v = Vad::default();
+        assert_eq!(v.gone_at(0x1_0040), (None, false));
+        let by = By::User { at: 0x1_4000_204c, pid: 4 };
+        v.record_gone(0x1_0000, 0x2_0000, How::Released, by);
+        let (g, lost) = v.gone_at(0x1_0040);
+        assert_eq!(
+            g.map(|g| (g.base, g.end, g.how, g.by)),
+            Some((0x1_0000, 0x2_0000, How::Released, by))
+        );
+        assert!(!lost);
+        // Half-open, as every range in the map is: the end is past it.
+        assert_eq!(v.gone_at(0x2_0000).0, None);
+        // The newest record covering an address wins, because the same
+        // pages are reserved and released over and over.
+        v.record_gone(0x1_0000, 0x1_1000, How::Decommitted, By::Kernel);
+        assert_eq!(
+            v.gone_at(0x1_0040).0.map(|g| (g.how, g.by)),
+            Some((How::Decommitted, By::Kernel))
+        );
+        assert_eq!(v.gone_at(0x1_8000).0.map(|g| g.how), Some(How::Released));
+        // A full ring drops the oldest records and says that it did, so
+        // that a report cannot read silence as "never mapped".
+        for i in 0..GONE as u64 {
+            let (base, end) = (0x10_0000 + i * PAGE, 0x10_1000 + i * PAGE);
+            v.record_gone(base, end, How::View { image: true }, By::Kernel);
+        }
+        assert_eq!(v.gone_at(0x1_0040), (None, true));
+        assert_eq!(v.gone_at(0x10_0000).0.map(|g| g.how), Some(How::View { image: true }));
     }
 
     #[test]

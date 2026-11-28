@@ -655,7 +655,7 @@ fn undo(done: &[Done]) {
                 warn!("hotswap: could not restore {va:#x} in process {}", d.process.id);
             }
         }
-        let _ = vm::free(&d.process, d.blob, 0, vm::MEM_RELEASE);
+        let _ = vm::free(&d.process, d.blob, 0, vm::MEM_RELEASE, crate::nt::vad::By::Kernel);
     }
 }
 
@@ -1442,7 +1442,7 @@ fn map_blob(image: &ImagePlan, t: &Target) -> Result<u64, &'static str> {
     match bound {
         Ok(()) => Ok(at),
         Err(e) => {
-            let _ = vm::free(p, at, 0, vm::MEM_RELEASE);
+            let _ = vm::free(p, at, 0, vm::MEM_RELEASE, crate::nt::vad::By::Kernel);
             Err(e)
         }
     }

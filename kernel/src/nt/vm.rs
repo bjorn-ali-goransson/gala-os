@@ -516,6 +516,7 @@ pub fn free(
     base: u64,
     size: u64,
     free_type: u32,
+    by: vad::By,
 ) -> Result<(u64, u64), NtStatus> {
     process.live_space()?;
     if process
@@ -527,11 +528,14 @@ pub fn free(
         return Err(NtStatus::UNABLE_TO_DELETE_SECTION);
     }
     let mut vad = process.vad.lock();
-    let range = match free_type {
-        MEM_DECOMMIT => vad.decommit(base, size)?,
-        MEM_RELEASE => vad.release(base, size)?,
+    let (range, how) = match free_type {
+        MEM_DECOMMIT => (vad.decommit(base, size)?, vad::How::Decommitted),
+        MEM_RELEASE => (vad.release(base, size)?, vad::How::Released),
         _ => return Err(NtStatus::INVALID_PARAMETER_4),
     };
+    // A fault here afterwards is the one the map cannot answer from its
+    // allocations, because there is nothing left to read (vad::Gone).
+    vad.record_gone(range.0, range.0 + range.1, how, by);
     charge::sync(process, vad.private_commit());
     // Before the VAD lock goes: memory allocated at once at the same place
     // must not find these frames still mapped (and their old contents).

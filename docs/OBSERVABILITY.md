@@ -1321,6 +1321,27 @@ Scenarios `crash` (nothing mapped, and nothing below it) and
 `crash_region` (committed for reading only, inside a larger
 reservation).
 
+A gap has a history too, and the map keeps the part of it that answers
+the question (`vad::Gone`, ARCHITECTURE "Virtual memory of processes"):
+the last 32 ranges the process unmapped. A fault at an address nothing
+is mapped at -- or at a page the program believes it committed -- reads
+it, and the line it adds is the difference between memory that went away
+and an address that was never memory:
+
+```
+crash report:   0x10000..0x20000 was released 9 ms before this report, by 0x140003758 (crash.exe+0x3758)
+crash report:   nothing this process unmapped covers 0x0, and every unmapping it made is on record
+```
+
+The address is where the system call returned to, so for a program that
+frees through kernel32 it names KERNELBASE and not the DLL that asked:
+the range, the time and that the call was the program's own are what the
+record is for, and the DLL behind such a call takes a stack capture on
+the free ("Stack captures" below). The kernel's own unmappings say so
+instead ("by the kernel itself"), a view of an image says that a module
+left, and when the ring has rolled over the line says so rather than let
+silence read as "never mapped". Scenario `crash_freed`.
+
 ntdll reports an exception no handler took before it calls the
 top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
@@ -1401,10 +1422,12 @@ withdrawal can meet a note which is not its own, and it leaves it, for
 the crash report. Scenarios `crash`, `crash_dispatched`,
 `crash_filtered`, `crash_continued`, `crash_continued_other`,
 `crash_unhandled_both`, `crash_delay` (two threads, a delay-loaded
-function and a delay-loaded DLL) and `crash_region` (what is at the
-faulting address), the first seven each with an ARM64 twin. An exception in 32-bit code (a WOW64 process, CS
-0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
-eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
+function and a delay-loaded DLL), `crash_region` (what is at the
+faulting address) and `crash_freed` (memory the program released), the
+first seven each with an ARM64 twin. An exception in 32-bit code (a
+WOW64 process, CS 0x23) says `32-bit x86 (WOW64)` after the
+personality and shows eax..esp, eip and the stack's 4-byte words
+(`[esp+0x..]`); scenario `wow64_crash`
 (no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`
 (the 32-bit ntdll's dispatcher found no handler: wow64.dll passes its
 record and the 32-bit registers on through GalaUnhandledException, and

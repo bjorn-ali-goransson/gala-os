@@ -13740,6 +13740,30 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // Memory the program had and released, then wrote to: the shape
+        // of Word's own stop (ROADMAP OF). The region line says only that
+        // nothing is mapped there, which an address that was never memory
+        // says too; the map's record of the unmapping (nt::vad::Gone)
+        // names the range, that it was released and whose call released
+        // it, which is the difference between the two.
+        name: "crash_freed",
+        cmdline: "qemu_exit run=crash.exe args=freed",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to memory this program released",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "nothing is mapped at 0x",
+            " was released ",
+            // The test programs are based at 0x140000000: this says the
+            // release was attributed to a call in the program itself and
+            // not to the kernel, which says so in words instead.
+            " ms before this report, by 0x1400",
+            "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // The same crash with ntdll: the exception goes to its dispatcher,
         // finds no handler and ends the process (as on Windows), and the
         // crash report says where.

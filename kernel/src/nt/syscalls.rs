@@ -1495,7 +1495,11 @@ fn nt_free_virtual_memory(call: &mut Call<'_>) -> NtStatus {
     let (base_ptr, size_ptr, free_type) = (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32);
     let base = tri!(call.read_u64(base_ptr));
     let size = tri!(call.read_u64(size_ptr));
-    let (base, size) = tri!(vm::free(&target, base, size, free_type));
+    let by = vad::By::User {
+        at: super::abi::stub_return_address(&call.process, &caller_regs(call)).unwrap_or(0),
+        pid: call.process.id,
+    };
+    let (base, size) = tri!(vm::free(&target, base, size, free_type, by));
     tri!(call.write_u64(base_ptr, base));
     tri!(call.write_u64(size_ptr, size));
     NtStatus::SUCCESS
@@ -5653,7 +5657,11 @@ fn nt_map_view_of_section(call: &mut Call<'_>) -> NtStatus {
 /// NtUnmapViewOfSection(ProcessHandle, BaseAddress)
 fn nt_unmap_view_of_section(call: &mut Call<'_>) -> NtStatus {
     tri!(call.check_current_process(Handle(arg!(call, 0))));
-    match section::unmap_view(&call.process, arg!(call, 1)) {
+    let by = vad::By::User {
+        at: super::abi::stub_return_address(&call.process, &caller_regs(call)).unwrap_or(0),
+        pid: call.process.id,
+    };
+    match section::unmap_view(&call.process, arg!(call, 1), by) {
         Ok(()) => NtStatus::SUCCESS,
         Err(e) => e,
     }
