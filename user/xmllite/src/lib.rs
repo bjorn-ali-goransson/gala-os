@@ -73,11 +73,15 @@ pub const E_NOINTERFACE: HResult = 0x8000_4002u32 as i32;
 pub const E_POINTER: HResult = 0x8000_4003u32 as i32;
 pub const E_INVALIDARG: HResult = 0x8007_0057u32 as i32;
 pub const E_OUTOFMEMORY: HResult = 0x8007_000eu32 as i32;
+pub const E_ACCESSDENIED: HResult = 0x8007_0005u32 as i32;
 
 /// The ledger's kinds (GalaRecordMissing's codes).
 pub const LEDGER_UNSUPPORTED: u32 = 2;
 pub const LEDGER_NOT_IMPLEMENTED: u32 = 3;
 pub const LEDGER_OTHER: u32 = 5;
+/// Answered as Windows answers it, with nothing behind it: a value
+/// gala keeps and never acts on.
+pub const LEDGER_STUB: u32 = 6;
 /// Not a gap: the first call that reached something gala answers,
 /// recorded so a run says a program got here at all.
 pub const LEDGER_REACHED: u32 = 9;
@@ -86,6 +90,37 @@ pub const LEDGER_REACHED: u32 = 9;
 const PREFIX: &str = "xmllite.dll!";
 /// The ledger keeps this many characters of a name.
 const ROOM: usize = 96;
+
+/// Takes a reference on an object a program handed a property, as the
+/// reader and the writer hold one (measured: the object is AddRef'd and
+/// never asked for an interface). A null pointer is no object, and
+/// holding it costs nothing.
+pub(crate) fn add_ref_of(object: Obj) {
+    if object.is_null() {
+        return;
+    }
+    // SAFETY: a COM object from the caller; slot 1 of its vtable is
+    // IUnknown::AddRef.
+    unsafe {
+        let vtable = *(object as *const *const usize);
+        let f: extern "system" fn(Obj) -> u32 = core::mem::transmute(*vtable.add(1));
+        f(object);
+    }
+}
+
+/// Gives a held reference back.
+pub(crate) fn release_of(object: Obj) {
+    if object.is_null() {
+        return;
+    }
+    // SAFETY: a COM object the caller handed a property and this DLL
+    // took a reference on; slot 2 of its vtable is IUnknown::Release.
+    unsafe {
+        let vtable = *(object as *const *const usize);
+        let f: extern "system" fn(Obj) -> u32 = core::mem::transmute(*vtable.add(2));
+        f(object);
+    }
+}
 
 /// A GUID from its parts, as the SDK writes one.
 pub const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {

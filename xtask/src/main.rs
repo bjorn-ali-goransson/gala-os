@@ -10074,7 +10074,13 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // and a prefixed namespace with their attributes (the namespace
         // declarations among them), text, an empty element, CDATA, a
         // processing instruction and end tags -- then end of file and a
-        // document that is not well formed. The writer: CreateXmlWriter
+        // document that is not well formed. Its properties: the whole
+        // enumeration, what each one defaults to and takes, when they
+        // lock (the first Read, not SetInput), the two that hold an
+        // object with a reference of the reader's own, and what the
+        // kept values do -- a conformance level that reads character
+        // data outside the root elements, an element depth that stops
+        // the read that would go past it. The writer: CreateXmlWriter
         // and all 32 methods of IXmlWriter, fifty cases compared byte
         // for byte with what Windows' own writer wrote, the properties,
         // the namespaces it declares, the place of the XML declaration
@@ -10090,6 +10096,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "xmllite_test: ok",
+            // The reader's properties: the two past the end of the
+            // enumeration, the two values gala keeps and acts on
+            // nowhere (the MultiLanguage object it never asks for an
+            // encoding, DtdProcessing Parse with no declaration
+            // parsed), and the depth that stopped a read.
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::GetProperty(property)","what":"not implemented""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(property)","what":"unsupported""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(MultiLanguage)","what":"stub""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::SetProperty(DtdProcessing) parse","what":"stub""#,
+            r#"ledger: {"service":"xmllite.dll!IXmlReader::Read(MaxElementDepth)","what":"other""#,
             // The writer on the stream: a document handed over, an
             // interface it does not answer for, and an output that is
             // no stream at all.

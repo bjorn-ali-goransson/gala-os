@@ -29,17 +29,39 @@
 //!
 //! The document is read whole from the input stream at SetInput and
 //! decoded there (XmlLite reads it in chunks as its caller reads nodes;
-//! gala's scanner works on the whole text). What this reader asks of a
+//! gala's scanner works on the whole text), but bytes that do not
+//! decode are answered by the FIRST READ and not by SetInput, which is
+//! S_OK and leaves the reader Initial: XmlLite decodes as it reads, so
+//! that is where its caller is told, and a program that looks only at
+//! Read's code is told at all. What this reader asks of a
 //! stream is what Windows' reader asks, measured: QueryInterface for
 //! IStream and ISequentialStream::Read until it is given nothing -- no
 //! AddRef, no Release, no Seek -- so a program may hand it a stream that
 //! can do no more.
 //!
+//! Every property of XmlReaderProperty is kept, with the default
+//! Windows gives it, and read back as it was set; the two that hold an
+//! object (MultiLanguage, XmlResolver) are held with a reference of the
+//! reader's own, and GetProperty hands the pointer back with another.
+//! What a kept value does is measured too: ConformanceLevel Auto reads
+//! as Fragment does, MaxElementDepth refuses the read that would go
+//! deeper and 0 is no limit, and MaxEntityExpansion is kept and acted
+//! on by neither reader (Windows' own does not enforce it). The
+//! properties lock at the first read -- in the Interactive state every
+//! SetProperty is E_ACCESSDENIED, and in the Initial, Error and
+//! End-of-file states they are free again -- ReadState is never a
+//! program's to set, and everything past the enumeration is E_NOTIMPL
+//! both ways.
+//!
 //! Limits, each recorded in the ledger when a program meets it:
-//! ReadValueChunk and GetBaseUri are not implemented, a DTD is not
-//! parsed (DtdProcessing stays Prohibit, which is XmlLite's default),
-//! and the attribute getters answer with the position of the element's
-//! own node, since the scan does not keep one per attribute.
+//! ReadValueChunk and GetBaseUri are not implemented, DtdProcessing
+//! Parse is taken and the declaration is still not parsed, the
+//! MultiLanguage object is kept and never asked for an encoding (where
+//! gala's decoder does not know one, Windows calls
+//! IMultiLanguage2::GetCharsetInfo on that object and answers
+//! MX_E_ENCODING when the call fails), and the attribute getters answer
+//! with the position of the element's own node, since the scan does not
+//! keep one per attribute.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -48,10 +70,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use gala_xml::{Attr, Event, Reason, Scan};
 
 use crate::{
-    E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
-    IID_ISEQUENTIAL_STREAM, IID_ISTREAM, IID_IUNKNOWN, LEDGER_NOT_IMPLEMENTED, LEDGER_OTHER,
-    LEDGER_UNSUPPORTED, Obj, S_FALSE, S_OK, VTable, data1, free_box, guid, not_implemented, push,
-    put, record, record_head, text, try_box,
+    E_ACCESSDENIED, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid,
+    HResult, IID_ISEQUENTIAL_STREAM, IID_ISTREAM, IID_IUNKNOWN, LEDGER_NOT_IMPLEMENTED,
+    LEDGER_OTHER, LEDGER_STUB, LEDGER_UNSUPPORTED, Obj, S_FALSE, S_OK, VTable, add_ref_of, data1,
+    free_box, guid, not_implemented, push, put, record, record_head, release_of, text, try_box,
 };
 
 /// `IXmlReader` (xmllite.idl).
@@ -75,31 +97,45 @@ const STATE_INITIAL: isize = 0;
 const STATE_INTERACTIVE: isize = 1;
 const STATE_ERROR: isize = 2;
 const STATE_END_OF_FILE: isize = 3;
-/// A reader with no input: what one is before SetInput, and what
-/// SetInput(NULL) leaves it (measured).
+/// A reader that never had an input. SetInput(NULL) does not leave one
+/// here: it leaves the reader Initial, as a stream does, with nothing
+/// to read (measured).
 const STATE_CLOSED: isize = 4;
 
-// XmlReaderProperty.
+// XmlReaderProperty, the whole enumeration: a reader keeps every one of
+// them, and nothing past them.
+const PROP_MULTI_LANGUAGE: u32 = 0;
 const PROP_CONFORMANCE_LEVEL: u32 = 1;
+const PROP_RANDOM_ACCESS: u32 = 2;
+const PROP_XML_RESOLVER: u32 = 3;
 const PROP_DTD_PROCESSING: u32 = 4;
 const PROP_READ_STATE: u32 = 5;
+const PROP_MAX_ELEMENT_DEPTH: u32 = 6;
+const PROP_MAX_ENTITY_EXPANSION: u32 = 7;
 
 // XmlConformanceLevel, XmlReaderDtdProcessing.
+const LEVEL_AUTO: isize = 0;
 const LEVEL_FRAGMENT: isize = 1;
 const LEVEL_DOCUMENT: isize = 2;
 const DTD_PROHIBIT: isize = 0;
+const DTD_PARSE: isize = 1;
+
+/// What MaxElementDepth and MaxEntityExpansion are on a reader nobody
+/// has set them on (measured).
+const DEPTH_DEFAULT: isize = 256;
+const ENTITY_DEFAULT: isize = 100_000;
 
 // The codes XmlLite answers a read with, named as the SDK's XmlError
 // enum names them. `user/xmllite_test` measures each on the document
 // that provokes it; the two that are not measured say so in
 // `error_code`.
 const MX_E_INPUTEND: HResult = 0xc00c_ee01u32 as HResult;
-const MX_E_ENCODING: HResult = 0xc00c_ee02u32 as HResult;
 const WC_E_WHITESPACE: HResult = 0xc00c_ee21u32 as HResult;
 const WC_E_SEMICOLON: HResult = 0xc00c_ee22u32 as HResult;
 const WC_E_QUOTE: HResult = 0xc00c_ee24u32 as HResult;
 const WC_E_EQUAL: HResult = 0xc00c_ee25u32 as HResult;
 const WC_E_LESSTHAN: HResult = 0xc00c_ee26u32 as HResult;
+const WC_E_XMLCHARACTER: HResult = 0xc00c_ee2bu32 as HResult;
 const WC_E_SYNTAX: HResult = 0xc00c_ee2du32 as HResult;
 const WC_E_CDSECT: HResult = 0xc00c_ee2eu32 as HResult;
 const WC_E_COMMENT: HResult = 0xc00c_ee2fu32 as HResult;
@@ -118,13 +154,17 @@ const SC_E_MAXELEMENTDEPTH: HResult = 0xc00c_ee81u32 as HResult;
 /// What the reader was looking for where it stopped, as the code
 /// XmlLite answers that read with.
 ///
-/// Every row but two is measured on Windows in `user/xmllite_test`,
+/// Every row but one is measured on Windows in `user/xmllite_test`,
 /// which refuses the same documents: the three are one table in three
 /// places (the reasons are pinned in `gala_xml`'s own tests), so a row
-/// added to one belongs in the others. The two that are not measured
-/// are gala's own: nesting past the scanner's limit, which XmlLite
-/// answers for its own MaxElementDepth, and bytes that are not the
-/// encoding they are taken for, which it meets before any node.
+/// added to one belongs in the others. The one that is not measured is
+/// gala's own: nesting past the scanner's limit, which XmlLite answers
+/// for its own MaxElementDepth. Bytes that are not the encoding they
+/// are taken for is a character XML does not allow to XmlLite, not an
+/// encoding it cannot read (measured on a document that declares no
+/// encoding and holds a byte that is not UTF-8); the codes for an
+/// encoding it has no decoder for are MX_E_ENCODING and
+/// MX_E_ENCODINGSIGNATURE, which is the gap gala's decoder leaves.
 fn error_code(reason: Reason) -> HResult {
     match reason {
         Reason::Syntax | Reason::NoRoot => WC_E_SYNTAX,
@@ -149,7 +189,7 @@ fn error_code(reason: Reason) -> HResult {
         Reason::UndeclaredPrefix => NC_E_UNDECLAREDPREFIX,
         Reason::EmptyUri => NC_E_EMPTYURI,
         Reason::MaxDepth => SC_E_MAXELEMENTDEPTH,
-        Reason::Encoding => MX_E_ENCODING,
+        Reason::Encoding => WC_E_XMLCHARACTER,
     }
 }
 
@@ -271,8 +311,27 @@ struct Reader {
     open: Vec<(String, String, String)>,
     /// The scan's end of an empty element, still to be read and dropped.
     drop_end: bool,
-    /// ConformanceLevel Fragment: more than one root element is allowed.
-    fragment: bool,
+    /// XmlReaderProperty, each as a program set it (ConformanceLevel,
+    /// RandomAccess, DtdProcessing, MaxElementDepth,
+    /// MaxEntityExpansion): the value set is the value read back, so
+    /// Auto stays Auto and a depth limit nothing enforces is still
+    /// answered for.
+    level: isize,
+    random_access: isize,
+    dtd: isize,
+    max_depth: isize,
+    max_entity: isize,
+    /// The MultiLanguage and XmlResolver objects, each held with a
+    /// reference of the reader's own from the SetProperty that gave it
+    /// until the reader is released or another takes its place.
+    multi_language: Obj,
+    resolver: Obj,
+    /// Whether the reader has an input at all: SetInput(NULL) leaves it
+    /// Initial, like a stream, with nothing to read.
+    has_input: bool,
+    /// A document that did not decode, which the first read answers
+    /// (SetInput took the input and said S_OK).
+    pending: Option<gala_xml::Error>,
 }
 
 impl Reader {
@@ -289,8 +348,38 @@ impl Reader {
             attr_names: Names::default(),
             open: Vec::new(),
             drop_end: false,
-            fragment: false,
+            level: LEVEL_DOCUMENT,
+            random_access: 0,
+            dtd: DTD_PROHIBIT,
+            max_depth: DEPTH_DEFAULT,
+            max_entity: ENTITY_DEFAULT,
+            multi_language: core::ptr::null_mut(),
+            resolver: core::ptr::null_mut(),
+            has_input: false,
+            pending: None,
         }
+    }
+
+    /// ConformanceLevel: a document has one root element, a fragment any
+    /// number -- and Auto reads as a fragment does (measured).
+    fn fragment(&self) -> bool {
+        self.level != LEVEL_DOCUMENT
+    }
+
+    /// The input did not decode, which is what the first read answers:
+    /// where the bytes stopped being the encoding they were taken for,
+    /// and the Error state every read after it answers again.
+    fn refuse_input(&mut self) -> HResult {
+        let Some(e) = self.pending.take() else {
+            return S_FALSE;
+        };
+        let hr = error_code(e.reason);
+        record_head("IXmlReader::Read", &e.msg, LEDGER_OTHER, u64::from(e.line));
+        self.node = Node { line: e.line, pos: e.column, ..Node::default() };
+        self.attr = None;
+        self.state = STATE_ERROR;
+        self.failed = hr;
+        hr
     }
 
     /// Back to a reader with no input, which SetInput does before it
@@ -305,6 +394,8 @@ impl Reader {
         self.attr_names = Names::default();
         self.open = Vec::new();
         self.drop_end = false;
+        self.has_input = false;
+        self.pending = None;
     }
 
     /// The next node of the document, or the error the scan refuses it
@@ -421,6 +512,22 @@ impl Reader {
             self.state = STATE_ERROR;
             self.failed = E_OUTOFMEMORY;
             return E_OUTOFMEMORY;
+        }
+        // MaxElementDepth: the element that would stand deeper than it
+        // allows is refused rather than read, and the reader is left in
+        // the Error state. 0 is no limit at all (measured).
+        if self.node.ty == NODE_ELEMENT
+            && self.max_depth > 0
+            && isize::try_from(self.node.depth).unwrap_or(isize::MAX) >= self.max_depth
+        {
+            // How deep the limit was, for a program stopped by one it
+            // did not mean to set.
+            record(b"IXmlReader::Read(MaxElementDepth)", LEDGER_OTHER, self.max_depth as u64);
+            self.node = Node { line, pos, ..Node::default() };
+            self.attr = None;
+            self.state = STATE_ERROR;
+            self.failed = SC_E_MAXELEMENTDEPTH;
+            return SC_E_MAXELEMENTDEPTH;
         }
         self.state = STATE_INTERACTIVE;
         S_OK
@@ -628,6 +735,11 @@ extern "system" fn add_ref(this: Obj) -> u32 {
 extern "system" fn release(this: Obj) -> u32 {
     let left = obj(this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
     if left == 0 {
+        // What the properties hold goes back first: the objects outlive
+        // the reader, and the reader's references do not.
+        let r = obj(this);
+        release_of(r.multi_language);
+        release_of(r.resolver);
         // SAFETY: the last reference; nothing uses the object after.
         unsafe { free_box(this as *mut Reader) };
     }
@@ -638,8 +750,9 @@ extern "system" fn set_input(this: Obj, input: Obj) -> HResult {
     let r = obj(this);
     r.reset();
     if input.is_null() {
-        // SetInput(NULL) gives up the input, leaving the reader as
-        // CreateXmlReader made it.
+        // SetInput(NULL) gives the input up. The reader is Initial, as
+        // one given a stream is, and has nothing to read (measured).
+        r.state = STATE_INITIAL;
         return S_OK;
     }
     let stream = match stream_of(input) {
@@ -652,14 +765,13 @@ extern "system" fn set_input(this: Obj, input: Obj) -> HResult {
     };
     match gala_xml::decode(&bytes) {
         Ok(text) => r.text = text,
-        Err(e) => {
-            // Bytes that are not the encoding they are taken for: the
-            // input is refused here, before any node.
-            record_head("IXmlReader::SetInput", &e.msg, LEDGER_OTHER, u64::from(e.line));
-            return error_code(e.reason);
-        }
+        // Bytes that are not the encoding they are taken for: the input
+        // is taken all the same, and the first read is what answers for
+        // them (measured).
+        Err(e) => r.pending = Some(e),
     }
-    r.scan = if r.fragment { Scan::new().allow_fragment() } else { Scan::new() };
+    r.scan = if r.fragment() { Scan::new().allow_fragment() } else { Scan::new() };
+    r.has_input = true;
     r.state = STATE_INITIAL;
     S_OK
 }
@@ -670,16 +782,20 @@ extern "system" fn get_property(this: Obj, property: u32, value: *mut isize) -> 
     }
     let r = obj(this);
     let v = match property {
-        PROP_CONFORMANCE_LEVEL => {
-            if r.fragment {
-                LEVEL_FRAGMENT
-            } else {
-                LEVEL_DOCUMENT
-            }
+        PROP_MULTI_LANGUAGE | PROP_XML_RESOLVER => {
+            let held = if property == PROP_MULTI_LANGUAGE { r.multi_language } else { r.resolver };
+            // The pointer goes back with a reference of its own: what
+            // GetProperty hands out is the caller's to release
+            // (measured).
+            add_ref_of(held);
+            held as isize
         }
-        // A DTD is never parsed, which is XmlLite's own default.
-        PROP_DTD_PROCESSING => DTD_PROHIBIT,
+        PROP_CONFORMANCE_LEVEL => r.level,
+        PROP_RANDOM_ACCESS => r.random_access,
+        PROP_DTD_PROCESSING => r.dtd,
         PROP_READ_STATE => r.state,
+        PROP_MAX_ELEMENT_DEPTH => r.max_depth,
+        PROP_MAX_ENTITY_EXPANSION => r.max_entity,
         _ => {
             record(
                 b"IXmlReader::GetProperty(property)",
@@ -695,36 +811,105 @@ extern "system" fn get_property(this: Obj, property: u32, value: *mut isize) -> 
 
 extern "system" fn set_property(this: Obj, property: u32, value: isize) -> HResult {
     let r = obj(this);
-    match (property, value) {
-        // The level the next SetInput reads at: a document has one root
-        // element, a fragment any number.
-        (PROP_CONFORMANCE_LEVEL, LEVEL_DOCUMENT) => {
-            r.fragment = false;
+    if property > PROP_MAX_ENTITY_EXPANSION {
+        // The property and the value it was given, as one detail.
+        let detail = (u64::from(property) << 32) | (value as u64 & 0xffff_ffff);
+        record(b"IXmlReader::SetProperty(property)", LEDGER_UNSUPPORTED, detail);
+        return E_NOTIMPL;
+    }
+    // ReadState is the reader's own, and once a read has happened
+    // nothing is a program's to set: the properties are set up to the
+    // first read, and free again where the reader has not read yet, has
+    // been refused a document, or is past its end (measured).
+    if property == PROP_READ_STATE || r.state == STATE_INTERACTIVE {
+        return E_ACCESSDENIED;
+    }
+    match property {
+        PROP_MULTI_LANGUAGE | PROP_XML_RESOLVER => {
+            let given = value as Obj;
+            // The reference on the new object is taken before the old
+            // one goes back: the same object set twice must not fall to
+            // nothing in between.
+            add_ref_of(given);
+            let held = if property == PROP_MULTI_LANGUAGE {
+                &mut r.multi_language
+            } else {
+                &mut r.resolver
+            };
+            let old = core::mem::replace(held, given);
+            release_of(old);
+            if property == PROP_MULTI_LANGUAGE && !given.is_null() {
+                // Kept and never asked anything: where gala's decoder
+                // does not know an encoding, Windows asks this object
+                // for the character set, so a document in one is
+                // refused here and read there.
+                record(b"IXmlReader::SetProperty(MultiLanguage)", LEDGER_STUB, 0);
+            }
             S_OK
         }
-        (PROP_CONFORMANCE_LEVEL, LEVEL_FRAGMENT) => {
-            r.fragment = true;
+        // The level the next read reads at, as it was set: Auto stays
+        // Auto, and reads as Fragment does.
+        PROP_CONFORMANCE_LEVEL => match value {
+            LEVEL_AUTO | LEVEL_FRAGMENT | LEVEL_DOCUMENT => {
+                r.level = value;
+                S_OK
+            }
+            // Outside the enumeration: refused, and the old level stays
+            // (measured).
+            _ => E_INVALIDARG,
+        },
+        PROP_RANDOM_ACCESS => {
+            r.random_access = value;
             S_OK
         }
-        (PROP_DTD_PROCESSING, DTD_PROHIBIT) => S_OK,
-        _ => {
-            // The property and the value it was given, as one detail.
-            let detail = (u64::from(property) << 32) | (value as u64 & 0xffff_ffff);
-            record(b"IXmlReader::SetProperty(property)", LEDGER_UNSUPPORTED, detail);
-            E_NOTIMPL
+        PROP_DTD_PROCESSING => match value {
+            DTD_PROHIBIT | DTD_PARSE => {
+                if value == DTD_PARSE {
+                    // Taken, and a document type declaration is still
+                    // not parsed: a program that asked for one gets
+                    // WC_E_DTDPROHIBITED at the read that meets it,
+                    // where Windows hands out the declaration as a node
+                    // and expands its entities.
+                    record(b"IXmlReader::SetProperty(DtdProcessing) parse", LEDGER_STUB, 0);
+                }
+                r.dtd = value;
+                S_OK
+            }
+            _ => E_INVALIDARG,
+        },
+        PROP_MAX_ELEMENT_DEPTH => {
+            r.max_depth = value;
+            S_OK
         }
+        PROP_MAX_ENTITY_EXPANSION => {
+            // Kept and read back, and nothing enforces it -- which is
+            // what Windows' reader does with it too (measured: four
+            // against two entities worth six characters each expands
+            // both).
+            r.max_entity = value;
+            S_OK
+        }
+        _ => E_NOTIMPL,
     }
 }
 
 extern "system" fn read(this: Obj, ty: *mut u32) -> HResult {
     let r = obj(this);
-    let hr = match r.state {
-        // A reader with no input, and one past the end: nothing more,
-        // every time it is asked.
-        STATE_CLOSED | STATE_END_OF_FILE => S_FALSE,
-        // A document that was refused answers the same code again.
-        STATE_ERROR => r.failed,
-        _ => r.step(),
+    let hr = if !r.has_input {
+        // A reader that has no input: XmlLite faults here, so there is
+        // no behaviour to match and gala answers that there is nothing.
+        S_FALSE
+    } else if r.pending.is_some() {
+        // An input that did not decode is answered by this read.
+        r.refuse_input()
+    } else {
+        match r.state {
+            // Past the end: nothing more, every time it is asked.
+            STATE_CLOSED | STATE_END_OF_FILE => S_FALSE,
+            // A document that was refused answers the same code again.
+            STATE_ERROR => r.failed,
+            _ => r.step(),
+        }
     };
     put(ty, r.node.ty);
     hr

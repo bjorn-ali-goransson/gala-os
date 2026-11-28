@@ -57,9 +57,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::output::{Encoding, Says, taken};
 use crate::{
-    E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, Guid, HResult, IID_ISEQUENTIAL_STREAM,
-    IID_ISTREAM, IID_IUNKNOWN, LEDGER_OTHER, LEDGER_REACHED, LEDGER_UNSUPPORTED, Obj, S_OK, VTable,
-    data1, free_box, guid, not_implemented, put, record, record_head, text, try_box,
+    E_ACCESSDENIED, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, Guid, HResult,
+    IID_ISEQUENTIAL_STREAM, IID_ISTREAM, IID_IUNKNOWN, LEDGER_OTHER, LEDGER_REACHED,
+    LEDGER_UNSUPPORTED, Obj, S_OK, VTable, add_ref_of, data1, free_box, guid, not_implemented, put,
+    record, record_head, release_of, text, try_box,
 };
 
 /// `IXmlWriter` (xmllite.idl).
@@ -67,7 +68,6 @@ const IID_IXML_WRITER: Guid =
     guid(0x7279_fc88, 0x709d, 0x4095, [0xb6, 0x3d, 0x69, 0xfe, 0x4b, 0x0d, 0x90, 0x30]);
 
 // The writer's own codes (xmllite.h), which the reader does not use.
-const E_ACCESSDENIED: HResult = 0x8007_0005u32 as HResult;
 const E_UNEXPECTED: HResult = 0x8000_ffffu32 as HResult;
 const E_FAIL: HResult = 0x8000_4005u32 as HResult;
 /// The encoding is one XmlLite cannot write: what every write through
@@ -96,7 +96,9 @@ const PROP_UNDOCUMENTED: usize = 5;
 const PROPS: usize = 6;
 
 /// XmlConformanceLevel: Fragment allows as many root elements as a
-/// program likes, and text outside them.
+/// program likes, and text outside them. Auto is taken and kept like
+/// the other two, and a writer writes a document either way.
+const LEVEL_AUTO: isize = 0;
 const LEVEL_FRAGMENT: isize = 1;
 const LEVEL_DOCUMENT: isize = 2;
 
@@ -284,6 +286,11 @@ struct Writer {
     props: [isize; PROPS],
     /// Bytes have been produced, which locks the properties.
     begun: bool,
+    /// The second reference on the MultiLanguage object, which Windows'
+    /// writer takes when it starts writing and gives back when it is
+    /// released -- two references on an object it never asks anything
+    /// (measured).
+    writing: bool,
     /// The code every write answers until a new output revives the
     /// writer (S_OK while it is alive).
     dead: HResult,
@@ -332,6 +339,7 @@ impl Writer {
             oom: false,
             props: [0, 0, 1, 0, LEVEL_DOCUMENT, 0],
             begun: false,
+            writing: false,
             dead: S_OK,
             declared: false,
             started: false,
@@ -385,6 +393,18 @@ impl Writer {
         self.props[PROP_CONFORMANCE_LEVEL] == LEVEL_FRAGMENT
     }
 
+    /// Writing has begun: the moment the properties lock, and the
+    /// moment the second reference on the MultiLanguage object is taken
+    /// (measured). A writer revived by another output does not take a
+    /// third.
+    fn writing(&mut self) {
+        if self.writing {
+            return;
+        }
+        self.writing = true;
+        add_ref_of(self.props[PROP_MULTI_LANGUAGE] as Obj);
+    }
+
     // -----------------------------------------------------------------
     // Bytes.
     // -----------------------------------------------------------------
@@ -397,6 +417,7 @@ impl Writer {
         }
         self.buf.extend_from_slice(bytes);
         self.begun = true;
+        self.writing();
     }
 
     fn emit_char(&mut self, c: char) {
@@ -816,6 +837,9 @@ impl Writer {
             return E_UNEXPECTED;
         }
         self.started = true;
+        // A document started with its declaration left out writes no
+        // byte, and still begins the writing.
+        self.writing();
         S_OK
     }
 
@@ -1507,6 +1531,13 @@ extern "system" fn release(this: Obj) -> u32 {
         w.close_all();
         w.hand_over();
         w.drop_output();
+        // What the MultiLanguage property holds goes back: the one
+        // reference SetProperty took, and the one writing took.
+        let held = w.props[PROP_MULTI_LANGUAGE] as Obj;
+        release_of(held);
+        if w.writing {
+            release_of(held);
+        }
         // SAFETY: the last reference; nothing uses the object after.
         unsafe { free_box(this as *mut Writer) };
     }
@@ -1575,10 +1606,23 @@ extern "system" fn set_property(this: Obj, property: u32, value: isize) -> HResu
         return E_ACCESSDENIED;
     }
     match property as usize {
-        PROP_MULTI_LANGUAGE if value != 0 => {
-            // The encoding comes from the output and from nowhere
-            // else.
-            record(b"IXmlWriter::SetProperty(MultiLanguage)", LEDGER_UNSUPPORTED, value as u64);
+        PROP_MULTI_LANGUAGE => {
+            // The object is held with a reference of the writer's own,
+            // taken before the old one goes back; the encoding still
+            // comes from the output and from nowhere else.
+            let given = value as Obj;
+            add_ref_of(given);
+            let old = core::mem::replace(&mut w.props[PROP_MULTI_LANGUAGE], value);
+            release_of(old as Obj);
+            if value != 0 {
+                record(b"IXmlWriter::SetProperty(MultiLanguage)", LEDGER_UNSUPPORTED, value as u64);
+            }
+            return S_OK;
+        }
+        // Outside the enumeration: refused, and the old level stays
+        // (measured).
+        PROP_CONFORMANCE_LEVEL if !(LEVEL_AUTO..=LEVEL_DOCUMENT).contains(&value) => {
+            return E_INVALIDARG;
         }
         PROP_UNDOCUMENTED if value != 0 => {
             record(b"IXmlWriter::SetProperty(5)", LEDGER_UNSUPPORTED, value as u64);

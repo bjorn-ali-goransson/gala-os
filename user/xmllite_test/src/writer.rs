@@ -63,6 +63,7 @@
 
 use core::ptr::null_mut;
 
+use crate::props::Spy;
 use crate::used;
 use crate::{Checks, Guid, HResult, Line, Obj, StreamVtable, Wide};
 use crate::{E_NOINTERFACE, E_NOTIMPL, NAME, RELEASE, S_OK};
@@ -550,6 +551,35 @@ fn release(w: Obj) -> u32 {
 // The cases.
 // ---------------------------------------------------------------------
 
+/// The MultiLanguage property is an object, and the writer holds
+/// references to it: one from the moment it is set, a second one once it
+/// starts writing, and it gives both back when it is released -- so a
+/// program may let go of its own reference as soon as it has set the
+/// property. It is never asked for an interface (the reader does the
+/// same, props::objects).
+fn multi_language(c: &mut Checks) -> Result<(), u32> {
+    let mut spy = Spy::new();
+    let mut out = Out::new();
+    let w = writer(c)?;
+    c.hr(set_prop(w, PROP_MULTI_LANGUAGE, spy.obj() as isize), S_OK)?;
+    c.eq(spy.refs as u64, 2)?;
+    c.eq(u64::from(spy.queried), 0)?;
+    // An output of its own is nothing to the property.
+    c.hr(set_output(w, out.obj()), S_OK)?;
+    c.eq(spy.refs as u64, 2)?;
+    // Writing takes the second reference.
+    c.hr(start_element(w, None, Some("r"), None), S_OK)?;
+    c.eq(spy.refs as u64, 3)?;
+    // And once writing has begun the property is locked like the rest,
+    // with no reference given back.
+    c.hr(set_prop(w, PROP_MULTI_LANGUAGE, 0), E_ACCESSDENIED)?;
+    c.eq(spy.refs as u64, 3)?;
+    // Releasing the writer gives both back.
+    c.eq(u64::from(release(w)), 0)?;
+    c.eq(spy.refs as u64, 1)?;
+    c.eq(u64::from(spy.queried), 0)
+}
+
 /// A writer with no output yet.
 fn writer(c: &mut Checks) -> Result<Obj, u32> {
     let mut w: Obj = null_mut();
@@ -663,6 +693,11 @@ fn object(c: &mut Checks) -> Result<(), u32> {
         c.hr(hr, S_OK)?;
         c.eq(v as u64, value as u64)?;
     }
+    // A level outside the enumeration is refused, and the old one stays.
+    c.hr(set_prop(w, PROP_CONFORMANCE_LEVEL, 3), E_INVALIDARG)?;
+    let (hr, v) = get_prop(w, PROP_CONFORMANCE_LEVEL);
+    c.hr(hr, S_OK)?;
+    c.eq(v as u64, LEVEL_FRAGMENT as u64)?;
 
     // With no output, a write is E_UNEXPECTED and Flush is S_OK --
     // except where the call is also out of place, which is answered
@@ -2040,6 +2075,7 @@ fn output_sharing(c: &mut Checks) -> Result<(), u32> {
 /// Every case, in the order they are written above.
 pub fn check(c: &mut Checks) -> Result<(), u32> {
     object(c)?;
+    multi_language(c)?;
     document(c)?;
     indent(c)?;
     escapes(c)?;

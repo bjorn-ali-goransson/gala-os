@@ -932,6 +932,7 @@ fn attributes(c: &mut Checks, reader: Obj) -> Result<(), u32> {
     c.text(p, len, "r")
 }
 
+mod props;
 mod writer;
 
 /// Returns how many checks held, which the `ok` line prints.
@@ -1074,6 +1075,7 @@ fn run() -> Result<u32, u32> {
     c.eq(u64::from(call!(reader, RELEASE, fn() -> u32,)), 0)?;
 
     // The writer, which is the half of xmllite.dll Word reaches next.
+    props::check(&mut c)?;
     writer::check(&mut c)?;
 
     if c.1 != 0 {

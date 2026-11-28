@@ -6589,20 +6589,54 @@ and every byte it writes is measured against Windows' writer.
   another interface is E_NOINTERFACE and an IMalloc passed is ignored
   (gala allocates from the process heap), both recorded. A reader with
   no input has node type None, is not at end of file and its ReadState
-  is **Closed**, measured, where the documentation says Initial;
-  ConformanceLevel is Document and DtdProcessing Prohibit. Its
+  is **Closed**, measured, where the documentation says Initial. Its
   references are its own (no IMalloc, no apartment); the last Release
   frees it.
+- **The properties** (`XmlReaderProperty`, all eight measured, and the
+  reason the whole enumeration is here rather than the one property
+  that stopped Word: Word sets MultiLanguage on a reader before it
+  reads its first part, and a reader that refuses it ends the
+  process). The defaults are MultiLanguage 0, ConformanceLevel
+  Document, RandomAccess 0, XmlResolver 0, DtdProcessing Prohibit,
+  ReadState Closed, MaxElementDepth 256 and MaxEntityExpansion 100000,
+  while the two values past the end of the enumeration are E_NOTIMPL
+  both ways and GetProperty with nowhere to put the answer is
+  E_INVALIDARG -- the pointer is checked before the property, so a
+  property that is E_NOTIMPL with somewhere to put it is E_INVALIDARG
+  without. A conformance level or a DTD setting outside its own
+  enumeration is E_INVALIDARG and the old value stays, ReadState is
+  read-only (E_ACCESSDENIED) and the two limits take any value.
+  MultiLanguage and XmlResolver hold an object with a reference of the
+  reader's own: GetProperty hands the pointer back with another,
+  setting the property to NULL or releasing the reader gives the
+  reader's up, and the object is never asked for an interface -- which
+  is what lets a program let go of its own reference the moment it has
+  set the property. The properties lock at the **first Read** and not
+  at SetInput: after it every SetProperty is E_ACCESSDENIED (the
+  object properties included, and a refused set keeps no reference)
+  while GetProperty still answers, and a reader in the Error state,
+  past the end of its document, or whose input was taken away takes
+  them again. What the kept values do: MaxElementDepth stops the Read
+  that would go past it with SC_E_MAXELEMENTDEPTH and leaves the
+  reader in the Error state (0 is no limit), ConformanceLevel Auto
+  reads exactly as Fragment does, DtdProcessing Parse is taken and
+  parses nothing (recorded), and MaxEntityExpansion is enforced by
+  neither reader -- Windows expands past it and reports nothing, and
+  gala keeps the value and does the same.
 - **The input**: `SetInput` asks the object for IStream and then
   ISequentialStream (anything else is E_NOINTERFACE, recorded) and
   reads it whole in 64 KiB calls until one gives nothing, which is what
   Windows' reader does too -- measured: QueryInterface and Read, no
   Seek, no AddRef or Release, so a program may hand it a stream that can
   do no more. XmlLite reads the document as its caller pulls nodes;
-  gala's scanner works on the whole text, so the decoding error of
-  bytes that are not the encoding they are taken for comes out of
-  SetInput and not of a Read. `SetInput(NULL)` leaves the reader as
-  CreateXmlReader made it, and SetInput again starts it over.
+  gala's scanner works on the whole text, so SetInput decodes it there
+  and then -- but bytes that are not the encoding they are taken for
+  are answered by the **first Read**, which is where Windows answers
+  for them (WC_E_XMLCHARACTER: a character XML does not allow, not an
+  encoding it cannot read), and not by SetInput, which is S_OK and
+  leaves the reader Initial. `SetInput(NULL)` takes the input away and
+  leaves the reader Initial -- not Closed, measured -- with the
+  properties it was given, and SetInput again starts it over.
 - **The nodes** (`reader.rs`): each Read hands out one node -- the XML
   declaration (type 17, `version` and `encoding` its attributes), white
   space (13), a comment (8), an element (1), text (3), a CDATA section
@@ -6624,9 +6658,14 @@ and every byte it writes is measured against Windows' writer.
   MoveToAttributeByName (local name and namespace URI; no namespace
   asked for means the attributes in none) and MoveToElement, with the
   getters answering for the attribute the reader has moved to. A
-  fragment is read when ConformanceLevel is set to Fragment before
-  SetInput (`gala_xml`'s `allow_fragment`): any number of root
-  elements, every other rule unchanged.
+  fragment is read when ConformanceLevel is set to Fragment or Auto
+  before SetInput (`gala_xml`'s `allow_fragment`): any number of root
+  elements, and character data outside them -- the content of an entity
+  rather than a document. Such text is a node like the text inside an
+  element, entities expanded, with the white space in front of it part
+  of it, while a run of white space that markup or the end of the text
+  follows is a Whitespace node of its own; every other rule unchanged
+  (all measured, both levels, in `xmllite_test`'s `LOOSE` table).
 - **A document that is not well formed** fails the Read that meets it,
   with the code XmlLite answers for what the reader was looking for,
   and leaves the reader in the Error ReadState, which every later Read
@@ -6634,9 +6673,9 @@ and every byte it writes is measured against Windows' writer.
   XmlError (`error_code`): 24 of them measured on Windows -- among them
   WC_E_ELEMENTMATCH, WC_E_ROOTELEMENT, WC_E_CDSECT, WC_E_COMMENT,
   WC_E_PI, WC_E_TEXTXMLDECL, WC_E_DTDPROHIBITED, NC_E_QNAMECHARACTER,
-  NC_E_UNDECLAREDPREFIX and NC_E_EMPTYURI -- while
-  SC_E_MAXELEMENTDEPTH (nesting past gala's 256) and MX_E_ENCODING are
-  named from the SDK's `xmllite.h` and not measured. The same table is
+  NC_E_UNDECLAREDPREFIX and NC_E_EMPTYURI, SC_E_MAXELEMENTDEPTH for
+  nesting past MaxElementDepth, and WC_E_XMLCHARACTER for bytes that
+  are not the encoding the document is taken for. The same table is
   the test's (`xmllite_test`'s `BADS`), so a reason added belongs in
   both. One document is refused one Read earlier than Windows refuses
   it: text that ends inside a CDATA section is a CDATA node to
@@ -6646,15 +6685,21 @@ and every byte it writes is measured against Windows' writer.
   difference over.
 - **Limits**, each recorded when a program meets it: ReadValueChunk and
   GetBaseUri are not implemented, a DTD is never parsed (DtdProcessing
-  stays Prohibit, XmlLite's own default), and the attribute getters
-  answer with the position of the element's node since the scan keeps
-  none per attribute.
+  Parse is taken all the same, and the declaration is still refused as
+  Prohibit refuses it), the encoding an XML declaration names is never
+  read -- where it is one gala's decoder does not know, Windows asks
+  the MultiLanguage object for the character set
+  (`IMultiLanguage2::GetCharsetInfo`) and answers MX_E_ENCODING, or
+  MX_E_ENCODINGSIGNATURE with no object to ask -- and the attribute
+  getters answer with the position of the element's node since the scan
+  keeps none per attribute.
 
 The writer is `writer.rs`: `CreateXmlWriter(IID_IXmlWriter, &writer,
 NULL)` and the 32 methods of `IXmlWriter`. What it writes is measured,
 not derived from the standard -- `xmllite_test`'s `writer` module writes
 fifty cases with the same calls on Windows and under gala and compares
-the bytes (2936 checks for the DLL in all, the reader's among them). The
+the bytes (3342 checks for the DLL in all, the reader's and its
+properties' among them). The
 parts a program can tell apart:
 
 - **When bytes reach the stream**: never until they are asked for. Flush
